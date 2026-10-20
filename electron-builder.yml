@@ -1,0 +1,29 @@
+appId: com.dks.tracker
+productName: DKS
+artifactName: DKS-${version}-${os}-${arch}.${ext}
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist-electron/**
+  - package.json
+asar: true
+asarUnpack:
+  - node_modules/better-sqlite3/**
+extraMetadata:
+  main: dist-electron/main/index.js
+win:
+  target:
+    - nsis
+  executableName: DKS
+  publisherName: DKS
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  deleteAppDataOnUninstall: false
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: DKS
+publish:
+  provider: github

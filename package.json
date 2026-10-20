@@ -1,0 +1,60 @@
+{
+  "name": "dks",
+  "version": "0.1.0",
+  "private": true,
+  "description": "DKS offline-first medical and visa office tracker.",
+  "main": "dist-electron/main/index.js",
+  "license": "UNLICENSED",
+  "engines": {
+    "node": ">=20.19.0 <21"
+  },
+  "scripts": {
+    "dev": "npm run build:electron && concurrently --kill-others-on-fail \"vite --host 127.0.0.1\" \"wait-on tcp:5173 && cross-env ELECTRON_RENDERER_URL=http://127.0.0.1:5173 electron .\"",
+    "build:renderer": "vite build",
+    "build:electron": "tsc -p tsconfig.node.json",
+    "build": "npm run build:renderer && npm run build:electron",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "dist": "npm run build && electron-builder --config electron-builder.yml --publish never",
+    "release": "npm run build && electron-builder --config electron-builder.yml --publish always",
+    "preview": "vite preview --outDir dist-electron/renderer"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.49.1",
+    "ag-grid-community": "^32.3.3",
+    "ag-grid-react": "^32.3.3",
+    "auto-launch": "^5.0.6",
+    "better-sqlite3": "^12.4.1",
+    "date-fns": "^4.1.0",
+    "electron-log": "^5.2.0",
+    "electron-updater": "^6.3.9",
+    "jspdf": "^2.5.2",
+    "jspdf-autotable": "^3.8.4",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.15.1",
+    "xlsx": "^0.18.5",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "^6.6.3",
+    "@testing-library/react": "^16.1.0",
+    "@testing-library/user-event": "^14.5.2",
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/node": "^22.10.5",
+    "@types/react": "^18.3.18",
+    "@types/react-dom": "^18.3.5",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "cross-env": "^7.0.3",
+    "electron": "^34.3.3",
+    "electron-builder": "^25.1.8",
+    "jsdom": "^25.0.1",
+    "typescript": "^5.7.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8",
+    "wait-on": "^8.0.1"
+  }
+}
