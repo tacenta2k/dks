@@ -12,6 +12,7 @@ import type { AppView, ThemePreference } from '../lib/types';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell } from './components/AppShell';
 import { createAppStore } from '../lib/store';
+import { createInMemorySheetRepository, type SheetRepository } from '../features/sheet/repository';
 
 export interface AppProps {
   initialView?: AppView;
@@ -19,6 +20,7 @@ export interface AppProps {
   startInWorkspace?: boolean;
   authService?: AuthService;
   demoMode?: boolean;
+  sheetRepository?: SheetRepository;
 }
 
 function getSystemDarkPreference(): boolean {
@@ -39,9 +41,13 @@ export function App({
   startInWorkspace = false,
   authService: providedAuthService,
   demoMode,
+  sheetRepository: providedSheetRepository,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [appStore] = useState(() => createAppStore(authService));
+  const [sheetRepository] = useState<SheetRepository>(
+    () => providedSheetRepository ?? createInMemorySheetRepository(),
+  );
   const [activeView, setActiveView] = useState<AppView>(initialView);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
     initialThemePreference ?? loadThemePreference(),
@@ -128,6 +134,7 @@ export function App({
       userEmail={session?.user.email ?? null}
       health={health}
       isDemoMode={authStatus === 'demo'}
+      sheetRepository={sheetRepository}
       onLogout={() => appStore.getState().signOut()}
     />
   );

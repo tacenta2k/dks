@@ -3,6 +3,8 @@ import { useState } from 'react';
 import { can } from '../../lib/permissions';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
+import { SheetPage } from '../../features/sheet/SheetPage';
+import type { SheetRepository } from '../../features/sheet/repository';
 
 export interface AppShellProps {
   activeView?: AppView;
@@ -14,6 +16,7 @@ export interface AppShellProps {
   userEmail?: string | null;
   health?: SupabaseHealth;
   isDemoMode?: boolean;
+  sheetRepository?: SheetRepository;
   onLogout?: () => void | Promise<void>;
 }
 
@@ -68,25 +71,6 @@ function DashboardPlaceholder() {
   );
 }
 
-function SheetPlaceholder() {
-  return (
-    <div className="placeholder-panel placeholder-panel--sheet">
-      <div className="sheet-preview" aria-hidden="true">
-        <span className="sheet-preview__line sheet-preview__line--header" />
-        <span className="sheet-preview__line" />
-        <span className="sheet-preview__line" />
-        <span className="sheet-preview__line" />
-      </div>
-      <div>
-        <h2>A clear view of every record</h2>
-        <p>
-          The editable visa sheet, expiry dates, and validation tools will be added in the next steps.
-        </p>
-      </div>
-    </div>
-  );
-}
-
 export function AppShell({
   activeView = 'dashboard',
   onNavigate = () => undefined,
@@ -102,6 +86,7 @@ export function AppShell({
     error: null,
   },
   isDemoMode = false,
+  sheetRepository,
   onLogout = () => undefined,
 }: AppShellProps) {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
@@ -265,7 +250,11 @@ export function AppShell({
             ) : null}
           </div>
 
-          {activeView === 'dashboard' ? <DashboardPlaceholder /> : <SheetPlaceholder />}
+          {activeView === 'dashboard' ? (
+            <DashboardPlaceholder />
+          ) : (
+            <SheetPage repository={sheetRepository} role={role} />
+          )}
         </main>
       </div>
     </div>
