@@ -126,8 +126,29 @@ export interface DksLocalNotificationRecord {
   message: string;
   payload: Record<string, unknown>;
   read: boolean;
+  dismissed?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DksLocalNotificationUpdate {
+  id: number | string;
+  read?: boolean;
+  dismissed?: boolean;
+  payload?: Record<string, unknown>;
+}
+
+export interface DksLocalNotificationInput {
+  type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  read?: boolean;
+  dismissed?: boolean;
+}
+
+export interface DksLocalRemoteSnapshot {
+  rows: readonly Record<string, unknown>[];
+  columns: readonly Record<string, unknown>[];
 }
 
 export interface DksLocalBackupResult {
@@ -159,6 +180,10 @@ export interface DksLocalApi {
   }) => Promise<DksLocalRow[]>;
   listAudit: (input?: { limit?: number }) => Promise<DksLocalAuditRecord[]>;
   listNotifications: (input?: { unreadOnly?: boolean }) => Promise<DksLocalNotificationRecord[]>;
+  addNotification: (input: DksLocalNotificationInput) => Promise<DksLocalNotificationRecord>;
+  updateNotification: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
+  applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
+  acknowledgeOutbox: () => Promise<DksLocalSyncState>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
   backupNow: () => Promise<DksLocalBackupResult>;
@@ -209,6 +234,10 @@ const LOCAL_CHANNELS = {
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
   listNotifications: 'dks:local:list-notifications',
+  addNotification: 'dks:local:add-notification',
+  updateNotification: 'dks:local:update-notification',
+  applyRemoteSnapshot: 'dks:local:apply-remote-snapshot',
+  acknowledgeOutbox: 'dks:local:acknowledge-outbox',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
   backupNow: 'dks:local:backup-now',
@@ -324,6 +353,59 @@ function validateListNotifications(value: unknown): void {
   }
 }
 
+function validateUpdateNotification(value: unknown): void {
+  const input = requireRecord(value, 'notification update input');
+  const id = input.id ?? input.notificationId;
+  if (!((typeof id === 'string' && id.trim().length > 0)
+    || (typeof id === 'number' && Number.isSafeInteger(id)))) {
+    throw new TypeError('notification id is required');
+  }
+  if (input.read !== undefined && typeof input.read !== 'boolean') {
+    throw new TypeError('notification read must be a boolean');
+  }
+  if (input.dismissed !== undefined && typeof input.dismissed !== 'boolean') {
+    throw new TypeError('notification dismissed must be a boolean');
+  }
+  if (input.payload !== undefined) {
+    requireRecord(input.payload, 'notification payload');
+  }
+}
+
+function validateAddNotification(value: unknown): void {
+  const input = requireRecord(value, 'notification input');
+  if (typeof input.type !== 'string' || input.type.trim().length === 0) {
+    throw new TypeError('notification type is required');
+  }
+  if (typeof input.message !== 'string' || input.message.trim().length === 0) {
+    throw new TypeError('notification message is required');
+  }
+  requireRecord(input.payload, 'notification payload');
+  if (input.read !== undefined && typeof input.read !== 'boolean') {
+    throw new TypeError('notification read must be a boolean');
+  }
+  if (input.dismissed !== undefined && typeof input.dismissed !== 'boolean') {
+    throw new TypeError('notification dismissed must be a boolean');
+  }
+}
+
+function validateRemoteSnapshot(value: unknown): void {
+  const input = requireRecord(value, 'remote snapshot input');
+  if (!Array.isArray(input.rows) || !Array.isArray(input.columns)) {
+    throw new TypeError('remote snapshot rows and columns must be arrays');
+  }
+  input.rows.forEach((row, index) => {
+    const item = requireRecord(row, `remote rows[${index}]`);
+    requireId(item.id, `remote rows[${index}].id`);
+    requireData(item.data, `remote rows[${index}].data`);
+  });
+  input.columns.forEach((column, index) => {
+    const item = requireRecord(column, `remote columns[${index}]`);
+    requireId(item.id, `remote columns[${index}].id`);
+    requireId(item.name, `remote columns[${index}].name`);
+    requireId(item.type, `remote columns[${index}].type`);
+  });
+}
+
 function validateSyncStatus(value: unknown): void {
   if (typeof value === 'string') {
     if (!LOCAL_SYNC_STATUSES.includes(value as DksLocalSyncStatus)) {
@@ -396,6 +478,10 @@ const localApi: DksLocalApi = Object.freeze({
   importRecords: (input: { records: readonly DksLocalImportRecord[]; options?: Record<string, unknown> }) => invokeLocal<DksLocalRow[]>(LOCAL_CHANNELS.importRecords, input, validateImport),
   listAudit: (input: { limit?: number } = {}) => invokeLocal<DksLocalAuditRecord[]>(LOCAL_CHANNELS.listAudit, input, validateListAudit),
   listNotifications: (input: { unreadOnly?: boolean } = {}) => invokeLocal<DksLocalNotificationRecord[]>(LOCAL_CHANNELS.listNotifications, input, validateListNotifications),
+  addNotification: (input: DksLocalNotificationInput) => invokeLocal<DksLocalNotificationRecord>(LOCAL_CHANNELS.addNotification, input, validateAddNotification),
+  updateNotification: (input: DksLocalNotificationUpdate) => invokeLocal<DksLocalNotificationRecord | null>(LOCAL_CHANNELS.updateNotification, input, validateUpdateNotification),
+  applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.applyRemoteSnapshot, input, validateRemoteSnapshot),
+  acknowledgeOutbox: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeOutbox, undefined),
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.setSyncStatus, input, validateSyncStatus),
   flushSync: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.flushSync, undefined),
   backupNow: () => invokeLocal<DksLocalBackupResult>(LOCAL_CHANNELS.backupNow, undefined),

@@ -9,7 +9,11 @@ import type {
   ColumnInput,
   EntryInput,
   EntryPatch,
+  NotificationInput,
+  NotificationPatch,
   NotificationRecord,
+  RemoteColumnInput,
+  RemoteEntryInput,
 } from './sqlite';
 import type { SyncState, SyncStatus } from './sync';
 
@@ -28,6 +32,10 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
   listNotifications: 'dks:local:list-notifications',
+  addNotification: 'dks:local:add-notification',
+  updateNotification: 'dks:local:update-notification',
+  applyRemoteSnapshot: 'dks:local:apply-remote-snapshot',
+  acknowledgeOutbox: 'dks:local:acknowledge-outbox',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
   backupNow: 'dks:local:backup-now',
@@ -60,6 +68,11 @@ export interface LocalIpcStore {
   setSyncStatus: (state: SyncStatus | (Partial<SyncState> & Pick<SyncState, 'status'>)) => SyncState;
   listAudit: (limit?: number) => readonly AuditRecord[];
   listNotifications: (unreadOnly?: boolean) => readonly NotificationRecord[];
+  addNotification?: (input: NotificationInput) => NotificationRecord;
+  updateNotification?: (id: number | string, patch: NotificationPatch) => NotificationRecord | null;
+  applyRemoteEntry?: (input: RemoteEntryInput) => unknown;
+  applyRemoteColumn?: (input: RemoteColumnInput) => unknown;
+  acknowledgeOutbox?: () => SyncState;
   recordAudit?: (input: Omit<AuditRecord, 'id'>) => AuditRecord;
   enqueueOutbox?: (input: {
     idempotencyKey: string;
@@ -175,6 +188,14 @@ function generatedColumnId(name: string): string {
 
 function idFrom(value: Record<string, unknown>, label = 'id'): string {
   return requiredString(value.id ?? value.rowId ?? value.columnId, label);
+}
+
+function notificationIdFrom(value: Record<string, unknown>): number | string {
+  const candidate = value.id ?? value.notificationId;
+  if (typeof candidate === 'number' && Number.isSafeInteger(candidate)) {
+    return candidate;
+  }
+  return requiredString(candidate, 'notification id');
 }
 
 function getRows(store: LocalIpcStore, includeDeleted: boolean): readonly unknown[] {
@@ -592,6 +613,82 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error('unreadOnly must be a boolean');
       }
       return cloneSerializable(store.listNotifications(input.unreadOnly === true));
+    },
+
+    [LOCAL_IPC_CHANNELS.addNotification]: (payload) => {
+      const input = asRecord(payload, 'notification input');
+      const add = store.addNotification;
+      if (!add) {
+        throw new Error('Notification persistence is unavailable in this local store');
+      }
+      const type = requiredString(input.type, 'notification type');
+      const message = requiredString(input.message, 'notification message');
+      const notification: NotificationInput = {
+        type,
+        message,
+        payload: dataObject(input.payload, 'notification payload'),
+        read: input.read === true,
+        dismissed: input.dismissed === true,
+        ...(typeof input.createdAt === 'string' ? { createdAt: input.createdAt } : {}),
+        ...(typeof input.updatedAt === 'string' ? { updatedAt: input.updatedAt } : {}),
+      };
+      return cloneSerializable(add(notification));
+    },
+
+    [LOCAL_IPC_CHANNELS.updateNotification]: (payload) => {
+      const input = asRecord(payload, 'notification update input');
+      const update = store.updateNotification;
+      if (!update) {
+        throw new Error('Notification updates are unavailable in this local store');
+      }
+      const patch: NotificationPatch = {};
+      if (input.read !== undefined) {
+        if (typeof input.read !== 'boolean') {
+          throw new Error('notification read must be a boolean');
+        }
+        patch.read = input.read;
+      }
+      if (input.dismissed !== undefined) {
+        if (typeof input.dismissed !== 'boolean') {
+          throw new Error('notification dismissed must be a boolean');
+        }
+        patch.dismissed = input.dismissed;
+      }
+      if (input.payload !== undefined) {
+        patch.payload = dataObject(input.payload, 'notification payload');
+      }
+      return cloneSerializable(update(notificationIdFrom(input), patch));
+    },
+
+    [LOCAL_IPC_CHANNELS.applyRemoteSnapshot]: (payload) => {
+      const input = asRecord(payload, 'remote snapshot input');
+      if (!Array.isArray(input.rows) || !Array.isArray(input.columns)) {
+        throw new Error('Remote snapshot rows and columns must be arrays');
+      }
+      if (!store.applyRemoteEntry || !store.applyRemoteColumn) {
+        throw new Error('Remote snapshot application is unavailable in this local store');
+      }
+      input.rows.forEach((value, index) => {
+        const row = asRecord(value, `remote rows[${index}]`);
+        requiredString(row.id, `remote rows[${index}].id`);
+        dataObject(row.data, `remote rows[${index}].data`);
+        store.applyRemoteEntry?.(row as unknown as RemoteEntryInput);
+      });
+      input.columns.forEach((value, index) => {
+        const column = asRecord(value, `remote columns[${index}]`);
+        requiredString(column.id, `remote columns[${index}].id`);
+        requiredString(column.name, `remote columns[${index}].name`);
+        requiredString(column.type, `remote columns[${index}].type`);
+        store.applyRemoteColumn?.(column as unknown as RemoteColumnInput);
+      });
+      return cloneSerializable(storeSnapshot(store));
+    },
+
+    [LOCAL_IPC_CHANNELS.acknowledgeOutbox]: () => {
+      if (!store.acknowledgeOutbox) {
+        throw new Error('Outbox acknowledgement is unavailable in this local store');
+      }
+      return cloneSerializable(store.acknowledgeOutbox());
     },
 
     [LOCAL_IPC_CHANNELS.setSyncStatus]: (payload) => {

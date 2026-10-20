@@ -116,6 +116,28 @@ export interface EntryPatch {
   updated_at?: string;
 }
 
+export interface RemoteEntryInput {
+  id: string;
+  data?: Record<string, unknown>;
+  category?: string | null;
+  deleted?: boolean;
+  deleted_at?: string | null;
+  deletedAt?: string | null;
+  version?: number;
+  created_at?: string;
+  createdAt?: string;
+  updated_at?: string;
+  updatedAt?: string;
+  updated_by?: string | null;
+  updatedBy?: string | null;
+}
+
+export interface RemoteColumnInput extends LocalColumnDefinition {
+  created_at?: string;
+  updated_at?: string;
+  deleted_at?: string | null;
+}
+
 export interface ColumnInput extends LocalColumnDefinition {
   idempotencyKey?: string;
   idempotency_key?: string;
@@ -165,8 +187,25 @@ export interface NotificationRecord {
   message: string;
   payload: Record<string, unknown>;
   read: boolean;
+  dismissed?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface NotificationPatch {
+  read?: boolean;
+  dismissed?: boolean;
+  payload?: Record<string, unknown>;
+}
+
+export interface NotificationInput {
+  type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  read: boolean;
+  dismissed?: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface ConflictRecord {
@@ -267,6 +306,9 @@ const MIGRATIONS: readonly string[] = [
     CREATE INDEX IF NOT EXISTS entries_updated_at_idx ON entries(updated_at DESC);
     CREATE INDEX IF NOT EXISTS outbox_pending_idx ON outbox(status, created_at, id);
     CREATE INDEX IF NOT EXISTS conflicts_unresolved_idx ON conflicts(resolved, created_at DESC);
+  `,
+  `
+    ALTER TABLE notifications ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
   `,
 ];
 
@@ -442,6 +484,59 @@ export class SqliteStore implements BackupDatabaseSource {
     this.ensureOpen();
     const row = this.database.prepare('SELECT * FROM entries WHERE id = ?').get(id) as Record<string, unknown> | undefined;
     return row ? this.entryFromRow(row) : null;
+  }
+
+  /** Apply an already-authoritative remote entry without creating a sync echo. */
+  public applyRemoteEntry(input: RemoteEntryInput): LocalEntry {
+    this.ensureOpen();
+    if (!input.id?.trim()) {
+      throw new Error('Remote entry id is required');
+    }
+    const current = this.getEntry(input.id);
+    const createdAt = input.created_at ?? input.createdAt ?? current?.created_at ?? this.now();
+    const updatedAt = input.updated_at ?? input.updatedAt ?? current?.updated_at ?? createdAt;
+    const deleted = input.deleted === true;
+    const deletedAt = input.deleted_at ?? input.deletedAt ?? (deleted ? current?.deleted_at ?? updatedAt : null);
+    const category = typeof input.category === 'string' && input.category.trim()
+      ? input.category
+      : current?.category ?? 'Employee';
+    const data = input.data ? { ...input.data } : current?.data ?? {};
+    const version = Number.isSafeInteger(input.version) && Number(input.version) > 0
+      ? Number(input.version)
+      : current?.version ?? 1;
+    const updatedBy = input.updated_by ?? input.updatedBy ?? current?.updated_by ?? null;
+
+    this.database.prepare(`
+      INSERT INTO entries (
+        id, data, category, deleted, deleted_at, version,
+        created_at, updated_at, updated_by
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(id) DO UPDATE SET
+        data = excluded.data,
+        category = excluded.category,
+        deleted = excluded.deleted,
+        deleted_at = excluded.deleted_at,
+        version = excluded.version,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        updated_by = excluded.updated_by
+    `).run(
+      input.id,
+      encode(data),
+      category,
+      deleted ? 1 : 0,
+      deletedAt,
+      version,
+      createdAt,
+      updatedAt,
+      updatedBy,
+    );
+
+    const result = this.getEntry(input.id);
+    if (!result) {
+      throw new Error('Remote entry was not saved');
+    }
+    return result;
   }
 
   public listEntries(includeDeleted = false): LocalEntry[] {
@@ -694,6 +789,66 @@ export class SqliteStore implements BackupDatabaseSource {
     return row ? this.columnFromRow(row) : null;
   }
 
+  /** Apply an already-authoritative remote column without creating a sync echo. */
+  public applyRemoteColumn(input: RemoteColumnInput): LocalColumn {
+    this.ensureOpen();
+    if (!input.id?.trim() || !input.name?.trim()) {
+      throw new Error('Remote column id and name are required');
+    }
+    if (!LOCAL_COLUMN_TYPES.has(input.type)) {
+      throw new Error(`Unsupported remote column type: ${String(input.type)}`);
+    }
+    const current = this.getColumn(input.id);
+    const timestamp = input.updated_at ?? current?.updated_at ?? this.now();
+    const createdAt = input.created_at ?? current?.created_at ?? timestamp;
+    const primary = input.isPrimaryExpiry === true || input.is_primary_expiry === true;
+    const deleted = input.deleted === true;
+    const deletedAt = input.deleted_at ?? (deleted ? current?.deleted_at ?? timestamp : null);
+
+    const apply = this.database.transaction(() => {
+      if (primary) {
+        this.database.prepare('UPDATE columns SET is_primary_expiry = 0 WHERE id <> ?').run(input.id);
+      }
+      this.database.prepare(`
+        INSERT INTO columns (
+          id, name, type, options, position, visible, is_primary_expiry,
+          is_passport, deleted, deleted_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+          name = excluded.name,
+          type = excluded.type,
+          options = excluded.options,
+          position = excluded.position,
+          visible = excluded.visible,
+          is_primary_expiry = excluded.is_primary_expiry,
+          is_passport = excluded.is_passport,
+          deleted = excluded.deleted,
+          deleted_at = excluded.deleted_at,
+          updated_at = excluded.updated_at
+      `).run(
+        input.id,
+        input.name,
+        input.type,
+        encode(input.options, {}),
+        input.position ?? current?.position ?? this.listColumns(true).length,
+        input.visible === false ? 0 : 1,
+        primary ? 1 : 0,
+        input.isPassport === true || input.is_passport === true ? 1 : 0,
+        deleted ? 1 : 0,
+        deletedAt,
+        createdAt,
+        timestamp,
+      );
+    });
+    apply();
+
+    const result = this.getColumn(input.id);
+    if (!result) {
+      throw new Error('Remote column was not saved');
+    }
+    return result;
+  }
+
   public listColumns(includeDeleted = false): LocalColumn[] {
     this.ensureOpen();
     const rows = this.database.prepare(
@@ -936,6 +1091,13 @@ export class SqliteStore implements BackupDatabaseSource {
     this.database.prepare('UPDATE outbox SET status = \'failed\', last_error = ? WHERE id = ?').run(message, id);
   }
 
+  /** Mark the local mutation queue complete after a full remote reconciliation. */
+  public acknowledgeOutbox(): SyncState {
+    this.ensureOpen();
+    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE status <> 'synced'").run();
+    return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
+  }
+
   public retryFailedOutbox(): number {
     this.ensureOpen();
     const result = this.database.prepare('UPDATE outbox SET status = \'pending\', last_error = NULL WHERE status = \'failed\'').run();
@@ -1080,17 +1242,18 @@ export class SqliteStore implements BackupDatabaseSource {
     }));
   }
 
-  public addNotification(input: Omit<NotificationRecord, 'id' | 'createdAt' | 'updatedAt'> & { createdAt?: string; updatedAt?: string }): NotificationRecord {
+  public addNotification(input: NotificationInput): NotificationRecord {
     this.ensureOpen();
     const timestamp = input.createdAt ?? this.now();
     const result = this.database.prepare(`
-      INSERT INTO notifications (type, message, payload, read, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO notifications (type, message, payload, read, dismissed, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?)
     `).run(
       input.type,
       input.message,
       encode(input.payload),
       input.read ? 1 : 0,
+      input.dismissed ? 1 : 0,
       timestamp,
       input.updatedAt ?? timestamp,
     );
@@ -1100,8 +1263,47 @@ export class SqliteStore implements BackupDatabaseSource {
       message: input.message,
       payload: input.payload,
       read: input.read,
+      dismissed: input.dismissed ?? false,
       createdAt: timestamp,
       updatedAt: input.updatedAt ?? timestamp,
+    };
+  }
+
+  public updateNotification(id: number | string, patch: NotificationPatch): NotificationRecord | null {
+    this.ensureOpen();
+    const requested = String(id);
+    const current = this.listNotifications().find((notification) => (
+      String(notification.id) === requested
+      || notification.payload.id === id
+      || notification.payload.id === requested
+      || notification.payload.dedupeKey === requested
+    ));
+    if (!current) {
+      return null;
+    }
+
+    const nextPayload = patch.payload ? { ...current.payload, ...patch.payload } : current.payload;
+    const nextRead = patch.read ?? current.read;
+    const nextDismissed = patch.dismissed ?? current.dismissed;
+    const updatedAt = this.now();
+    this.database.prepare(`
+      UPDATE notifications
+         SET payload = ?, read = ?, dismissed = ?, updated_at = ?
+       WHERE id = ?
+    `).run(
+      encode(nextPayload),
+      nextRead ? 1 : 0,
+      nextDismissed ? 1 : 0,
+      updatedAt,
+      current.id,
+    );
+
+    return {
+      ...current,
+      payload: nextPayload,
+      read: nextRead,
+      dismissed: nextDismissed,
+      updatedAt,
     };
   }
 
@@ -1118,6 +1320,7 @@ export class SqliteStore implements BackupDatabaseSource {
       message: String(row.message),
       payload: asRecord(decode(row.payload, {})),
       read: bool(row.read),
+      dismissed: bool(row.dismissed),
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }));

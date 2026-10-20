@@ -32,3 +32,5 @@ export type {
 } from './alert-service';
 export { default as NotificationBell } from './NotificationBell';
 export type { NotificationBellProps } from './NotificationBell';
+export { fromLocalNotification, toLocalNotificationInput } from './local-notifications';
+export type { LocalNotificationInput } from './local-notifications';

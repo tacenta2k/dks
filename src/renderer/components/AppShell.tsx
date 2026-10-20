@@ -3,8 +3,14 @@ import { useState, type ComponentProps } from 'react';
 import { can } from '../../lib/permissions';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
+import type { DksLocalSyncState } from '../../lib/types';
 import { DashboardPage } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
+import { NotificationBell } from '../../features/notifications/NotificationBell';
+import type {
+  NotificationRecord,
+  SnoozeDuration,
+} from '../../features/notifications/alert-service';
 import {
   AdminAuditLogPanel,
   AdminRecycleBinPanel,
@@ -35,8 +41,10 @@ export interface AppShellProps {
   profile?: Profile | null;
   userEmail?: string | null;
   health?: SupabaseHealth;
+  syncStatus?: DksLocalSyncState;
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
+  repositoryRevision?: number;
   dashboardThresholds?: Parameters<typeof DashboardPage>[0]['thresholds'];
   dashboardColors?: Parameters<typeof DashboardPage>[0]['colors'];
   onDashboardFilter?: (filter: DashboardFilterId) => void;
@@ -52,6 +60,10 @@ export interface AppShellProps {
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
+  notifications?: readonly NotificationRecord[];
+  onNotificationMarkRead?: (id: string) => void;
+  onNotificationDismiss?: (id: string) => void;
+  onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
   onLogout?: () => void | Promise<void>;
 }
 
@@ -121,8 +133,15 @@ export function AppShell({
     authenticated: false,
     error: null,
   },
+  syncStatus = {
+    status: 'offline',
+    lastSyncAt: null,
+    lastError: null,
+    pendingCount: 0,
+  },
   isDemoMode = false,
   sheetRepository,
+  repositoryRevision = 0,
   dashboardThresholds,
   dashboardColors,
   onDashboardFilter,
@@ -138,6 +157,10 @@ export function AppShell({
   onSaveExport,
   onSavePdf,
   onPrint,
+  notifications = [],
+  onNotificationMarkRead,
+  onNotificationDismiss,
+  onNotificationSnooze,
   onLogout = () => undefined,
 }: AppShellProps) {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
@@ -166,6 +189,13 @@ export function AppShell({
         : health.configured
           ? 'Supabase checking'
           : 'Supabase not configured';
+  const syncDetail = syncStatus.status === 'syncing'
+    ? 'Syncing local changes…'
+    : syncStatus.status === 'error'
+      ? `Sync error${syncStatus.pendingCount > 0 ? ` · ${syncStatus.pendingCount} pending` : ''}`
+      : syncStatus.pendingCount > 0
+        ? `${healthLabel} · ${syncStatus.pendingCount} pending`
+        : healthLabel;
 
   return (
     <div className="app-shell">
@@ -278,7 +308,7 @@ export function AppShell({
             <span className="sync-status__dot" aria-hidden="true" />
             <div>
               <p className="sync-status__title">Workspace health</p>
-              <p className="sync-status__detail">{healthLabel}</p>
+              <p className="sync-status__detail">{syncDetail}</p>
             </div>
           </div>
           <p className="sidebar__version">STEP 2 · Role-gated workspace</p>
@@ -292,6 +322,12 @@ export function AppShell({
             <p className="top-bar__context">A focused space for your team&apos;s records</p>
           </div>
           <div className="top-bar__actions">
+            <NotificationBell
+              notifications={notifications}
+              onMarkRead={onNotificationMarkRead}
+              onDismiss={onNotificationDismiss}
+              onSnooze={onNotificationSnooze}
+            />
             <div className="theme-control">
               <button
                 className="theme-button"
@@ -388,7 +424,8 @@ export function AppShell({
 
            {effectiveView === 'dashboard' ? (
              <DashboardPage
-               repository={sheetRepository}
+                key={`dashboard-${repositoryRevision}`}
+                repository={sheetRepository}
                thresholds={dashboardThresholds}
                colors={dashboardColors}
                onFilter={onDashboardFilter}
@@ -405,7 +442,7 @@ export function AppShell({
                  onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
                />
                 <SheetPage
-                  key={sheetRevision}
+                   key={`${sheetRevision}-${repositoryRevision}`}
                   repository={sheetRepository}
                   hideAdminActions
                   role={role}
@@ -413,7 +450,7 @@ export function AppShell({
              </div>
            ) : effectiveView === 'recycle-bin' ? (
              <AdminRecycleBinPanel
-               key={`recycle-bin-${sheetRevision}`}
+                key={`recycle-bin-${sheetRevision}-${repositoryRevision}`}
                repository={sheetRepository}
                role={role}
                actor={actor}

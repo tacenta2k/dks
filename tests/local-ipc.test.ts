@@ -173,6 +173,90 @@ describe('offline local IPC bridge', () => {
     expect(store.deleteColumn).not.toHaveBeenCalled();
   });
 
+  it('updates a persisted notification by its stable renderer id', async () => {
+    const store = createFakeStore();
+    const updateNotification = vi.fn(() => ({
+      id: 1,
+      type: 'expiry',
+      message: 'Soon',
+      payload: { id: 'expiry:row-1:2026-01-08:7' },
+      read: true,
+      dismissed: false,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:01:00.000Z',
+    }));
+    store.updateNotification = updateNotification;
+    const handlers = createLocalIpcHandlers({ store });
+
+    const result = await handlers[LOCAL_IPC_CHANNELS.updateNotification]({
+      id: 'expiry:row-1:2026-01-08:7',
+      read: true,
+    });
+
+    expect(updateNotification).toHaveBeenCalledWith('expiry:row-1:2026-01-08:7', {
+      read: true,
+      dismissed: undefined,
+      payload: undefined,
+    });
+    expect(result).toEqual(expect.objectContaining({ read: true }));
+  });
+
+  it('persists a newly evaluated notification without exposing the database handle', async () => {
+    const store = createFakeStore();
+    const addNotification = vi.fn((input) => ({
+      id: 2,
+      ...input,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    }));
+    store.addNotification = addNotification;
+    const handlers = createLocalIpcHandlers({ store });
+
+    const result = await handlers[LOCAL_IPC_CHANNELS.addNotification]({
+      type: 'expiry',
+      message: 'Soon',
+      payload: { id: 'expiry:row-1:2026-01-08:7' },
+      read: false,
+      dismissed: false,
+    });
+
+    expect(addNotification).toHaveBeenCalledWith({
+      type: 'expiry',
+      message: 'Soon',
+      payload: { id: 'expiry:row-1:2026-01-08:7' },
+      read: false,
+      dismissed: false,
+    });
+    expect(result).toEqual(expect.objectContaining({ id: 2 }));
+  });
+
+  it('applies remote rows and acknowledges the local mutation queue', async () => {
+    const store = createFakeStore();
+    const applyRemoteEntry = vi.fn((input) => ({ id: input.id, data: input.data }));
+    const applyRemoteColumn = vi.fn((input) => ({ id: input.id, name: input.name, type: input.type }));
+    const acknowledgeOutbox = vi.fn(() => ({
+      status: 'healthy' as const,
+      lastSyncAt: '2026-01-02T00:00:00.000Z',
+      lastError: null,
+      pendingCount: 0,
+    }));
+    store.applyRemoteEntry = applyRemoteEntry;
+    store.applyRemoteColumn = applyRemoteColumn;
+    store.acknowledgeOutbox = acknowledgeOutbox;
+    const handlers = createLocalIpcHandlers({ store });
+
+    await handlers[LOCAL_IPC_CHANNELS.applyRemoteSnapshot]({
+      rows: [{ id: 'remote-entry', data: { name: 'Remote' } }],
+      columns: [{ id: 'remote-column', name: 'Country', type: 'text' }],
+    });
+    const status = await handlers[LOCAL_IPC_CHANNELS.acknowledgeOutbox](undefined);
+
+    expect(applyRemoteEntry).toHaveBeenCalledWith({ id: 'remote-entry', data: { name: 'Remote' } });
+    expect(applyRemoteColumn).toHaveBeenCalledWith({ id: 'remote-column', name: 'Country', type: 'text' });
+    expect(acknowledgeOutbox).toHaveBeenCalledTimes(1);
+    expect(status).toEqual(expect.objectContaining({ status: 'healthy', pendingCount: 0 }));
+  });
+
   it('registers handlers through an injected ipcMain and closes/flushed local state', async () => {
     const store = createFakeStore();
     const registered = new Map<string, (...args: any[]) => unknown>();

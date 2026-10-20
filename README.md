@@ -1,9 +1,10 @@
 # DKS
 
-DKS is an offline-first Electron desktop workspace for medical and visa office
-records. STEP 1 provides the reproducible Electron/Vite shell, secure main /
-preload boundary, light and dark theme preview, tray lifecycle, and the test
-toolchain used by later steps.
+DKS is an offline-first Electron desktop workspace for an Oman medical and visa
+office. It provides a role-gated visa sheet, local SQLite persistence, Supabase
+reconciliation, expiry alerts, Windows notifications, dashboards, and admin
+reporting/export tools. The renderer never receives a Node or database handle;
+all local persistence crosses the context-isolated preload bridge.
 
 ## Requirements
 
@@ -13,6 +14,11 @@ toolchain used by later steps.
   and production build
 - Python 3, a C/C++ compiler, and `make` when installing `better-sqlite3` from
   source
+
+The project pins Node `20.19.0` because the native SQLite dependency must be
+built against the runtime that launches Electron. Do not install dependencies
+globally or use `sudo`; the Dockerfile installs the Linux build toolchain inside
+the container.
 
 Use the pinned runtime with nvm:
 
@@ -42,6 +48,11 @@ Only the Supabase URL and publishable key belong in this file. Do not put a
 service-role key, database password, token, or signing credential in the
 repository or renderer configuration.
 
+For a configured cloud workspace, create the two Auth users first and then run
+`supabase/schema.sql` in the Supabase SQL editor. The script seeds the exact
+admin and office profile IDs required by DKS and enables authenticated-only RLS.
+The app can still run its local/demo workflow when Supabase is not configured.
+
 ## Run in development
 
 Build the Electron main/preload TypeScript once, start the Vite development
@@ -53,6 +64,21 @@ npm run dev
 
 The renderer is served at `http://127.0.0.1:5173`. Close the DKS window to
 hide it in the tray; use the tray's Exit action to stop the process.
+
+## User flows
+
+- **Office users** can maintain rows, use search/status/category filters, renew
+  visas, and delete only empty non-primary columns.
+- **Administrators** can change the primary expiry column, import CSV/XLSX,
+  export CSV/XLSX, print or save PDF reports, inspect the recycle bin/audit log,
+  manage thresholds and notification days, and create backups.
+- The sheet's primary expiry column drives `Days Left`, status colors, the
+  dashboard, in-app notification bell, OS notifications, and daily/weekly
+  summary records.
+- Changes are written to the local SQLite cache first. When an authenticated
+  Supabase connection is available, the app reconciles entries and columns with
+  `updated_at` last-write-wins semantics, keeps the outbox idempotent, and
+  refreshes the visible sheet after realtime or scheduled sync.
 
 ## Checks and tests
 
@@ -122,6 +148,8 @@ The Docker image installs the native build toolchain, runs `npm ci`, builds the
 renderer and Electron bundles, and serves the production renderer preview:
 
 ```bash
+docker build --tag dks:local .
+docker run --rm --publish 4173:4173 dks:local
 ```
 
 Open `http://localhost:4173` to inspect the built renderer. A desktop Electron

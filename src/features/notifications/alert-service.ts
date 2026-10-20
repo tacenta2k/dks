@@ -53,6 +53,7 @@ export interface ExpiryNotificationRecord {
   createdAt: string;
   read: boolean;
   dismissed: boolean;
+  snoozedUntil?: string;
 }
 
 export type SummaryKind = 'daily' | 'weekly';

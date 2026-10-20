@@ -26,10 +26,15 @@ export function NotificationBell({
   const [open, setOpen] = useState(false);
   const [customUntil, setCustomUntil] = useState<Record<string, string>>({});
   const unreadCount = notifications.filter((notification) => (
-    notification.read !== true && notification.dismissed !== true
+    notification.read !== true
+    && notification.dismissed !== true
+    && !(notification.kind === 'expiry' && notification.snoozedUntil && new Date(notification.snoozedUntil).getTime() > Date.now())
   )).length;
   const visible = useMemo(
-    () => [...notifications].filter((notification) => notification.dismissed !== true),
+    () => [...notifications].filter((notification) => (
+      notification.dismissed !== true
+      && !(notification.kind === 'expiry' && notification.snoozedUntil && new Date(notification.snoozedUntil).getTime() > Date.now())
+    )),
     [notifications],
   );
 

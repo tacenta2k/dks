@@ -44,4 +44,60 @@ describe('protected local SQLite cache and outbox', () => {
     expect(result.conflict).toBe(true);
     store.close();
   });
+
+  it('persists notification state by its stable renderer id', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+    const created = store.addNotification({
+      type: 'expiry',
+      message: 'Amina expires in 7 days.',
+      payload: { id: 'expiry:entry-1:2026-01-08:7', kind: 'expiry' },
+      read: false,
+      dismissed: false,
+    });
+
+    expect(store.listNotifications()).toHaveLength(1);
+    const updated = store.updateNotification('expiry:entry-1:2026-01-08:7', {
+      read: true,
+      dismissed: true,
+      payload: { id: 'expiry:entry-1:2026-01-08:7', kind: 'expiry', snoozedUntil: null },
+    });
+
+    expect(updated?.id).toBe(created.id);
+    expect(store.listNotifications()[0]).toMatchObject({
+      read: true,
+      dismissed: true,
+      payload: { snoozedUntil: null },
+    });
+    store.close();
+  });
+
+  it('applies a remote snapshot without creating a local outbox echo', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+
+    store.applyRemoteEntry({
+      id: 'remote-entry',
+      data: { name: 'Remote' },
+      category: 'Client',
+      deleted: false,
+      created_at: '2026-01-01T00:00:00.000Z',
+      updated_at: '2026-01-02T00:00:00.000Z',
+      version: 2,
+    });
+    store.applyRemoteColumn({
+      id: 'remote-column',
+      name: 'Country',
+      type: 'text',
+      options: {},
+      position: 2,
+      visible: true,
+      is_primary_expiry: false,
+      is_passport: false,
+      updated_at: '2026-01-02T00:00:00.000Z',
+    });
+
+    expect(store.getEntry('remote-entry')?.data).toEqual({ name: 'Remote' });
+    expect(store.getColumn('remote-column')?.name).toBe('Country');
+    expect(store.listOutbox()).toHaveLength(0);
+    store.close();
+  });
 });

@@ -137,8 +137,29 @@ export interface DksLocalNotificationRecord {
   message: string;
   payload: Record<string, unknown>;
   read: boolean;
+  dismissed?: boolean;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface DksLocalNotificationUpdate {
+  id: number | string;
+  read?: boolean;
+  dismissed?: boolean;
+  payload?: Record<string, unknown>;
+}
+
+export interface DksLocalNotificationInput {
+  type: string;
+  message: string;
+  payload: Record<string, unknown>;
+  read?: boolean;
+  dismissed?: boolean;
+}
+
+export interface DksLocalRemoteSnapshot {
+  rows: readonly Record<string, unknown>[];
+  columns: readonly Record<string, unknown>[];
 }
 
 export interface DksLocalBackupResult {
@@ -170,6 +191,10 @@ export interface DksLocalApi {
   }) => Promise<DksLocalRow[]>;
   listAudit: (input?: { limit?: number }) => Promise<DksLocalAuditRecord[]>;
   listNotifications: (input?: { unreadOnly?: boolean }) => Promise<DksLocalNotificationRecord[]>;
+  addNotification?: (input: DksLocalNotificationInput) => Promise<DksLocalNotificationRecord>;
+  updateNotification?: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
+  applyRemoteSnapshot?: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
+  acknowledgeOutbox?: () => Promise<DksLocalSyncState>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
   backupNow: () => Promise<DksLocalBackupResult>;
