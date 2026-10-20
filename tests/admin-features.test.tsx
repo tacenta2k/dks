@@ -70,6 +70,7 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
+    expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
     fireEvent.click(screen.getByRole('button', { name: 'Export Excel' }));
 
