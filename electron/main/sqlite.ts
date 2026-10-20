@@ -630,6 +630,44 @@ export class SqliteStore implements BackupDatabaseSource {
     });
   }
 
+  /** Permanently remove an entry after the caller has enforced admin access. */
+  public permanentDeleteEntry(
+    id: string,
+    idempotencyKey?: string,
+    updatedBy?: string | null,
+  ): LocalEntry | null {
+    this.ensureOpen();
+    const current = this.getEntry(id);
+    if (!current) {
+      return null;
+    }
+
+    const timestamp = this.now();
+    const outboxKey = idempotencyKey
+      ?? `entry:permanent-delete:${id}:${timestamp}:${this.idFactory()}`;
+    const execute = this.database.transaction(() => {
+      this.database.prepare('DELETE FROM entries WHERE id = ?').run(id);
+      this.enqueueOutbox({
+        idempotencyKey: outboxKey,
+        operation: 'permanent_delete',
+        entityType: 'entry',
+        entityId: id,
+        payload: { id, deleted: true, deleted_at: timestamp },
+      });
+      this.recordAudit({
+        actor: updatedBy ?? null,
+        entityType: 'entry',
+        entityId: id,
+        action: 'permanent_delete',
+        before: current,
+        after: null,
+        createdAt: timestamp,
+      });
+    });
+    execute();
+    return current;
+  }
+
   private columnFromRow(row: Record<string, unknown>): LocalColumn {
     const options = decode<LocalColumnDefinition['options']>(row.options, {});
     return {

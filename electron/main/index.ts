@@ -18,9 +18,16 @@ import {
   UPDATER_STATUS_CHANNEL,
   type UpdateState,
   type UpdaterService,
+  createUpdaterScheduler,
+  type UpdaterScheduler,
 } from './updater';
 import { createTray, destroyTray, type TrayActions } from './tray';
 import type { Tray } from 'electron';
+import { createSqliteStore, type SqliteStore } from './sqlite';
+import {
+  registerLocalIpcHandlers,
+  type LocalIpcMain,
+} from './local-ipc';
 
 export const APP_VERSION_CHANNEL = 'dks:app-version' as const;
 export const MINIMIZE_TO_TRAY_CHANNEL = 'dks:minimize-to-tray' as const;
@@ -50,6 +57,9 @@ let lifecycleStarted = false;
 let ipcHandlersRegistered = false;
 let notificationService: NotificationService | undefined;
 let updaterService: UpdaterService | undefined;
+let updaterScheduler: UpdaterScheduler | undefined;
+let localStore: SqliteStore | undefined;
+let unregisterLocalIpc: (() => void) | undefined;
 
 function safeInvoke(action: () => void): void {
   try {
@@ -233,9 +243,59 @@ export function requestLogout(): void {
 
 export function requestQuit(): void {
   quitting = true;
+  updaterScheduler?.stop();
+  updaterScheduler = undefined;
   destroyTray(tray);
   tray = null;
   safeInvoke(() => app.quit());
+}
+
+function closeLocalStore(): void {
+  if (unregisterLocalIpc) {
+    safeInvoke(() => unregisterLocalIpc?.());
+    unregisterLocalIpc = undefined;
+  }
+
+  if (!localStore) {
+    return;
+  }
+
+  const store = localStore;
+  localStore = undefined;
+  safeInvoke(() => {
+    void store.flush().catch(() => undefined);
+  });
+  safeInvoke(() => {
+    store.close();
+  });
+}
+
+/**
+ * Open exactly one app-owned local store after Electron is ready. The user
+ * data path stays in the main process; only structured records cross IPC.
+ */
+function openLocalStore(): void {
+  if (localStore) {
+    return;
+  }
+
+  let opened: SqliteStore | undefined;
+  try {
+    const userDataPath = app.getPath('userData');
+    opened = createSqliteStore({ userDataPath });
+    localStore = opened;
+    unregisterLocalIpc = registerLocalIpcHandlers({
+      ipcMain: ipcMain as unknown as LocalIpcMain,
+      store: localStore,
+      backupDirectory: path.join(userDataPath, 'backups'),
+    });
+  } catch {
+    // The shell and cloud features can still start when local storage is not
+    // available; the renderer simply observes an absent local bridge.
+    safeInvoke(() => opened?.close());
+    localStore = undefined;
+    unregisterLocalIpc = undefined;
+  }
 }
 
 export function acquireSingleInstanceLock(): boolean {
@@ -302,6 +362,8 @@ function createDksTray(): Tray | null {
 function installLifecycleListeners(): void {
   app.on('before-quit', () => {
     quitting = true;
+    updaterScheduler?.stop();
+    closeLocalStore();
   });
 
   app.on('window-all-closed', () => {
@@ -336,6 +398,7 @@ export async function startMainProcess(): Promise<boolean> {
   const startHidden = shouldStartHidden();
   configureAutoLaunch(true);
 
+  openLocalStore();
   notificationService = createNotificationService();
   updaterService = createUpdaterService({ enabled: Boolean(app.isPackaged) });
   updaterService.onStatus((state) => {
@@ -345,9 +408,9 @@ export async function startMainProcess(): Promise<boolean> {
 
   createMainWindow({ startHidden });
   tray = createDksTray();
-
   if (app.isPackaged) {
-    void updaterService.checkForUpdates();
+    updaterScheduler = createUpdaterScheduler(updaterService);
+    void updaterScheduler.start();
   }
 
   return true;

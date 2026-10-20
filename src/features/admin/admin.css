@@ -1,0 +1,167 @@
+.admin-integrated-sheet {
+  display: grid;
+  gap: 20px;
+}
+
+/* SheetPage still owns its legacy action group; the integrated admin toolbar is
+   the single live surface rendered by AppShell. */
+.admin-integrated-sheet .sheet-toolbar__admin {
+  display: none;
+}
+
+.admin-sheet-actions,
+.admin-panel {
+  min-width: 0;
+}
+
+.admin-sheet-actions {
+  display: grid;
+  gap: 14px;
+  padding: 18px 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: 0 12px 28px var(--color-shadow);
+}
+
+.admin-sheet-actions__heading,
+.admin-dialog__header,
+.admin-dialog__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.admin-sheet-actions__heading h2,
+.admin-dialog__header h2 {
+  margin: 3px 0 0;
+  color: var(--color-text);
+  font-size: 18px;
+  letter-spacing: -0.02em;
+}
+
+.admin-sheet-actions__buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-sheet-actions__loading,
+.admin-inline-message,
+.admin-dialog__header p,
+.admin-dialog__warning {
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.admin-eyebrow {
+  margin: 0;
+  color: var(--color-primary-strong);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.admin-inline-message {
+  margin: 0;
+}
+
+.admin-inline-message--error {
+  color: #c53b50;
+}
+
+.admin-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.admin-dialog-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #0d1424 52%, transparent);
+}
+
+.admin-dialog {
+  display: grid;
+  width: min(100%, 760px);
+  max-height: min(86vh, 720px);
+  gap: 16px;
+  overflow: auto;
+  padding: 24px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  box-shadow: 0 24px 70px var(--color-shadow-strong);
+}
+
+.admin-dialog__header p,
+.admin-dialog__warning {
+  margin: 5px 0 0;
+}
+
+.admin-dialog__warning {
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: var(--color-primary-soft);
+}
+
+.admin-dialog__table-wrap {
+  overflow: auto;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+}
+
+.admin-dialog table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+
+.admin-dialog th,
+.admin-dialog td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.admin-dialog th {
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.admin-dialog tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+@media (max-width: 620px) {
+  .admin-sheet-actions__heading,
+  .admin-dialog__header,
+  .admin-dialog__actions {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+@media print {
+  .admin-sheet-actions,
+  .admin-dialog-backdrop,
+  .recycle-bin-page,
+  .audit-log-page {
+    display: none !important;
+  }
+}

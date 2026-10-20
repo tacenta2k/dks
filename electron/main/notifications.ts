@@ -31,6 +31,18 @@ export interface NotificationService {
   show: (request: unknown) => DksNotificationResult;
 }
 
+export interface NotificationSchedulerOptions {
+  intervalMs?: number;
+  setInterval?: (callback: () => void, milliseconds: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
+}
+
+export interface NotificationScheduler {
+  start: () => Promise<void>;
+  stop: () => void;
+  isRunning: () => boolean;
+}
+
 export const NOTIFICATION_SHOW_CHANNEL = 'dks:notifications:show' as const;
 
 const MAX_TITLE_LENGTH = 120;
@@ -114,6 +126,75 @@ export function createNotificationService(
     },
   };
 }
+
+const DEFAULT_NOTIFICATION_INTERVAL_MS = 60 * 60 * 1_000;
+
+/**
+ * Keep hourly row evaluation outside the OS boundary.  The callback normally
+ * reads local rows, evaluates summaries, stores records, and calls `show`.
+ * Every callback and timer operation is guarded so offline/startup failures do
+ * not terminate Electron.
+ */
+export function createNotificationScheduler(
+  check: () => void | Promise<void>,
+  options: NotificationSchedulerOptions = {},
+): NotificationScheduler {
+  const intervalMs = Number.isFinite(options.intervalMs) && (options.intervalMs ?? 0) > 0
+    ? options.intervalMs as number
+    : DEFAULT_NOTIFICATION_INTERVAL_MS;
+  const schedule = options.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
+  const cancel = options.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
+  let handle: unknown;
+  let running = false;
+
+  const run = async (): Promise<void> => {
+    try {
+      await check();
+    } catch {
+      // Notification evaluation is best effort and must be quiet when offline.
+    }
+  };
+
+  return {
+    start: async () => {
+      if (running) {
+        return;
+      }
+      running = true;
+      await run();
+      if (!running) {
+        return;
+      }
+      try {
+        handle = schedule(() => {
+          if (!running) {
+            return;
+          }
+          void run();
+        }, intervalMs);
+      } catch {
+        handle = undefined;
+      }
+    },
+    stop: () => {
+      if (!running) {
+        return;
+      }
+      running = false;
+      if (handle !== undefined) {
+        try {
+          cancel(handle);
+        } catch {
+          // Shutdown is best effort.
+        }
+        handle = undefined;
+      }
+    },
+    isRunning: () => running,
+  };
+}
+
+export const scheduleNotificationChecks = createNotificationScheduler;
 
 /** A convenient default for callers that do not need dependency injection. */
 export const notificationService = createNotificationService();

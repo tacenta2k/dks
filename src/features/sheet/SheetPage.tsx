@@ -38,6 +38,8 @@ export interface SheetPageProps {
   repository?: SheetRepository;
   role?: Role | string | null;
   today?: string | Date;
+  /** The host can render the richer administrator toolbar outside the grid. */
+  hideAdminActions?: boolean;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -69,6 +71,7 @@ export function SheetPage({
   repository: providedRepository,
   role = 'office',
   today,
+  hideAdminActions = false,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -333,14 +336,16 @@ export function SheetPage({
                 Group by Category
               </button>
             </div>
-            <div className="sheet-toolbar__admin" aria-label="Admin sheet actions">
-              {can(role, 'export') ? <button className="button button--quiet" type="button">Export</button> : null}
-              {can(role, 'import') ? <button className="button button--quiet" type="button">Import</button> : null}
-              {can(role, 'print') ? <button className="button button--quiet" type="button">Print</button> : null}
-              {can(role, 'settings') ? <button className="button button--quiet" type="button">Settings</button> : null}
-              {can(role, 'recycleBin') ? <button className="button button--quiet" type="button">Recycle bin</button> : null}
-              {can(role, 'auditLog') ? <button className="button button--quiet" type="button">Audit log</button> : null}
-            </div>
+            {!hideAdminActions ? (
+              <div className="sheet-toolbar__admin" aria-label="Admin sheet actions">
+                {can(role, 'export') ? <button className="button button--quiet" type="button">Export</button> : null}
+                {can(role, 'import') ? <button className="button button--quiet" type="button">Import</button> : null}
+                {can(role, 'print') ? <button className="button button--quiet" type="button">Print</button> : null}
+                {can(role, 'settings') ? <button className="button button--quiet" type="button">Settings</button> : null}
+                {can(role, 'recycleBin') ? <button className="button button--quiet" type="button">Recycle bin</button> : null}
+                {can(role, 'auditLog') ? <button className="button button--quiet" type="button">Audit log</button> : null}
+              </div>
+            ) : null}
           </div>
 
           <div className="sheet-filter-bar">

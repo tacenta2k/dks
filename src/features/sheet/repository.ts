@@ -8,12 +8,16 @@ import { isValidIsoDate } from '../../lib/date';
 import type {
   ColumnInput,
   RenewalRecord,
+  SheetAuditEntry,
+  SheetAuditOptions,
+  SheetImportRecord,
   SheetRow,
   SheetSnapshot,
   SheetTemplate,
 } from './types';
 
 export interface SheetRepository {
+  setRole?(role: string): void;
   getColumns(): Promise<ColumnDefinition[]>;
   getRows(): Promise<SheetRow[]>;
   getTemplates(): Promise<SheetTemplate[]>;
@@ -25,6 +29,12 @@ export interface SheetRepository {
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   duplicateRow(rowId: string): Promise<SheetRow>;
   softDeleteRow(rowId: string): Promise<SheetRow>;
+  /** Optional admin methods keep older adapters and test doubles assignable. */
+  restoreRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
+  permanentDeleteRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow | null>;
+  getAuditHistory?(): Promise<SheetAuditEntry[]>;
+  createRows?(records: readonly SheetImportRecord[], options?: SheetAuditOptions): Promise<SheetRow[]>;
+  importRows?(records: readonly SheetImportRecord[], options?: SheetAuditOptions): Promise<SheetRow[]>;
   markRenewed(
     rowId: string,
     expiryColumnId: string,
@@ -132,11 +142,14 @@ export class InMemorySheetRepository implements SheetRepository {
 
   private renewals: RenewalRecord[];
 
+  private auditHistory: SheetAuditEntry[];
+
   constructor(snapshot: Partial<SheetSnapshot> = {}, templates?: SheetTemplate[]) {
     this.columns = normalizeColumns(snapshot.columns ?? []);
     this.rows = copyRows(snapshot.rows ?? []);
     this.templates = templates?.map((template) => clone(template)) ?? [visaTemplate()];
     this.renewals = [];
+    this.auditHistory = [];
   }
 
   async getColumns(): Promise<ColumnDefinition[]> {
@@ -222,7 +235,40 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: timestamp,
     };
     this.rows = [...this.rows, row];
+    this.recordAudit('create', { rowId: row.id }, undefined);
     return clone(row);
+  }
+
+  async createRows(
+    records: readonly SheetImportRecord[],
+    options: SheetAuditOptions = {},
+  ): Promise<SheetRow[]> {
+    const created: SheetRow[] = [];
+    for (const record of records) {
+      created.push(await this.createRow(record.data, record.category ?? null));
+    }
+    if (records.length > 0) {
+      this.recordAudit('create_many', {
+        importedRows: records.length,
+        ...(options.fileName ? { fileName: options.fileName } : {}),
+      }, options);
+    }
+    return created;
+  }
+
+  async importRows(
+    records: readonly SheetImportRecord[],
+    options: SheetAuditOptions = {},
+  ): Promise<SheetRow[]> {
+    const created = await this.createRows(records, options);
+    this.recordAudit('import', {
+      fileName: options.fileName ?? null,
+      importedRows: created.length,
+      sourceRows: records
+        .map((record) => record.sourceRowNumber)
+        .filter((rowNumber): rowNumber is number => rowNumber !== undefined),
+    }, options);
+    return created;
   }
 
   async updateRow(
@@ -247,6 +293,7 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: now(),
     };
     this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? updated : row);
+    this.recordAudit('update', { rowId });
     return clone(updated);
   }
 
@@ -271,7 +318,37 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: now(),
     };
     this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? updated : row);
+    this.recordAudit('soft_delete', { rowId });
     return clone(updated);
+  }
+
+  async restoreRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {
+    const index = this.rows.findIndex((row) => row.id === rowId);
+    if (index < 0) {
+      throw new Error(`Unknown sheet row: ${rowId}`);
+    }
+
+    const timestamp = now();
+    const restored: SheetRow = {
+      ...this.rows[index],
+      deleted: false,
+      updatedAt: timestamp,
+      updated_at: timestamp,
+    };
+    this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? restored : row);
+    this.recordAudit('restore', { rowId }, options);
+    return clone(restored);
+  }
+
+  async permanentDeleteRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow | null> {
+    const index = this.rows.findIndex((row) => row.id === rowId);
+    if (index < 0) {
+      return null;
+    }
+
+    const [removed] = this.rows.splice(index, 1);
+    this.recordAudit('permanent_delete', { rowId }, options);
+    return removed ? clone(removed) : null;
   }
 
   async markRenewed(
@@ -324,6 +401,28 @@ export class InMemorySheetRepository implements SheetRepository {
 
   async getRenewalHistory(rowId?: string): Promise<RenewalRecord[]> {
     return clone(rowId ? this.renewals.filter((renewal) => renewal.rowId === rowId) : this.renewals);
+  }
+
+  async getAuditHistory(): Promise<SheetAuditEntry[]> {
+    return clone(this.auditHistory);
+  }
+
+  private recordAudit(
+    action: string,
+    details: Record<string, unknown> = {},
+    options: SheetAuditOptions = {},
+  ): void {
+    this.auditHistory = [
+      ...this.auditHistory,
+      {
+        id: makeId('audit'),
+        action,
+        actorId: options.actorId ?? null,
+        actor: options.actor ?? null,
+        timestamp: now(),
+        details,
+      },
+    ];
   }
 }
 

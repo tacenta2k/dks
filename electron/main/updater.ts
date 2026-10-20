@@ -39,6 +39,18 @@ export interface UpdaterService {
   onStatus: (listener: (state: UpdateState) => void) => () => void;
 }
 
+export interface UpdaterSchedulerOptions {
+  intervalMs?: number;
+  setInterval?: (callback: () => void, milliseconds: number) => unknown;
+  clearInterval?: (handle: unknown) => void;
+}
+
+export interface UpdaterScheduler {
+  start: () => Promise<void>;
+  stop: () => void;
+  isRunning: () => boolean;
+}
+
 export const UPDATER_CHECK_CHANNEL = 'dks:updater:check' as const;
 export const UPDATER_RESTART_CHANNEL = 'dks:updater:restart' as const;
 export const UPDATER_STATUS_CHANNEL = 'dks:updater:status' as const;
@@ -171,3 +183,72 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     },
   };
 }
+
+const DEFAULT_UPDATE_INTERVAL_MS = 60 * 60 * 1_000;
+
+/**
+ * Run one safe launch check and then hourly checks.  The timer and service are
+ * injectable so startup can be tested without a real network or an open timer.
+ */
+export function createUpdaterScheduler(
+  service: Pick<UpdaterService, 'checkForUpdates'>,
+  options: UpdaterSchedulerOptions = {},
+): UpdaterScheduler {
+  const intervalMs = Number.isFinite(options.intervalMs) && (options.intervalMs ?? 0) > 0
+    ? options.intervalMs as number
+    : DEFAULT_UPDATE_INTERVAL_MS;
+  const schedule = options.setInterval ?? ((callback, milliseconds) => setInterval(callback, milliseconds));
+  const cancel = options.clearInterval ?? ((handle) => clearInterval(handle as ReturnType<typeof setInterval>));
+  let handle: unknown;
+  let running = false;
+
+  const check = async (): Promise<void> => {
+    try {
+      await service.checkForUpdates();
+    } catch {
+      // A scheduler must never turn a transient updater/network failure into a
+      // process-level rejection.
+    }
+  };
+
+  return {
+    start: async () => {
+      if (running) {
+        return;
+      }
+      running = true;
+      await check();
+      if (!running) {
+        return;
+      }
+      try {
+        handle = schedule(() => {
+          if (!running) {
+            return;
+          }
+          void check();
+        }, intervalMs);
+      } catch {
+        // Timers can be unavailable in restricted test/host environments.
+        handle = undefined;
+      }
+    },
+    stop: () => {
+      if (!running) {
+        return;
+      }
+      running = false;
+      if (handle !== undefined) {
+        try {
+          cancel(handle);
+        } catch {
+          // Shutdown is best effort.
+        }
+        handle = undefined;
+      }
+    },
+    isRunning: () => running,
+  };
+}
+
+export const scheduleUpdaterChecks = createUpdaterScheduler;

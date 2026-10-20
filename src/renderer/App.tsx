@@ -12,7 +12,8 @@ import type { AppView, ThemePreference } from '../lib/types';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell } from './components/AppShell';
 import { createAppStore } from '../lib/store';
-import { createInMemorySheetRepository, type SheetRepository } from '../features/sheet/repository';
+import { createElectronSheetRepository } from '../features/sheet/electron-repository';
+import type { SheetRepository } from '../features/sheet/repository';
 
 export interface AppProps {
   initialView?: AppView;
@@ -46,7 +47,7 @@ export function App({
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [appStore] = useState(() => createAppStore(authService));
   const [sheetRepository] = useState<SheetRepository>(
-    () => providedSheetRepository ?? createInMemorySheetRepository(),
+    () => providedSheetRepository ?? createElectronSheetRepository({ role: 'office' }),
   );
   const [activeView, setActiveView] = useState<AppView>(initialView);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
@@ -62,6 +63,10 @@ export function App({
   const isDevelopment = import.meta.env.DEV || import.meta.env.MODE === 'test';
   const demoAvailable =
     !isSupabaseConfigured() && !authService.isConfigured && isDevelopment && (demoMode ?? true);
+
+  useEffect(() => {
+    sheetRepository.setRole?.(profile?.role ?? 'office');
+  }, [profile?.role, sheetRepository]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
