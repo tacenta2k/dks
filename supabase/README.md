@@ -1,10 +1,11 @@
 # DKS STEP 3 — Supabase setup
 
-`schema.sql` is the complete STEP 3 database deliverable. It creates the nine
+`schema.sql` is the complete database deliverable. It creates the nine
 application tables, exact Auth-linked profile seeds, the dynamic column and
 entry contracts, renewal snapshots, audit records, role-safe RPCs, indexes,
 authenticated grants, RLS policies, timestamp/expiry/audit triggers, and the
-private `dks-backups` Storage bucket.
+realtime notification/settings surfaces. DKS does not use Supabase Storage;
+data lives in these database tables and the desktop's local SQLite cache.
 
 ## Apply the schema
 
@@ -20,10 +21,12 @@ private `dks-backups` Storage bucket.
    - `2a959122-d789-4f2e-8fdf-958260c2e3f9` —
      `amervisamedical1dks@gmail.com` — `office`
 3. Open **SQL Editor**, copy `supabase/schema.sql`, and run the entire file as
-   one script.
+   one script. If an older DKS deployment created the removed backup bucket,
+   delete that bucket and its object policies once from the Storage dashboard
+   before applying the current schema.
 4. Run the verification queries below. Query 1 should report nine present and
    nine RLS-enabled public tables. Query 2 should return the two exact profile
-   rows. Query 3 checks the exact column contracts, RPCs, and private bucket.
+    rows. Query 3 checks the exact column contracts, RPCs, and default settings.
 
 The `profiles.id` foreign key points to `auth.users(id)` with `ON DELETE
 CASCADE`. The Auth rows therefore must exist before the profile seed statements
@@ -95,7 +98,7 @@ Expected rows:
 | `2a959122-d789-4f2e-8fdf-958260c2e3f9` | `amervisamedical1dks@gmail.com` | `office` |
 | `846536af-f3c6-47c1-8559-d13442c1490a` | `shahabasnavas123@gmail.com` | `admin` |
 
-## Verification query 3 — exact columns, RPCs, defaults, and backups
+## Verification query 3 — exact columns, RPCs, and defaults
 
 ```sql
 select table_name, column_name, data_type, column_default
@@ -120,7 +123,6 @@ select table_name, column_name, data_type, column_default
  order by table_name, ordinal_position;
 
 select
-  (select public from storage.buckets where id = 'dks-backups') as backups_are_public,
   (select count(*)
      from pg_proc p
      join pg_namespace n on n.oid = p.pronamespace
@@ -135,8 +137,8 @@ select
     as default_setting_count;
 ```
 
-`backups_are_public` must be `false`, `core_rpc_count` must be `7`, and the
-default setting count must be `4` or greater.
+`core_rpc_count` must be `7`, and the default setting count must be `4` or
+greater. No Storage bucket or object policy is part of the DKS schema.
 
 ## Role and safety behavior
 

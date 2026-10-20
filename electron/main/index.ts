@@ -287,7 +287,6 @@ function openLocalStore(): void {
     unregisterLocalIpc = registerLocalIpcHandlers({
       ipcMain: ipcMain as unknown as LocalIpcMain,
       store: localStore,
-      backupDirectory: path.join(userDataPath, 'backups'),
     });
   } catch {
     // The shell and cloud features can still start when local storage is not

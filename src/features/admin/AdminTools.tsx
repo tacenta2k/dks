@@ -390,9 +390,12 @@ export function AdminSheetActions({
           {loading ? <span className="admin-sheet-actions__loading">Loading…</span> : null}
         </div>
         <div className="admin-sheet-actions__buttons">
-          {can(role, 'export') ? (
-            <>
-              <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('csv')}>
+           {can(role, 'export') ? (
+             <>
+               <p className="admin-inline-message admin-inline-message--warning">
+                 Exported files contain sensitive data. Protect them and delete them when no longer needed.
+               </p>
+               <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('csv')}>
                 Export CSV
               </button>
               <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('xlsx')}>

@@ -207,13 +207,12 @@ describe('Supabase STEP 3 schema', () => {
       'settings_delete_admin',
       'alert_snoozes_select_authenticated',
       'sync_sessions_select_authenticated',
-      'storage_dks_backups_admin_select',
     ]) {
       expect(sql).toContain(`create policy ${policy}`);
     }
   });
 
-  it('declares indexes, updated_at wiring, and a private backups bucket', () => {
+  it('declares indexes and updated_at wiring without storage backups', () => {
     const sql = schemaSource();
 
     expect(sql).toContain('create index if not exists entries_updated_at_idx');
@@ -221,9 +220,9 @@ describe('Supabase STEP 3 schema', () => {
     expect(sql).toContain('create trigger profiles_set_updated_at');
     expect(sql).toContain('create trigger settings_set_updated_at');
     expect(sql).toContain('create trigger sync_sessions_set_updated_at');
-    expect(sql).toContain("'dks-backups'");
-    expect(sql).toMatch(/insert into storage\.buckets[\s\S]*\bpublic\b[\s\S]*\bfalse\b/);
-    expect(sql).toContain('storage.buckets');
+    expect(sql).not.toContain('dks-backups');
+    expect(sql).not.toContain('storage.buckets');
+    expect(sql).not.toContain('storage.objects');
   });
 
   it('keeps the expiry digest secret-free and quiet when Resend is not configured', () => {

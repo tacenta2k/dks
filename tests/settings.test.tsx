@@ -15,7 +15,6 @@ describe('settings page', () => {
 
   it('renders injectable admin settings and emits local-first changes and actions', () => {
     const onSettingsChange = vi.fn();
-    const onBackupNow = vi.fn();
     const onCheckForUpdates = vi.fn();
 
     render(
@@ -29,10 +28,8 @@ describe('settings page', () => {
             isPrimaryExpiry: true,
           },
         ]}
-        backupInfo={{ lastBackupAt: '2026-01-01T08:00:00.000Z', location: 'Local backup folder' }}
         appVersion="1.2.3"
         onSettingsChange={onSettingsChange}
-        onBackupNow={onBackupNow}
         onCheckForUpdates={onCheckForUpdates}
       />,
     );
@@ -48,14 +45,12 @@ describe('settings page', () => {
     expect(screen.getByLabelText('Theme default')).toHaveValue('light');
     expect(screen.getByLabelText('Daily summary')).toBeChecked();
     expect(screen.getByLabelText('Notification day 1')).toHaveValue(90);
-    expect(screen.getByText(/Last backup/i)).toBeInTheDocument();
-    expect(screen.getByText('Local backup folder')).toBeInTheDocument();
+    expect(screen.queryByText(/backup/i)).not.toBeInTheDocument();
     expect(screen.getByText('Version 1.2.3')).toBeInTheDocument();
     expect(screen.getByText('Resend:', { exact: true })).toBeInTheDocument();
 
     fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#008000' } });
     fireEvent.click(screen.getByLabelText('Daily summary'));
-    fireEvent.click(screen.getByRole('button', { name: 'Backup Now' }));
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
 
     expect(onSettingsChange).toHaveBeenCalled();
@@ -64,19 +59,6 @@ describe('settings page', () => {
       thresholds: { colors: { Valid: '#008000' } },
       dailySummaryEnabled: false,
     });
-    expect(onBackupNow).toHaveBeenCalledTimes(1);
     expect(onCheckForUpdates).toHaveBeenCalledTimes(1);
-  });
-
-  it('accepts backup metadata returned by the main-process backup service', () => {
-    render(
-      <SettingsPage
-        role="admin"
-        backupInfo={{ createdAt: '2026-01-01T08:00:00.000Z', fileName: 'dks-backup.sqlite', bytes: 2048 }}
-      />,
-    );
-
-    expect(screen.getByText('dks-backup.sqlite')).toBeInTheDocument();
-    expect(screen.getByText(/2\.0 KB/)).toBeInTheDocument();
   });
 });

@@ -1,9 +1,4 @@
 import type {
-  BackupCopyResult,
-  BackupDatabaseSource,
-} from './backup';
-import { backupDatabase } from './backup';
-import type {
   AuditRecord,
   CloseSyncResult,
   ColumnInput,
@@ -38,7 +33,6 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   acknowledgeOutbox: 'dks:local:acknowledge-outbox',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
-  backupNow: 'dks:local:backup-now',
   close: 'dks:local:close',
 } as const);
 
@@ -93,9 +87,6 @@ export interface LocalIpcMain {
 
 export interface LocalIpcDependencies {
   store: LocalIpcStore;
-  backup?: () => Promise<BackupCopyResult> | BackupCopyResult;
-  /** Main-process-only destination. It is never accepted from the renderer. */
-  backupDirectory?: string;
   now?: () => string;
 }
 
@@ -364,21 +355,6 @@ function makeAuditRecord(input: Record<string, unknown>): Omit<AuditRecord, 'id'
     after: input.after ?? null,
     createdAt: typeof input.createdAt === 'string' ? input.createdAt : new Date().toISOString(),
   };
-}
-
-function backupResultFromUnknown(value: unknown): BackupCopyResult {
-  const result = asRecord(value, 'backup result');
-  const fileName = requiredString(result.fileName, 'backup file name');
-  const bytes = result.bytes;
-  const createdAt = requiredString(result.createdAt, 'backup createdAt');
-  const sha256 = requiredString(result.sha256, 'backup checksum');
-  if (fileName.includes('/') || fileName.includes('\\')) {
-    throw new Error('backup result must contain a file name only');
-  }
-  if (typeof bytes !== 'number' || !Number.isSafeInteger(bytes) || bytes < 0) {
-    throw new Error('backup bytes must be a non-negative integer');
-  }
-  return { fileName, bytes, createdAt, sha256 };
 }
 
 export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): LocalIpcHandlers {
@@ -733,18 +709,6 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         await store.flush();
       }
       return cloneSerializable(store.getSyncStatus());
-    },
-
-    [LOCAL_IPC_CHANNELS.backupNow]: async () => {
-      const result = dependencies.backup
-        ? await dependencies.backup()
-        : dependencies.backupDirectory
-          ? await backupDatabase(store as unknown as BackupDatabaseSource, dependencies.backupDirectory, now)
-          : null;
-      if (!result) {
-        throw new Error('Local backup is unavailable');
-      }
-      return cloneSerializable(backupResultFromUnknown(result));
     },
 
     [LOCAL_IPC_CHANNELS.close]: async () => {

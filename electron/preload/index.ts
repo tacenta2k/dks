@@ -151,13 +151,6 @@ export interface DksLocalRemoteSnapshot {
   columns: readonly Record<string, unknown>[];
 }
 
-export interface DksLocalBackupResult {
-  fileName: string;
-  bytes: number;
-  createdAt: string;
-  sha256: string;
-}
-
 export interface DksLocalCloseResult {
   closed: boolean;
   flushed: boolean;
@@ -186,7 +179,6 @@ export interface DksLocalApi {
   acknowledgeOutbox: () => Promise<DksLocalSyncState>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
-  backupNow: () => Promise<DksLocalBackupResult>;
   close: () => Promise<DksLocalCloseResult>;
 }
 
@@ -240,7 +232,6 @@ const LOCAL_CHANNELS = {
   acknowledgeOutbox: 'dks:local:acknowledge-outbox',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
-  backupNow: 'dks:local:backup-now',
   close: 'dks:local:close',
 } as const;
 
@@ -484,7 +475,6 @@ const localApi: DksLocalApi = Object.freeze({
   acknowledgeOutbox: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeOutbox, undefined),
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.setSyncStatus, input, validateSyncStatus),
   flushSync: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.flushSync, undefined),
-  backupNow: () => invokeLocal<DksLocalBackupResult>(LOCAL_CHANNELS.backupNow, undefined),
   close: () => invokeLocal<DksLocalCloseResult>(LOCAL_CHANNELS.close, undefined),
 });
 

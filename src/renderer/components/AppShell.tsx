@@ -25,7 +25,6 @@ import { SheetPage } from '../../features/sheet/SheetPage';
 import type { SheetRepository } from '../../features/sheet/repository';
 import {
   SettingsPage,
-  type BackupInfo,
   type PartialSettings,
 } from '../../features/settings/SettingsPage';
 
@@ -52,8 +51,6 @@ export interface AppShellProps {
   initialSettings?: PartialSettings;
   settingsColumns?: ComponentProps<typeof SettingsPage>['columns'];
   onSettingsChange?: ComponentProps<typeof SettingsPage>['onSettingsChange'];
-  backupInfo?: BackupInfo;
-  onBackupNow?: ComponentProps<typeof SettingsPage>['onBackupNow'];
   appVersion?: string;
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
   resendNote?: string;
@@ -149,8 +146,6 @@ export function AppShell({
   initialSettings,
   settingsColumns,
   onSettingsChange,
-  backupInfo,
-  onBackupNow,
   appVersion,
   onCheckForUpdates,
   resendNote,
@@ -466,8 +461,6 @@ export function AppShell({
                columns={settingsColumns}
                repository={sheetRepository}
                onSettingsChange={onSettingsChange}
-               backupInfo={backupInfo}
-               onBackupNow={onBackupNow}
                appVersion={appVersion}
                onCheckForUpdates={onCheckForUpdates}
                resendNote={resendNote}

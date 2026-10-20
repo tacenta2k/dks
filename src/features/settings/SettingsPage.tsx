@@ -37,15 +37,6 @@ export interface DksSettings {
 export type SettingsState = DksSettings;
 export type SettingsValues = DksSettings;
 
-export interface BackupInfo {
-  lastBackupAt?: string | null;
-  createdAt?: string | null;
-  location?: string | null;
-  fileName?: string | null;
-  sizeBytes?: number | null;
-  bytes?: number | null;
-}
-
 export interface PartialSettings {
   thresholds?: Partial<StatusThresholds> & {
     colors?: Partial<StatusColors> | Record<string, string>;
@@ -66,10 +57,6 @@ export interface SettingsPageProps {
   repository?: SheetRepository;
   onSettingsChange?: (settings: DksSettings) => void;
   onChange?: (settings: DksSettings) => void;
-  backupInfo?: BackupInfo;
-  backup?: BackupInfo;
-  onBackupNow?: () => void | Promise<void>;
-  onBackup?: () => void | Promise<void>;
   appVersion?: string;
   version?: string;
   onCheckForUpdates?: () => void | Promise<void>;
@@ -154,28 +141,6 @@ function resolveSettings(
   };
 }
 
-function formatBackupDate(value: string | null | undefined): string {
-  if (!value) {
-    return 'Never';
-  }
-
-  const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString();
-}
-
-function formatBytes(value: number | null | undefined): string | null {
-  if (value === null || value === undefined || !Number.isFinite(value)) {
-    return null;
-  }
-  if (value < 1024) {
-    return `${value} B`;
-  }
-  if (value < 1024 * 1024) {
-    return `${(value / 1024).toFixed(1)} KB`;
-  }
-  return `${(value / (1024 * 1024)).toFixed(1)} MB`;
-}
-
 function defaultVersion(): string {
   return typeof window !== 'undefined' && window.dks?.appVersion
     ? window.dks.appVersion
@@ -190,10 +155,6 @@ export function SettingsPage({
   repository,
   onSettingsChange,
   onChange,
-  backupInfo,
-  backup,
-  onBackupNow,
-  onBackup,
   appVersion,
   version,
   onCheckForUpdates,
@@ -260,11 +221,6 @@ export function SettingsPage({
   }
 
   const activeExpiryColumns = columns.filter((column) => column.deleted !== true && column.type === 'date_expiry');
-  const currentBackup = backupInfo ?? backup ?? {};
-  const lastBackupAt = currentBackup.lastBackupAt ?? currentBackup.createdAt;
-  const backupLocation = currentBackup.location ?? currentBackup.fileName;
-  const backupSize = currentBackup.sizeBytes ?? currentBackup.bytes;
-  const backupHandler = onBackupNow ?? onBackup;
   const updateHandler = onCheckForUpdates ?? onUpdate;
   const resolvedVersion = appVersion ?? version ?? defaultVersion();
   const updateSettings = (patch: (current: DksSettings) => DksSettings) => {
@@ -468,19 +424,10 @@ export function SettingsPage({
         <div className="settings-section__heading">
           <div>
             <p className="settings-eyebrow">Maintenance</p>
-            <h3 id="maintenance-settings-title">Backup and updates</h3>
+            <h3 id="maintenance-settings-title">Application updates</h3>
           </div>
         </div>
         <div className="settings-maintenance__grid">
-          <div className="settings-maintenance__card">
-            <div>
-              <strong>Local backup</strong>
-              <p><span>Last backup</span>: {formatBackupDate(lastBackupAt)}</p>
-              <p><span>Location</span>: <strong>{backupLocation ?? 'App-managed local storage'}</strong></p>
-              {formatBytes(backupSize) ? <p><span>Size</span>: {formatBytes(backupSize)}</p> : null}
-            </div>
-            <button className="button button--primary" type="button" onClick={() => invokeAction(backupHandler, 'Backup requested.', 'Backup could not be started.')}>Backup Now</button>
-          </div>
           <div className="settings-maintenance__card">
             <div>
               <strong>Application update</strong>

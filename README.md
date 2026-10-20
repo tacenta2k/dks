@@ -71,7 +71,7 @@ hide it in the tray; use the tray's Exit action to stop the process.
   visas, and delete only empty non-primary columns.
 - **Administrators** can change the primary expiry column, import CSV/XLSX,
   export CSV/XLSX, print or save PDF reports, inspect the recycle bin/audit log,
-  manage thresholds and notification days, and create backups.
+  and manage thresholds and notification days.
 - The sheet's primary expiry column drives `Days Left`, status colors, the
   dashboard, in-app notification bell, OS notifications, and daily/weekly
   summary records.

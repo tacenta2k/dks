@@ -33,7 +33,6 @@ function createLocalApi(): DksLocalApi {
     listNotifications: vi.fn(async () => []),
     setSyncStatus: vi.fn(async (status) => ({ status: typeof status === 'string' ? status : status.status, lastSyncAt: null, lastError: null, pendingCount: 0 } as const)),
     flushSync: vi.fn(async () => ({ status: 'offline' as const, lastSyncAt: null, lastError: null, pendingCount: 0 })),
-    backupNow: vi.fn(async () => ({ fileName: 'backup.sqlite', bytes: 1, createdAt: '2026-01-01T00:00:00.000Z', sha256: 'hash' })),
     close: vi.fn(async () => ({ closed: true, flushed: true })),
   };
 }

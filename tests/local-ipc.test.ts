@@ -130,14 +130,7 @@ function createFakeStore(): LocalIpcStore & {
 describe('offline local IPC bridge', () => {
   it('registers serializable CRUD handlers against an injected store', async () => {
     const store = createFakeStore();
-    const backup = vi.fn(async () => ({
-      fileName: 'dks-backup-20260101000000.sqlite',
-      bytes: 12,
-      createdAt: '2026-01-01T00:00:00.000Z',
-      sha256: 'abc123',
-      path: 'C:\\private\\dks-backup.sqlite',
-    }));
-    const handlers = createLocalIpcHandlers({ store, backup });
+    const handlers = createLocalIpcHandlers({ store });
 
     const snapshot = await handlers[LOCAL_IPC_CHANNELS.getSnapshot](undefined);
     expect(snapshot).toEqual(expect.objectContaining({
@@ -158,10 +151,13 @@ describe('offline local IPC bridge', () => {
     expect(store.deleteColumn).toHaveBeenCalledWith('name', 'admin', undefined);
     expect(await handlers[LOCAL_IPC_CHANNELS.listAudit]({ limit: 10 })).toHaveLength(1);
     expect(await handlers[LOCAL_IPC_CHANNELS.listNotifications]({ unreadOnly: true })).toHaveLength(1);
-    const backupResult = await handlers[LOCAL_IPC_CHANNELS.backupNow](undefined);
-    expect(backupResult).toEqual(expect.objectContaining({ fileName: expect.stringContaining('backup') }));
-    expect(backupResult).not.toHaveProperty('path');
-    expect(backup).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not expose a database backup IPC channel or handler', () => {
+    const handlers = createLocalIpcHandlers({ store: createFakeStore() });
+
+    expect('backupNow' in LOCAL_IPC_CHANNELS).toBe(false);
+    expect('dks:local:backup-now' in handlers).toBe(false);
   });
 
   it('passes role to column deletion and rejects malformed requests before touching the store', async () => {

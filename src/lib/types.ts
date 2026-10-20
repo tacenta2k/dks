@@ -162,13 +162,6 @@ export interface DksLocalRemoteSnapshot {
   columns: readonly Record<string, unknown>[];
 }
 
-export interface DksLocalBackupResult {
-  fileName: string;
-  bytes: number;
-  createdAt: string;
-  sha256: string;
-}
-
 export interface DksLocalCloseResult {
   closed: boolean;
   flushed: boolean;
@@ -197,7 +190,6 @@ export interface DksLocalApi {
   acknowledgeOutbox?: () => Promise<DksLocalSyncState>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
-  backupNow: () => Promise<DksLocalBackupResult>;
   close: () => Promise<DksLocalCloseResult>;
 }
 

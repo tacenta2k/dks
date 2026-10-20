@@ -4,7 +4,6 @@ import { mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 
-import type { BackupDatabaseSource } from './backup';
 import type { SyncOutboxItem, SyncState, SyncStatus } from './sync';
 
 type LocalColumnType =
@@ -402,7 +401,7 @@ function canDeleteColumnForOffice(
   });
 }
 
-export class SqliteStore implements BackupDatabaseSource {
+export class SqliteStore {
   private readonly database: BetterSqlite3.Database;
   private readonly filename: string;
   private readonly now: () => string;
@@ -1324,12 +1323,6 @@ export class SqliteStore implements BackupDatabaseSource {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }));
-  }
-
-  public async backupTo(destinationPath: string): Promise<void> {
-    this.ensureOpen();
-    await this.flush();
-    await this.database.backup(destinationPath);
   }
 
   public async flush(): Promise<void> {
