@@ -309,6 +309,14 @@ const MIGRATIONS: readonly string[] = [
   `
     ALTER TABLE notifications ADD COLUMN dismissed INTEGER NOT NULL DEFAULT 0;
   `,
+  `
+    CREATE TABLE IF NOT EXISTS local_settings (
+      key TEXT PRIMARY KEY NOT NULL,
+      value TEXT NOT NULL DEFAULT '{}',
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS local_settings_updated_at_idx ON local_settings(updated_at DESC);
+  `,
 ];
 
 export const SQLITE_SCHEMA_VERSION = MIGRATIONS.length;
@@ -946,6 +954,13 @@ export class SqliteStore {
       return;
     }
 
+    const currentPrimary = this.database.prepare(
+      'SELECT id FROM columns WHERE deleted = 0 AND type = \'date_expiry\' AND is_primary_expiry = 1 ORDER BY position, id',
+    ).all() as { id: string }[];
+    if (currentPrimary.length === 1) {
+      return;
+    }
+
     this.database.prepare('UPDATE columns SET is_primary_expiry = 0 WHERE deleted = 0 AND type = \'date_expiry\'').run();
     this.database.prepare('UPDATE columns SET is_primary_expiry = 1, updated_at = ? WHERE id = ?')
       .run(timestamp, activeExpiry[0].id);
@@ -1093,7 +1108,13 @@ export class SqliteStore {
   /** Mark the local mutation queue complete after a full remote reconciliation. */
   public acknowledgeOutbox(): SyncState {
     this.ensureOpen();
-    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE status <> 'synced'").run();
+    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE status <> 'synced' AND entity_type IN ('entry', 'column')").run();
+    return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
+  }
+
+  public acknowledgeSettings(): SyncState {
+    this.ensureOpen();
+    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE status <> 'synced' AND entity_type = 'settings'").run();
     return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
   }
 
@@ -1304,6 +1325,42 @@ export class SqliteStore {
       dismissed: nextDismissed,
       updatedAt,
     };
+  }
+
+  public getSettings(): Record<string, unknown> {
+    this.ensureOpen();
+    const rows = this.database.prepare('SELECT key, value FROM local_settings ORDER BY key').all() as Record<string, unknown>[];
+    return rows.reduce<Record<string, unknown>>((result, row) => {
+      const key = typeof row.key === 'string' ? row.key : '';
+      if (key) {
+        result[key] = decode(row.value, null);
+      }
+      return result;
+    }, {});
+  }
+
+  public setSettings(settings: Record<string, unknown>): Record<string, unknown> {
+    this.ensureOpen();
+    const timestamp = this.now();
+    const entries = Object.entries(settings);
+    const execute = this.database.transaction(() => {
+      for (const [key, value] of entries) {
+        this.database.prepare(`
+          INSERT INTO local_settings (key, value, updated_at)
+          VALUES (?, ?, ?)
+          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        `).run(key, encode(value), timestamp);
+        this.enqueueOutbox({
+          idempotencyKey: `settings:${key}:${timestamp}:${this.idFactory()}`,
+          operation: 'upsert',
+          entityType: 'settings',
+          entityId: key,
+          payload: { key, value, updated_at: timestamp },
+        });
+      }
+    });
+    execute();
+    return this.getSettings();
   }
 
   public listNotifications(unreadOnly = false): NotificationRecord[] {

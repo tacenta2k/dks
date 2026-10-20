@@ -72,7 +72,22 @@ export interface SummaryNotificationRecord {
   dismissed: boolean;
 }
 
-export type NotificationRecord = ExpiryNotificationRecord | SummaryNotificationRecord;
+export interface OfficeDeleteNotificationRecord {
+  id: string;
+  kind: 'office-delete';
+  entryId: string;
+  rowLabel: string;
+  title: string;
+  body: string;
+  createdAt: string;
+  read: boolean;
+  dismissed: boolean;
+}
+
+export type NotificationRecord =
+  | ExpiryNotificationRecord
+  | SummaryNotificationRecord
+  | OfficeDeleteNotificationRecord;
 
 export interface AlertThresholds extends StatusThresholds {
   alertDays?: readonly number[];

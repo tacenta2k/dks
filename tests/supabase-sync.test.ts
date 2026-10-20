@@ -124,4 +124,52 @@ describe('Supabase offline reconciliation', () => {
     expect(result.error).toContain('offline');
     expect(state.lastError).toBe('offline');
   });
+
+  it('records a visible conflict instead of silently discarding the losing copy', async () => {
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({
+          data: table === 'entries'
+            ? [{
+              id: 'entry-local',
+              data: { name: 'Remote edit' },
+              category: 'Employee',
+              deleted: false,
+              updated_at: '2026-01-04T00:00:00.000Z',
+            }]
+            : [],
+          error: null,
+        }),
+        upsert: async (values) => ({ data: [...values], error: null }),
+      }),
+    };
+    const conflicts: unknown[] = [];
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => ({
+        ...snapshot().syncStatus,
+        ...state,
+      }),
+      recordConflict: async (conflict) => {
+        conflicts.push(conflict);
+      },
+      applyRemoteSnapshot: async () => snapshot(),
+      acknowledgeOutbox: async () => ({
+        status: 'healthy',
+        lastSyncAt: '2026-01-05T00:00:00.000Z',
+        lastError: null,
+        pendingCount: 0,
+      }),
+    };
+
+    const result = await runSupabaseSync({ client, local });
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]).toEqual(expect.objectContaining({
+      entityType: 'entry',
+      entityId: 'entry-local',
+      winner: 'remote',
+    }));
+    expect(conflicts).toHaveLength(1);
+  });
 });

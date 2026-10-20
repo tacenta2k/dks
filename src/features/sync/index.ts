@@ -4,6 +4,7 @@ export {
 } from './supabase-sync';
 export type {
   SupabaseDataClient,
+  SupabaseConflict,
   SupabaseQueryError,
   SupabaseSyncLocal,
   SupabaseSyncOptions,

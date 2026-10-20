@@ -7,6 +7,7 @@ import type {
   NotificationInput,
   NotificationPatch,
   NotificationRecord,
+  ConflictRecord,
   RemoteColumnInput,
   RemoteEntryInput,
 } from './sqlite';
@@ -31,6 +32,10 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   updateNotification: 'dks:local:update-notification',
   applyRemoteSnapshot: 'dks:local:apply-remote-snapshot',
   acknowledgeOutbox: 'dks:local:acknowledge-outbox',
+  acknowledgeSettings: 'dks:local:acknowledge-settings',
+  recordConflict: 'dks:local:record-conflict',
+  getSettings: 'dks:local:get-settings',
+  setSettings: 'dks:local:set-settings',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
   close: 'dks:local:close',
@@ -67,6 +72,10 @@ export interface LocalIpcStore {
   applyRemoteEntry?: (input: RemoteEntryInput) => unknown;
   applyRemoteColumn?: (input: RemoteColumnInput) => unknown;
   acknowledgeOutbox?: () => SyncState;
+  acknowledgeSettings?: () => SyncState;
+  recordConflict?: (input: Omit<ConflictRecord, 'id' | 'createdAt' | 'resolved'> & { createdAt?: string }) => ConflictRecord;
+  getSettings?: () => Record<string, unknown>;
+  setSettings?: (settings: Record<string, unknown>) => Record<string, unknown>;
   recordAudit?: (input: Omit<AuditRecord, 'id'>) => AuditRecord;
   enqueueOutbox?: (input: {
     idempotencyKey: string;
@@ -325,6 +334,7 @@ function storeSnapshot(store: LocalIpcStore): {
   activeRows: Record<string, unknown>[];
   deletedRows: Record<string, unknown>[];
   columns: Record<string, unknown>[];
+  settings: Record<string, unknown>;
   syncStatus: SyncState;
 } {
   const rows = getRows(store, true)
@@ -341,6 +351,7 @@ function storeSnapshot(store: LocalIpcStore): {
     activeRows,
     deletedRows,
     columns,
+    settings: cloneSerializable(store.getSettings?.() ?? {}),
     syncStatus: cloneSerializable(store.getSyncStatus()),
   };
 }
@@ -665,6 +676,44 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error('Outbox acknowledgement is unavailable in this local store');
       }
       return cloneSerializable(store.acknowledgeOutbox());
+    },
+
+    [LOCAL_IPC_CHANNELS.acknowledgeSettings]: () => {
+      if (!store.acknowledgeSettings) {
+        throw new Error('Settings acknowledgement is unavailable in this local store');
+      }
+      return cloneSerializable(store.acknowledgeSettings());
+    },
+
+    [LOCAL_IPC_CHANNELS.recordConflict]: (payload) => {
+      const input = asRecord(payload, 'conflict input');
+      if (!store.recordConflict) {
+        throw new Error('Conflict recording is unavailable in this local store');
+      }
+      const entityType = requiredString(input.entityType, 'conflict entity type');
+      const entityId = requiredString(input.entityId, 'conflict entity id');
+      const winner = requiredString(input.winner, 'conflict winner');
+      if (winner !== 'local' && winner !== 'remote') {
+        throw new Error('conflict winner must be local or remote');
+      }
+      return cloneSerializable(store.recordConflict({
+        entityType,
+        entityId,
+        local: input.local,
+        remote: input.remote,
+        winner,
+        ...(typeof input.createdAt === 'string' ? { createdAt: input.createdAt } : {}),
+      }));
+    },
+
+    [LOCAL_IPC_CHANNELS.getSettings]: () => cloneSerializable(store.getSettings?.() ?? {}),
+
+    [LOCAL_IPC_CHANNELS.setSettings]: (payload) => {
+      const input = asRecord(payload, 'settings input');
+      if (!store.setSettings) {
+        throw new Error('Settings persistence is unavailable in this local store');
+      }
+      return cloneSerializable(store.setSettings(dataObject(input.settings, 'settings')));
     },
 
     [LOCAL_IPC_CHANNELS.setSyncStatus]: (payload) => {

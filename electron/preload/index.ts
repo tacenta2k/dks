@@ -50,6 +50,7 @@ export interface DksLocalSnapshot {
   activeRows?: DksLocalRow[];
   deletedRows: DksLocalRow[];
   columns: DksLocalColumn[];
+  settings?: Record<string, unknown>;
   syncStatus: DksLocalSyncState;
 }
 
@@ -151,6 +152,15 @@ export interface DksLocalRemoteSnapshot {
   columns: readonly Record<string, unknown>[];
 }
 
+export interface DksLocalConflictInput {
+  entityType: 'entry' | 'column';
+  entityId: string;
+  local: Record<string, unknown>;
+  remote: Record<string, unknown>;
+  winner: 'local' | 'remote';
+  createdAt?: string;
+}
+
 export interface DksLocalCloseResult {
   closed: boolean;
   flushed: boolean;
@@ -177,6 +187,10 @@ export interface DksLocalApi {
   updateNotification: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
   applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
   acknowledgeOutbox: () => Promise<DksLocalSyncState>;
+  acknowledgeSettings?: () => Promise<DksLocalSyncState>;
+  recordConflict?: (input: DksLocalConflictInput) => Promise<unknown>;
+  getSettings?: () => Promise<Record<string, unknown>>;
+  setSettings?: (input: { settings: Record<string, unknown> }) => Promise<Record<string, unknown>>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
   close: () => Promise<DksLocalCloseResult>;
@@ -230,6 +244,10 @@ const LOCAL_CHANNELS = {
   updateNotification: 'dks:local:update-notification',
   applyRemoteSnapshot: 'dks:local:apply-remote-snapshot',
   acknowledgeOutbox: 'dks:local:acknowledge-outbox',
+  acknowledgeSettings: 'dks:local:acknowledge-settings',
+  recordConflict: 'dks:local:record-conflict',
+  getSettings: 'dks:local:get-settings',
+  setSettings: 'dks:local:set-settings',
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
   close: 'dks:local:close',
@@ -397,6 +415,22 @@ function validateRemoteSnapshot(value: unknown): void {
   });
 }
 
+function validateSettingsInput(value: unknown): void {
+  const input = requireRecord(value, 'settings input');
+  requireRecord(input.settings, 'settings');
+}
+
+function validateConflict(value: unknown): void {
+  const input = requireRecord(value, 'conflict input');
+  requireId(input.entityType, 'conflict entity type');
+  requireId(input.entityId, 'conflict entity id');
+  requireData(input.local, 'conflict local');
+  requireData(input.remote, 'conflict remote');
+  if (input.winner !== 'local' && input.winner !== 'remote') {
+    throw new TypeError('conflict winner must be local or remote');
+  }
+}
+
 function validateSyncStatus(value: unknown): void {
   if (typeof value === 'string') {
     if (!LOCAL_SYNC_STATUSES.includes(value as DksLocalSyncStatus)) {
@@ -473,6 +507,10 @@ const localApi: DksLocalApi = Object.freeze({
   updateNotification: (input: DksLocalNotificationUpdate) => invokeLocal<DksLocalNotificationRecord | null>(LOCAL_CHANNELS.updateNotification, input, validateUpdateNotification),
   applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.applyRemoteSnapshot, input, validateRemoteSnapshot),
   acknowledgeOutbox: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeOutbox, undefined),
+  acknowledgeSettings: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeSettings, undefined),
+  recordConflict: (input: DksLocalConflictInput) => invokeLocal<unknown>(LOCAL_CHANNELS.recordConflict, input, validateConflict),
+  getSettings: () => invokeLocal<Record<string, unknown>>(LOCAL_CHANNELS.getSettings, undefined),
+  setSettings: (input: { settings: Record<string, unknown> }) => invokeLocal<Record<string, unknown>>(LOCAL_CHANNELS.setSettings, input, validateSettingsInput),
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.setSyncStatus, input, validateSyncStatus),
   flushSync: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.flushSync, undefined),
   close: () => invokeLocal<DksLocalCloseResult>(LOCAL_CHANNELS.close, undefined),

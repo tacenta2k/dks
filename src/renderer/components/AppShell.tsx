@@ -54,12 +54,15 @@ export interface AppShellProps {
   appVersion?: string;
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
   resendNote?: string;
+  settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
   notifications?: readonly NotificationRecord[];
   onNotificationMarkRead?: (id: string) => void;
   onNotificationDismiss?: (id: string) => void;
+  onNotificationView?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void;
+  onNotificationRestore?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void | Promise<void>;
   onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
   onLogout?: () => void | Promise<void>;
 }
@@ -149,12 +152,15 @@ export function AppShell({
   appVersion,
   onCheckForUpdates,
   resendNote,
+  settingsError,
   onSaveExport,
   onSavePdf,
   onPrint,
   notifications = [],
   onNotificationMarkRead,
   onNotificationDismiss,
+  onNotificationView,
+  onNotificationRestore,
   onNotificationSnooze,
   onLogout = () => undefined,
 }: AppShellProps) {
@@ -321,6 +327,8 @@ export function AppShell({
               notifications={notifications}
               onMarkRead={onNotificationMarkRead}
               onDismiss={onNotificationDismiss}
+              onView={onNotificationView}
+              onRestore={onNotificationRestore}
               onSnooze={onNotificationSnooze}
             />
             <div className="theme-control">
@@ -462,8 +470,9 @@ export function AppShell({
                repository={sheetRepository}
                onSettingsChange={onSettingsChange}
                appVersion={appVersion}
-               onCheckForUpdates={onCheckForUpdates}
-               resendNote={resendNote}
+                onCheckForUpdates={onCheckForUpdates}
+                resendNote={resendNote}
+                settingsError={settingsError}
                onClose={() => {
                  setIsSettingsOpen(false);
                  setAdminView(null);

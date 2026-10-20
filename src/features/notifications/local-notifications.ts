@@ -2,6 +2,7 @@ import type { DksLocalNotificationRecord } from '../../lib/types';
 import type {
   ExpiryNotificationRecord,
   NotificationRecord,
+  OfficeDeleteNotificationRecord,
   SummaryNotificationRecord,
 } from './alert-service';
 
@@ -85,11 +86,41 @@ function summaryFromPayload(
   };
 }
 
+function officeDeleteFromPayload(
+  payload: Record<string, unknown>,
+  local: DksLocalNotificationRecord,
+): OfficeDeleteNotificationRecord | null {
+  if (
+    payload.kind !== 'office-delete'
+    || typeof payload.id !== 'string'
+    || typeof payload.entryId !== 'string'
+    || typeof payload.rowLabel !== 'string'
+    || typeof payload.title !== 'string'
+    || typeof payload.body !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    id: payload.id,
+    kind: 'office-delete',
+    entryId: payload.entryId,
+    rowLabel: payload.rowLabel,
+    title: payload.title,
+    body: payload.body,
+    createdAt: typeof payload.createdAt === 'string' ? payload.createdAt : local.createdAt,
+    read: local.read,
+    dismissed: local.dismissed ?? payload.dismissed === true,
+  };
+}
+
 export function fromLocalNotification(
   local: DksLocalNotificationRecord,
 ): NotificationRecord | null {
   const payload = isRecord(local.payload) ? local.payload : {};
-  return expiryFromPayload(payload, local) ?? summaryFromPayload(payload, local);
+  return expiryFromPayload(payload, local)
+    ?? summaryFromPayload(payload, local)
+    ?? officeDeleteFromPayload(payload, local);
 }
 
 export function toLocalNotificationInput(record: NotificationRecord): LocalNotificationInput {

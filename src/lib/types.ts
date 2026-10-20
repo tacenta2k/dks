@@ -54,6 +54,7 @@ export interface DksLocalSnapshot {
   activeRows?: DksLocalRow[];
   deletedRows: DksLocalRow[];
   columns: DksLocalColumn[];
+  settings?: Record<string, unknown>;
   syncStatus: DksLocalSyncState;
 }
 
@@ -188,6 +189,9 @@ export interface DksLocalApi {
   updateNotification?: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
   applyRemoteSnapshot?: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
   acknowledgeOutbox?: () => Promise<DksLocalSyncState>;
+  acknowledgeSettings?: () => Promise<DksLocalSyncState>;
+  getSettings?: () => Promise<Record<string, unknown>>;
+  setSettings?: (input: { settings: Record<string, unknown> }) => Promise<Record<string, unknown>>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;
   flushSync: () => Promise<DksLocalSyncState>;
   close: () => Promise<DksLocalCloseResult>;

@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 
 import type {
   NotificationRecord,
+  OfficeDeleteNotificationRecord,
   SnoozeDuration,
 } from './alert-service';
 
@@ -9,6 +10,8 @@ export interface NotificationBellProps {
   notifications: readonly NotificationRecord[];
   onMarkRead?: (id: string) => void;
   onDismiss?: (id: string) => void;
+  onView?: (record: OfficeDeleteNotificationRecord) => void;
+  onRestore?: (record: OfficeDeleteNotificationRecord) => void;
   onSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
 }
 
@@ -21,6 +24,8 @@ export function NotificationBell({
   notifications,
   onMarkRead,
   onDismiss,
+  onView,
+  onRestore,
   onSnooze,
 }: NotificationBellProps) {
   const [open, setOpen] = useState(false);
@@ -77,6 +82,16 @@ export function NotificationBell({
                       <button type="button" onClick={() => onMarkRead?.(notification.id)}>
                         Mark read
                       </button>
+                    ) : null}
+                    {notification.kind === 'office-delete' ? (
+                      <>
+                        {onView ? (
+                          <button type="button" onClick={() => onView(notification)}>View</button>
+                        ) : null}
+                        {onRestore ? (
+                          <button type="button" onClick={() => onRestore(notification)}>Restore</button>
+                        ) : null}
+                      </>
                     ) : null}
                     {notification.kind === 'expiry' && onSnooze ? (
                       <>

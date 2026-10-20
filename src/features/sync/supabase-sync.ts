@@ -35,6 +35,16 @@ export interface SupabaseSyncLocal {
     columns: readonly Record<string, unknown>[];
   }) => Promise<DksLocalSnapshot>;
   acknowledgeOutbox?: () => Promise<DksLocalSyncState>;
+  recordConflict?: (conflict: SupabaseConflict) => Promise<void>;
+}
+
+export interface SupabaseConflict {
+  entityType: 'entry' | 'column';
+  entityId: string;
+  local: Record<string, unknown>;
+  remote: Record<string, unknown>;
+  winner: 'local' | 'remote';
+  createdAt: string;
 }
 
 export interface SupabaseSyncOptions {
@@ -49,6 +59,7 @@ export interface SupabaseSyncResult {
   pushedColumns: number;
   appliedEntries: number;
   appliedColumns: number;
+  conflicts: SupabaseConflict[];
   error?: string;
 }
 
@@ -94,6 +105,22 @@ function localWins(local: Record<string, unknown>, remote: Record<string, unknow
 
 function remoteWins(local: Record<string, unknown>, remote: Record<string, unknown>): boolean {
   return !localWins(local, remote);
+}
+
+function recordsEqual(left: Record<string, unknown>, right: Record<string, unknown>): boolean {
+  const canonical = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (typeof value === 'object' && value !== null) {
+      return Object.keys(value as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((result, key) => {
+          result[key] = canonical((value as Record<string, unknown>)[key]);
+          return result;
+        }, {});
+    }
+    return value;
+  };
+  return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
 }
 
 function localRows(snapshot: DksLocalSnapshot): DksLocalRow[] {
@@ -205,6 +232,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
   let pushedColumns = 0;
   let appliedEntries = 0;
   let appliedColumns = 0;
+  const conflicts: SupabaseConflict[] = [];
 
   try {
     const snapshot = await options.local.getSnapshot();
@@ -228,9 +256,22 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     for (const id of new Set([...localEntryMap.keys(), ...remoteEntryMap.keys()])) {
       const local = localEntryMap.get(id);
       const remote = remoteEntryMap.get(id);
-      if (local && (!remote || localWins(local as unknown as Record<string, unknown>, remote))) {
+      const localRecord = local as unknown as Record<string, unknown> | undefined;
+      if (localRecord && remote && !recordsEqual(localRecord, remote)) {
+        const conflict: SupabaseConflict = {
+          entityType: 'entry',
+          entityId: id,
+          local: localRecord,
+          remote,
+          winner: localWins(localRecord, remote) ? 'local' : 'remote',
+          createdAt: now(),
+        };
+        conflicts.push(conflict);
+        await options.local.recordConflict?.(conflict);
+      }
+      if (local && (!remote || localWins(localRecord!, remote))) {
         remoteEntryPushes.push(toRemoteEntry(local, now()));
-      } else if (remote && (!local || remoteWins(local as unknown as Record<string, unknown>, remote))) {
+      } else if (remote && (!local || remoteWins(localRecord!, remote))) {
         remoteRowsToApply.push(toLocalEntry(remote));
       }
     }
@@ -259,6 +300,18 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         consumedRemoteColumnIds.add(remoteId);
       }
       const localRecord = local as unknown as Record<string, unknown>;
+      if (remote && !recordsEqual(localRecord, remote)) {
+        const conflict: SupabaseConflict = {
+          entityType: 'column',
+          entityId: local.id,
+          local: localRecord,
+          remote,
+          winner: localWins(localRecord, remote) ? 'local' : 'remote',
+          createdAt: now(),
+        };
+        conflicts.push(conflict);
+        await options.local.recordConflict?.(conflict);
+      }
       if (localWins(localRecord, remote)) {
         remoteColumnPushes.push(toRemoteColumn(local, now(), remoteId));
       } else {
@@ -323,6 +376,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       pushedColumns,
       appliedEntries,
       appliedColumns,
+      conflicts,
     };
   } catch (caught) {
     const error = caught instanceof Error ? caught.message : String(caught);
@@ -333,6 +387,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       pushedColumns,
       appliedEntries,
       appliedColumns,
+      conflicts,
       error,
     };
   }

@@ -23,6 +23,7 @@ export type {
   DismissedExpiryInput,
   ExpiryNotificationRecord,
   NotificationRecord,
+  OfficeDeleteNotificationRecord,
   NotificationStore,
   SnoozeDuration,
   SummaryEvaluationOptions,

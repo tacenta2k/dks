@@ -100,4 +100,26 @@ describe('protected local SQLite cache and outbox', () => {
     expect(store.listOutbox()).toHaveLength(0);
     store.close();
   });
+
+  it('caches workspace settings locally and exposes pending setting mutations', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+    store.setSettings({ theme: 'dark', notification_days: [30, 7, 0] });
+
+    expect(store.getSettings()).toEqual({
+      theme: 'dark',
+      notification_days: [30, 7, 0],
+    });
+    expect(store.listOutbox().some((item) => item.entityType === 'settings')).toBe(true);
+    store.close();
+  });
+
+  it('keeps an administrator-selected primary expiry column instead of resetting to the first column', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+    store.upsertColumn({ id: 'expiry-one', name: 'Expiry one', type: 'date_expiry', position: 0 });
+    store.upsertColumn({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', position: 1 });
+    store.upsertColumn({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', position: 1, isPrimaryExpiry: true });
+
+    expect(store.listColumns().find((column) => column.isPrimaryExpiry)?.id).toBe('expiry-two');
+    store.close();
+  });
 });

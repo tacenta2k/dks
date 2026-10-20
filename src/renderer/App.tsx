@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 
 import { createAuthService, AuthService } from '../features/auth/auth-service';
@@ -14,6 +14,14 @@ import { AppShell } from './components/AppShell';
 import { createAppStore } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
+import type { DksSettings, PartialSettings } from '../features/settings/SettingsPage';
+import {
+  loadWorkspaceSettings,
+  partialSettingsToRecord,
+  saveWorkspaceSettings,
+  settingsRecordToPartialSettings,
+  type SettingsDataClient,
+} from '../features/settings/settings-service';
 import {
   createSnooze,
   evaluateAlerts,
@@ -27,6 +35,12 @@ import {
   fromLocalNotification,
   toLocalNotificationInput,
 } from '../features/notifications/local-notifications';
+import {
+  dismissAdminNotification,
+  loadAdminNotifications,
+  restoreDeletedEntry,
+  type AdminNotificationClient,
+} from '../features/notifications/remote-notifications';
 import {
   runSupabaseSync,
   type SupabaseDataClient,
@@ -81,6 +95,9 @@ export function App({
     lastError: null,
     pendingCount: 0,
   });
+  const [workspaceSettings, setWorkspaceSettings] = useState<PartialSettings | undefined>(undefined);
+  const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
+  const lastSettingsSignature = useRef('');
   const resolvedTheme = resolveTheme(themePreference, systemDark);
   const authStatus = useStore(appStore, (state) => state.authStatus);
   const authError = useStore(appStore, (state) => state.authError);
@@ -143,6 +160,115 @@ export function App({
   const isWorkspaceVisible = authStatus === 'authenticated' || authStatus === 'demo';
 
   useEffect(() => {
+    if (!isWorkspaceVisible || authStatus === 'demo') {
+      setWorkspaceSettings(undefined);
+      setSettingsLoadError(null);
+      lastSettingsSignature.current = '';
+      return undefined;
+    }
+
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    const client = authService.authClient;
+    let cancelled = false;
+
+    const load = async () => {
+      try {
+        if (local?.getSettings) {
+          const cached = await local.getSettings();
+          const cachedPartial = settingsRecordToPartialSettings(cached);
+          if (!cancelled && Object.keys(cachedPartial).length > 0) {
+            setWorkspaceSettings(cachedPartial);
+          }
+        }
+
+        if (!client) {
+          return;
+        }
+        const remote = await loadWorkspaceSettings(client as unknown as SettingsDataClient);
+        if (cancelled) {
+          return;
+        }
+        setWorkspaceSettings(remote);
+        setSettingsLoadError(null);
+        if (remote.theme) {
+          setThemePreference(remote.theme);
+          appStore.getState().setTheme(remote.theme);
+          saveThemePreference(remote.theme);
+        }
+        if (local?.setSettings) {
+          const cache = partialSettingsToRecord(remote);
+          if (Object.keys(cache).length > 0) {
+            await local.setSettings({ settings: cache });
+            await local.acknowledgeSettings?.();
+          }
+        }
+      } catch (caught) {
+        if (!cancelled) {
+          setSettingsLoadError(caught instanceof Error ? caught.message : 'Unable to load workspace settings.');
+        }
+      }
+    };
+
+    void load();
+    return () => {
+      cancelled = true;
+    };
+  }, [appStore, authService, authStatus, isWorkspaceVisible, profile?.id]);
+
+  const persistWorkspaceSettings = async (settings: DksSettings): Promise<void> => {
+    const signature = JSON.stringify(settings);
+    if (signature === lastSettingsSignature.current) {
+      return;
+    }
+    lastSettingsSignature.current = signature;
+    setWorkspaceSettings(settings);
+
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    const cache = partialSettingsToRecord(settings);
+    if (local?.setSettings) {
+      await local.setSettings({ settings: cache });
+    }
+
+    const columns = await sheetRepository.getColumns();
+    const currentPrimary = columns.find((column) => (
+      column.isPrimaryExpiry === true || column.is_primary_expiry === true
+    ));
+    const selectedPrimary = columns.find((column) => column.id === settings.primaryExpiryColumnId);
+    if (selectedPrimary && currentPrimary?.id !== selectedPrimary.id) {
+      for (const column of columns.filter((candidate) => candidate.type === 'date_expiry')) {
+        const primary = column.id === selectedPrimary.id;
+        await sheetRepository.updateColumn(column.id, {
+          isPrimaryExpiry: primary,
+          is_primary_expiry: primary,
+        });
+      }
+      setRepositoryRevision((revision) => revision + 1);
+    }
+
+    if (settings.theme !== themePreference) {
+      setThemePreference(settings.theme);
+      appStore.getState().setTheme(settings.theme);
+      saveThemePreference(settings.theme);
+    }
+
+    if (authStatus === 'demo') {
+      return;
+    }
+    const client = authService.authClient;
+    if (!client) {
+      throw new Error('Supabase is not configured; settings remain in the local cache.');
+    }
+    try {
+      await saveWorkspaceSettings(client as unknown as SettingsDataClient, settings);
+      await local?.acknowledgeSettings?.();
+      setSettingsLoadError(null);
+    } catch (error) {
+      setSettingsLoadError(error instanceof Error ? error.message : 'Workspace settings sync failed.');
+      throw error;
+    }
+  };
+
+  useEffect(() => {
     if (!isWorkspaceVisible) {
       setNotifications((current) => current.length === 0 ? current : []);
       setSnoozes((current) => current.length === 0 ? current : []);
@@ -163,6 +289,16 @@ export function App({
         const existing = localRecords
           .map(fromLocalNotification)
           .filter((record): record is NotificationRecord => record !== null);
+        let remoteAdmin: NotificationRecord[] = [];
+        if (profile?.role === 'admin' && authService.authClient) {
+          try {
+            remoteAdmin = await loadAdminNotifications(
+              authService.authClient as unknown as AdminNotificationClient,
+            );
+          } catch {
+            // A notification read failure must not suppress local expiry alerts.
+          }
+        }
         const [rows, columns] = await Promise.all([
           sheetRepository.getRows(),
           sheetRepository.getColumns(),
@@ -193,7 +329,7 @@ export function App({
         ];
 
         if (local) {
-          for (const record of generated) {
+          for (const record of [...remoteAdmin, ...generated]) {
             if (typeof local.addNotification === 'function') {
               await local.addNotification(toLocalNotificationInput(record));
             }
@@ -216,7 +352,7 @@ export function App({
 
         if (!cancelled) {
           const merged = new Map<string, NotificationRecord>();
-          [...existing, ...generated].forEach((record) => merged.set(record.id, record));
+          [...existing, ...remoteAdmin, ...generated].forEach((record) => merged.set(record.id, record));
           setNotifications(Array.from(merged.values()));
         }
       } catch {
@@ -236,7 +372,7 @@ export function App({
         window.clearInterval(interval);
       }
     };
-  }, [isWorkspaceVisible, profile?.id, sheetRepository, snoozes]);
+  }, [authService, isWorkspaceVisible, profile?.id, sheetRepository, snoozes]);
 
   useEffect(() => {
     if (!isWorkspaceVisible || authStatus === 'demo') {
@@ -343,6 +479,12 @@ export function App({
       record.id === id ? { ...record, read: true } : record
     )));
     void persistNotification(id, { read: true });
+    if (id.startsWith('admin-notification-') && authService.authClient) {
+      void dismissAdminNotification(
+        authService.authClient as unknown as AdminNotificationClient,
+        id,
+      ).catch(() => undefined);
+    }
   };
 
   const handleNotificationDismiss = (id: string) => {
@@ -350,6 +492,42 @@ export function App({
       record.id === id ? { ...record, dismissed: true } : record
     )));
     void persistNotification(id, { dismissed: true, read: true });
+    if (id.startsWith('admin-notification-') && authService.authClient) {
+      void dismissAdminNotification(
+        authService.authClient as unknown as AdminNotificationClient,
+        id,
+      ).catch(() => undefined);
+    }
+  };
+
+  const handleNotificationView = (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => {
+    setActiveView('sheet');
+    handleNotificationMarkRead(record.id);
+  };
+
+  const handleNotificationRestore = async (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => {
+    if (!authService.authClient) {
+      return;
+    }
+    try {
+      await restoreDeletedEntry(
+        authService.authClient as unknown as AdminNotificationClient,
+        record.entryId,
+      );
+      if (sheetRepository.restoreRow) {
+        await sheetRepository.restoreRow(record.entryId, { actor: profile?.email ?? null });
+      }
+      await dismissAdminNotification(
+        authService.authClient as unknown as AdminNotificationClient,
+        record.id,
+      );
+      setNotifications((current) => current.map((candidate) => (
+        candidate.id === record.id ? { ...candidate, read: true, dismissed: true } : candidate
+      )));
+      setRepositoryRevision((revision) => revision + 1);
+    } catch {
+      // The notification remains visible until the server-side restore succeeds.
+    }
   };
 
   const handleNotificationSnooze = (
@@ -402,10 +580,15 @@ export function App({
       syncStatus={syncStatus}
       isDemoMode={authStatus === 'demo'}
       sheetRepository={sheetRepository}
+      settings={workspaceSettings}
+      onSettingsChange={persistWorkspaceSettings}
+      settingsError={settingsLoadError}
       repositoryRevision={repositoryRevision}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}
       onNotificationDismiss={handleNotificationDismiss}
+      onNotificationView={handleNotificationView}
+      onNotificationRestore={handleNotificationRestore}
       onNotificationSnooze={handleNotificationSnooze}
       onLogout={() => appStore.getState().signOut()}
     />

@@ -253,6 +253,21 @@ describe('offline local IPC bridge', () => {
     expect(status).toEqual(expect.objectContaining({ status: 'healthy', pendingCount: 0 }));
   });
 
+  it('reads and writes cached workspace settings through the local bridge', async () => {
+    const store = createFakeStore();
+    let settings: Record<string, unknown> = { theme: 'light' };
+    store.getSettings = vi.fn(() => settings);
+    store.setSettings = vi.fn((next: Record<string, unknown>) => {
+      settings = { ...settings, ...next };
+      return settings;
+    });
+    const handlers = createLocalIpcHandlers({ store });
+
+    expect(await handlers[LOCAL_IPC_CHANNELS.getSettings](undefined)).toEqual({ theme: 'light' });
+    expect(await handlers[LOCAL_IPC_CHANNELS.setSettings]({ settings: { theme: 'dark' } })).toEqual({ theme: 'dark' });
+    expect(store.setSettings).toHaveBeenCalledWith({ theme: 'dark' });
+  });
+
   it('registers handlers through an injected ipcMain and closes/flushed local state', async () => {
     const store = createFakeStore();
     const registered = new Map<string, (...args: any[]) => unknown>();

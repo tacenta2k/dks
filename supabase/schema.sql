@@ -747,12 +747,13 @@ insert into public.settings (key, value)
 values
   (
     'thresholds',
-    '{"greenAbove": 90, "yellowFrom": 30, "yellowTo": 90, "urgentFrom": 1, "urgentTo": 29, "expiredAt": 0}'::jsonb
+    '{"validAbove": 90, "expiringSoonFrom": 30, "urgentFrom": 1, "expiredAt": 0, "colors": {"Valid": "#2f9e72", "Expiring Soon": "#d6a72c", "Urgent": "#e87836", "Expired": "#d15b5b"}}'::jsonb
   ),
   ('notification_days', '[90, 60, 30, 15, 7, 1, 0]'::jsonb),
-  ('notification_days_extended', '[90, 30, 7, 1]'::jsonb),
+  ('daily_summary_enabled', 'true'::jsonb),
   ('currency', '{"code": "OMR", "symbol": "ر.ع.", "decimals": 3}'::jsonb),
-  ('theme', '"light"'::jsonb)
+  ('theme', '"light"'::jsonb),
+  ('primary_expiry_column_id', '""'::jsonb)
 on conflict (key) do update
   set value = excluded.value,
       updated_at = now();
@@ -1012,3 +1013,27 @@ drop policy if exists sync_sessions_delete_authenticated on public.sync_sessions
 create policy sync_sessions_delete_authenticated
 on public.sync_sessions for delete to authenticated
 using (user_id = auth.uid() or public.is_admin());
+
+-- Realtime is used for cross-PC settings and administrator notifications.
+do $$
+begin
+  if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    if not exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'settings'
+    ) then
+      execute 'alter publication supabase_realtime add table public.settings';
+    end if;
+    if not exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'admin_notifications'
+    ) then
+      execute 'alter publication supabase_realtime add table public.admin_notifications';
+    end if;
+  end if;
+end;
+$$;

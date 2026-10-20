@@ -55,13 +55,14 @@ export interface SettingsPageProps {
   initialSettings?: PartialSettings;
   columns?: readonly ColumnDefinition[];
   repository?: SheetRepository;
-  onSettingsChange?: (settings: DksSettings) => void;
-  onChange?: (settings: DksSettings) => void;
+  onSettingsChange?: (settings: DksSettings) => void | Promise<void>;
+  onChange?: (settings: DksSettings) => void | Promise<void>;
   appVersion?: string;
   version?: string;
   onCheckForUpdates?: () => void | Promise<void>;
   onUpdate?: () => void | Promise<void>;
   resendNote?: string;
+  settingsError?: string | null;
   onClose?: () => void;
 }
 
@@ -160,6 +161,7 @@ export function SettingsPage({
   onCheckForUpdates,
   onUpdate,
   resendNote = 'Resend is optional for hosted email notifications; local alerts continue to work without a Resend API key.',
+  settingsError = null,
   onClose,
 }: SettingsPageProps) {
   const [columns, setColumns] = useState<ColumnDefinition[]>(() => [...(providedColumns ?? [])]);
@@ -206,8 +208,17 @@ export function SettingsPage({
       mountedRef.current = true;
       return;
     }
-    onSettingsChange?.(settings);
-    onChange?.(settings);
+    try {
+      const results = [onSettingsChange?.(settings), onChange?.(settings)]
+        .filter((result): result is Promise<void> => Boolean(result && typeof result.then === 'function'));
+      if (results.length > 0) {
+        void Promise.all(results)
+          .then(() => setStatusMessage('Settings saved to the workspace.'))
+          .catch(() => setStatusMessage('Saved locally; cloud sync failed. Changes will retry when online.'));
+      }
+    } catch {
+      setStatusMessage('Saved locally; cloud sync failed. Changes will retry when online.');
+    }
   }, [onChange, onSettingsChange, settings]);
 
   if (!can(role, 'settings')) {
@@ -285,6 +296,7 @@ export function SettingsPage({
       </div>
 
       {statusMessage ? <div className="settings-alert" role="status">{statusMessage}</div> : null}
+      {settingsError ? <div className="settings-alert settings-alert--error" role="alert">{settingsError}</div> : null}
 
       <section className="settings-section" aria-labelledby="expiry-settings-title">
         <div className="settings-section__heading">
