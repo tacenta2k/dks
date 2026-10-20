@@ -113,7 +113,11 @@ export function buildGridColumns(
         colId: column.id,
         headerName: column.name,
         headerTooltip: column.isPrimaryExpiry ? 'Primary expiry date' : column.name,
-        editable: !(column.isPrimaryExpiry === true || column.is_primary_expiry === true) || role === 'admin',
+        // Primary status controls which expiry drives derived values, not whether
+        // an office user may edit that expiry value.
+        editable: column.type === 'date_expiry'
+          || !(column.isPrimaryExpiry === true || column.is_primary_expiry === true)
+          || role === 'admin',
         sortable: true,
         filter: true,
         resizable: true,

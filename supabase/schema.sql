@@ -204,7 +204,7 @@ begin
   end if;
 
   if tg_op = 'UPDATE' and old.is_primary_expiry then
-    if not new.is_primary_expiry then
+    if not new.is_primary_expiry and not public.is_admin() then
       raise exception 'The primary expiry column cannot be unset'
         using errcode = '42501';
     end if;

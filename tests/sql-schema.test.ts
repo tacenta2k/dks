@@ -225,6 +225,23 @@ describe('Supabase STEP 3 schema', () => {
     expect(sql).not.toContain('storage.objects');
   });
 
+  it('keeps expiry values editable for office entries while primary selection stays guarded', () => {
+    const sql = schemaSource();
+    const columnGuardStart = sql.indexOf('function public.guard_primary_expiry_column');
+    const columnGuardBody = sql.slice(columnGuardStart, sql.indexOf('$$;', columnGuardStart) + 3);
+    const entriesUpdateStart = sql.indexOf('create policy entries_update_authenticated');
+    const entriesUpdateBody = sql.slice(entriesUpdateStart, sql.indexOf('\n\n', entriesUpdateStart));
+
+    expect(columnGuardBody).toContain('office users cannot change the primary expiry setting');
+    expect(columnGuardBody).toContain('new.is_primary_expiry is distinct from old.is_primary_expiry');
+    expect(columnGuardBody).toContain('not new.is_primary_expiry and not public.is_admin()');
+    expect(entriesUpdateBody).toContain('public.is_office()');
+    expect(entriesUpdateBody).toContain('not deleted');
+    expect(entriesUpdateBody).toContain('deleted_at is null');
+    expect(entriesUpdateBody).toContain('deleted_by is null');
+    expect(sql).toContain('create trigger entries_primary_expiry_guard');
+  });
+
   it('keeps the expiry digest secret-free and quiet when Resend is not configured', () => {
     const source = readFileSync(edgeFunctionPath, 'utf8');
 

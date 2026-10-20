@@ -19,9 +19,10 @@ async function seededRepository() {
 }
 
 describe('sheet row actions', () => {
-  it('locks the primary expiry editor for office users but not administrators', () => {
+  it('lets office users edit every date expiry value, including the primary expiry', () => {
     const columns: ColumnDefinition[] = [
       { id: 'visa_expiry', name: 'Visa Expiry', type: 'date_expiry', isPrimaryExpiry: true },
+      { id: 'passport_expiry', name: 'Passport Expiry', type: 'date_expiry' },
     ];
     const callbacks = {
       onDuplicate: vi.fn(),
@@ -29,10 +30,12 @@ describe('sheet row actions', () => {
       onRenew: vi.fn(),
     };
 
-    const officeExpiry = buildGridColumns(columns, callbacks, 'office').find((column) => column.colId === 'visa_expiry');
+    const officeExpiryColumns = buildGridColumns(columns, callbacks, 'office')
+      .filter((column) => column.colId === 'visa_expiry' || column.colId === 'passport_expiry');
     const adminExpiry = buildGridColumns(columns, callbacks, 'admin').find((column) => column.colId === 'visa_expiry');
 
-    expect(officeExpiry?.editable).toBe(false);
+    expect(officeExpiryColumns).toHaveLength(2);
+    expect(officeExpiryColumns.every((column) => column.editable === true)).toBe(true);
     expect(adminExpiry?.editable).toBe(true);
   });
 
