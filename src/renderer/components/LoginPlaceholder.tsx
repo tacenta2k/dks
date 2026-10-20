@@ -1,30 +1,21 @@
-interface LoginPlaceholderProps {
+import { AuthScreen, type AuthScreenProps } from '../../features/auth/AuthScreen';
+import { isSupabaseConfigured } from '../../lib/supabase';
+
+export interface LoginPlaceholderProps extends AuthScreenProps {
+  /** Retained for STEP 1 callers; it is only rendered when demo mode is enabled. */
   onContinue?: () => void;
 }
 
-export function LoginPlaceholder({ onContinue = () => undefined }: LoginPlaceholderProps) {
+export function LoginPlaceholder({ onContinue, onDemoContinue, demoAvailable, ...props }: LoginPlaceholderProps) {
+  const safeDevelopmentDemo =
+    !isSupabaseConfigured() && (import.meta.env.DEV || import.meta.env.MODE === 'test');
+  const requestedDemo = demoAvailable ?? Boolean(onContinue ?? onDemoContinue);
+
   return (
-    <main className="login-page" aria-labelledby="login-title">
-      <section className="login-card">
-        <div className="brand-mark brand-mark--large" aria-hidden="true">
-          <span>D</span>
-        </div>
-        <p className="eyebrow">DKS workspace</p>
-        <h1 id="login-title">Sign in to DKS</h1>
-        <p className="login-card__description">
-          Keep visa and medical records organized in one calm, focused workspace.
-        </p>
-        <div className="placeholder-callout" role="status">
-          <span className="placeholder-callout__dot" aria-hidden="true" />
-          <span>Authentication will be connected in STEP 2.</span>
-        </div>
-        <button className="button button--primary button--wide" type="button" onClick={onContinue}>
-          Continue to workspace
-          <span aria-hidden="true">→</span>
-        </button>
-        <p className="login-card__footnote">Preview the STEP 1 shell while sign-in is being prepared.</p>
-      </section>
-      <footer className="login-page__footer">DKS · Designed for dependable office workflows</footer>
-    </main>
+    <AuthScreen
+      {...props}
+      demoAvailable={safeDevelopmentDemo && requestedDemo}
+      onDemoContinue={onDemoContinue ?? onContinue}
+    />
   );
 }

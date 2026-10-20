@@ -1,5 +1,7 @@
 import { useState } from 'react';
 
+import { can } from '../../lib/permissions';
+import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 
 export interface AppShellProps {
@@ -8,6 +10,11 @@ export interface AppShellProps {
   themePreference?: ThemePreference;
   resolvedTheme?: ResolvedTheme;
   onThemeChange?: (preference: ThemePreference) => void;
+  profile?: Profile | null;
+  userEmail?: string | null;
+  health?: SupabaseHealth;
+  isDemoMode?: boolean;
+  onLogout?: () => void | Promise<void>;
 }
 
 const themeLabels: Record<ThemePreference, string> = {
@@ -86,9 +93,30 @@ export function AppShell({
   themePreference = 'system',
   resolvedTheme = 'light',
   onThemeChange = () => undefined,
+  profile = null,
+  userEmail = null,
+  health = {
+    configured: false,
+    reachable: 'unknown',
+    authenticated: false,
+    error: null,
+  },
+  isDemoMode = false,
+  onLogout = () => undefined,
 }: AppShellProps) {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const copy = viewCopy[activeView];
+  const role = profile?.role;
+  const displayEmail = userEmail ?? profile?.email ?? (isDemoMode ? 'demo@dks.local' : null);
+  const healthLabel = isDemoMode
+    ? 'Offline demo'
+    : health.reachable === 'reachable'
+      ? 'Supabase healthy'
+      : health.reachable === 'unreachable'
+        ? 'Supabase unavailable'
+        : health.configured
+          ? 'Supabase checking'
+          : 'Supabase not configured';
 
   return (
     <div className="app-shell">
@@ -96,7 +124,7 @@ export function AppShell({
         <Brand />
         <nav className="sidebar__nav" aria-label="Primary navigation">
           <p className="sidebar__label">Workspace</p>
-          <button
+           <button
             className={`nav-item${activeView === 'dashboard' ? ' nav-item--active' : ''}`}
             type="button"
             aria-current={activeView === 'dashboard' ? 'page' : 'false'}
@@ -124,17 +152,33 @@ export function AppShell({
               <span />
             </span>
             <span>Visa sheet</span>
-          </button>
+           </button>
+          {can(role, 'adminNavigation') ? (
+            <button
+              className="nav-item"
+              type="button"
+              aria-label="Open Admin tools"
+              onClick={() => undefined}
+            >
+              <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
+                <span />
+                <span />
+                <span />
+                <span />
+              </span>
+              <span>Admin tools</span>
+            </button>
+          ) : null}
         </nav>
         <div className="sidebar__bottom">
           <div className="sync-status">
             <span className="sync-status__dot" aria-hidden="true" />
             <div>
-              <p className="sync-status__title">Local workspace</p>
-              <p className="sync-status__detail">Ready for offline work</p>
+              <p className="sync-status__title">Workspace health</p>
+              <p className="sync-status__detail">{healthLabel}</p>
             </div>
           </div>
-          <p className="sidebar__version">STEP 1 · Shell preview</p>
+          <p className="sidebar__version">STEP 2 · Role-gated workspace</p>
         </div>
       </aside>
 
@@ -179,7 +223,27 @@ export function AppShell({
                 </div>
               ) : null}
             </div>
-            <div className="avatar" aria-label="DKS preview user">D</div>
+            {displayEmail ? (
+              <div style={{ display: 'grid', gap: 2, justifyItems: 'end' }}>
+                <span style={{ color: 'var(--color-text)', fontSize: 12, fontWeight: 700 }}>
+                  {displayEmail}
+                </span>
+                {profile ? (
+                  <span
+                    aria-label={`Role: ${profile.role}`}
+                    style={{ color: 'var(--color-text-muted)', fontSize: 10, fontWeight: 700 }}
+                  >
+                    {profile.role === 'admin' ? 'Admin' : 'Office'}
+                  </span>
+                ) : null}
+              </div>
+            ) : null}
+            <button className="button" type="button" onClick={onLogout}>
+              Log out
+            </button>
+            <div className="avatar" aria-label={displayEmail ? `Signed in as ${displayEmail}` : 'DKS preview user'}>
+              {(displayEmail?.[0] ?? 'D').toUpperCase()}
+            </div>
           </div>
         </header>
 
@@ -194,6 +258,11 @@ export function AppShell({
               <span className="content__badge-dot" aria-hidden="true" />
               <span>Offline-first</span>
             </div>
+            {can(role, 'export') ? (
+              <button className="button" type="button" aria-label="Export data" onClick={() => undefined}>
+                Export data
+              </button>
+            ) : null}
           </div>
 
           {activeView === 'dashboard' ? <DashboardPlaceholder /> : <SheetPlaceholder />}
