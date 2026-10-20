@@ -1,13 +1,22 @@
-import { useState } from 'react';
+import { useState, type ComponentProps } from 'react';
 
 import { can } from '../../lib/permissions';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
+import { DashboardPage } from '../../features/dashboard/DashboardPage';
+import type { DashboardFilterId } from '../../features/dashboard/selectors';
 import { SheetPage } from '../../features/sheet/SheetPage';
 import type { SheetRepository } from '../../features/sheet/repository';
+import {
+  SettingsPage,
+  type BackupInfo,
+  type PartialSettings,
+} from '../../features/settings/SettingsPage';
+
+type ShellView = AppView | 'settings';
 
 export interface AppShellProps {
-  activeView?: AppView;
+  activeView?: ShellView;
   onNavigate?: (view: AppView) => void;
   themePreference?: ThemePreference;
   resolvedTheme?: ResolvedTheme;
@@ -17,6 +26,18 @@ export interface AppShellProps {
   health?: SupabaseHealth;
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
+  dashboardThresholds?: Parameters<typeof DashboardPage>[0]['thresholds'];
+  dashboardColors?: Parameters<typeof DashboardPage>[0]['colors'];
+  onDashboardFilter?: (filter: DashboardFilterId) => void;
+  settings?: PartialSettings;
+  initialSettings?: PartialSettings;
+  settingsColumns?: ComponentProps<typeof SettingsPage>['columns'];
+  onSettingsChange?: ComponentProps<typeof SettingsPage>['onSettingsChange'];
+  backupInfo?: BackupInfo;
+  onBackupNow?: ComponentProps<typeof SettingsPage>['onBackupNow'];
+  appVersion?: string;
+  onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
+  resendNote?: string;
   onLogout?: () => void | Promise<void>;
 }
 
@@ -39,6 +60,12 @@ const viewCopy: Record<AppView, { eyebrow: string; title: string; description: s
   },
 };
 
+const settingsCopy = {
+  eyebrow: 'Administration',
+  title: 'Settings',
+  description: 'Manage expiry rules, workspace defaults, and local maintenance controls.',
+};
+
 function Brand() {
   return (
     <div className="brand-lockup">
@@ -48,24 +75,6 @@ function Brand() {
       <div>
         <p className="brand-name">DKS</p>
         <p className="brand-caption">Office workspace</p>
-      </div>
-    </div>
-  );
-}
-
-function DashboardPlaceholder() {
-  return (
-    <div className="placeholder-panel placeholder-panel--dashboard">
-      <div className="placeholder-panel__icon" aria-hidden="true">
-        <span />
-        <span />
-        <span />
-      </div>
-      <div>
-        <h2>Good things are on the way</h2>
-        <p>
-          The dashboard will bring your expiry overview, alerts, and next actions together here.
-        </p>
       </div>
     </div>
   );
@@ -87,10 +96,24 @@ export function AppShell({
   },
   isDemoMode = false,
   sheetRepository,
+  dashboardThresholds,
+  dashboardColors,
+  onDashboardFilter,
+  settings,
+  initialSettings,
+  settingsColumns,
+  onSettingsChange,
+  backupInfo,
+  onBackupNow,
+  appVersion,
+  onCheckForUpdates,
+  resendNote,
   onLogout = () => undefined,
 }: AppShellProps) {
   const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
-  const copy = viewCopy[activeView];
+  const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
+  const effectiveView: ShellView = isSettingsOpen || activeView === 'settings' ? 'settings' : activeView;
+  const copy = effectiveView === 'settings' ? settingsCopy : viewCopy[effectiveView];
   const role = profile?.role;
   const displayEmail = userEmail ?? profile?.email ?? (isDemoMode ? 'demo@dks.local' : null);
   const healthLabel = isDemoMode
@@ -109,12 +132,15 @@ export function AppShell({
         <Brand />
         <nav className="sidebar__nav" aria-label="Primary navigation">
           <p className="sidebar__label">Workspace</p>
-           <button
-            className={`nav-item${activeView === 'dashboard' ? ' nav-item--active' : ''}`}
+          <button
+            className={`nav-item${effectiveView === 'dashboard' ? ' nav-item--active' : ''}`}
             type="button"
-            aria-current={activeView === 'dashboard' ? 'page' : 'false'}
+            aria-current={effectiveView === 'dashboard' ? 'page' : 'false'}
             aria-label="Open Dashboard"
-            onClick={() => onNavigate('dashboard')}
+            onClick={() => {
+              setIsSettingsOpen(false);
+              onNavigate('dashboard');
+            }}
           >
             <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
               <span />
@@ -125,11 +151,14 @@ export function AppShell({
             <span>Dashboard</span>
           </button>
           <button
-            className={`nav-item${activeView === 'sheet' ? ' nav-item--active' : ''}`}
+            className={`nav-item${effectiveView === 'sheet' ? ' nav-item--active' : ''}`}
             type="button"
-            aria-current={activeView === 'sheet' ? 'page' : 'false'}
+            aria-current={effectiveView === 'sheet' ? 'page' : 'false'}
             aria-label="Open Sheet"
-            onClick={() => onNavigate('sheet')}
+            onClick={() => {
+              setIsSettingsOpen(false);
+              onNavigate('sheet');
+            }}
           >
             <span className="nav-item__icon nav-item__icon--sheet" aria-hidden="true">
               <span />
@@ -140,10 +169,11 @@ export function AppShell({
            </button>
           {can(role, 'adminNavigation') ? (
             <button
-              className="nav-item"
+              className={`nav-item${effectiveView === 'settings' ? ' nav-item--active' : ''}`}
               type="button"
-              aria-label="Open Admin tools"
-              onClick={() => undefined}
+              aria-current={effectiveView === 'settings' ? 'page' : 'false'}
+              aria-label="Open Admin tools / Settings"
+              onClick={() => setIsSettingsOpen(true)}
             >
               <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
                 <span />
@@ -151,7 +181,7 @@ export function AppShell({
                 <span />
                 <span />
               </span>
-              <span>Admin tools</span>
+              <span>Settings</span>
             </button>
           ) : null}
         </nav>
@@ -170,7 +200,7 @@ export function AppShell({
       <div className="app-shell__body">
         <header className="top-bar" role="banner" aria-label="DKS top bar">
           <div className="top-bar__heading">
-            <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.eyebrow}</p>
+             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.eyebrow}</p>
             <p className="top-bar__context">A focused space for your team&apos;s records</p>
           </div>
           <div className="top-bar__actions">
@@ -250,11 +280,34 @@ export function AppShell({
             ) : null}
           </div>
 
-          {activeView === 'dashboard' ? (
-            <DashboardPlaceholder />
-          ) : (
-            <SheetPage repository={sheetRepository} role={role} />
-          )}
+           {effectiveView === 'dashboard' ? (
+             <DashboardPage
+               repository={sheetRepository}
+               thresholds={dashboardThresholds}
+               colors={dashboardColors}
+               onFilter={onDashboardFilter}
+             />
+           ) : effectiveView === 'sheet' ? (
+             <SheetPage repository={sheetRepository} role={role} />
+           ) : (
+             <SettingsPage
+               role={role}
+               settings={settings}
+               initialSettings={initialSettings}
+               columns={settingsColumns}
+               repository={sheetRepository}
+               onSettingsChange={onSettingsChange}
+               backupInfo={backupInfo}
+               onBackupNow={onBackupNow}
+               appVersion={appVersion}
+               onCheckForUpdates={onCheckForUpdates}
+               resendNote={resendNote}
+               onClose={() => {
+                 setIsSettingsOpen(false);
+                 onNavigate('dashboard');
+               }}
+             />
+           )}
         </main>
       </div>
     </div>
