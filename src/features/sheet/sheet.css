@@ -334,7 +334,11 @@
 }
 
 .sheet-row--expired .ag-cell {
-  background: color-mix(in srgb, #dc2626 7%, transparent);
+  background: color-mix(in srgb, #7f1d1d 9%, transparent);
+}
+
+.sheet-row--today .ag-cell {
+  background: color-mix(in srgb, #dc2626 10%, transparent);
 }
 
 .sheet-row--urgent .ag-cell {
@@ -355,6 +359,22 @@
 
 .sheet-cell--error {
   box-shadow: inset 3px 0 0 #dc2626;
+}
+
+.dks-date-editor {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: none;
+  background: var(--color-surface);
+  color: inherit;
+  font: inherit;
+}
+
+.dks-date-editor:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 
 .sheet-modal-backdrop {

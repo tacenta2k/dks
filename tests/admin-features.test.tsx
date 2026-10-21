@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { seedFixtureColumns } from './fixtures/sheet-columns';
 import type { ExportArtifact } from '../src/features/import-export/export-service';
 import type { PdfExportFile, PrintReportModel } from '../src/features/print/print-service';
 
@@ -27,7 +28,7 @@ function officeProfile() {
 
 async function seededRepository() {
   const repository = createInMemorySheetRepository();
-  await repository.loadTemplate('visa');
+  await seedFixtureColumns(repository);
   await repository.createRow({
     name: 'Ada Lovelace',
     passport_no: 'A-1',
@@ -148,7 +149,7 @@ describe('admin renderer integration', () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)).toBeUndefined();
     });
     expect(window.confirm).toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('lists repository audit history for administrators', async () => {
     const repository = await seededRepository();

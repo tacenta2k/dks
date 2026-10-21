@@ -13,15 +13,12 @@ import type {
   SheetImportRecord,
   SheetRow,
   SheetSnapshot,
-  SheetTemplate,
 } from './types';
 
 export interface SheetRepository {
   setRole?(role: string): void;
   getColumns(): Promise<ColumnDefinition[]>;
   getRows(): Promise<SheetRow[]>;
-  getTemplates(): Promise<SheetTemplate[]>;
-  loadTemplate(templateId: string): Promise<SheetSnapshot>;
   addColumn(input: ColumnInput): Promise<ColumnDefinition>;
   updateColumn(columnId: string, patch: Partial<ColumnDefinition>): Promise<ColumnDefinition>;
   softDeleteColumn(columnId: string, role?: string): Promise<ColumnDefinition | null>;
@@ -43,8 +40,6 @@ export interface SheetRepository {
   ): Promise<SheetRow>;
   getRenewalHistory(rowId?: string): Promise<RenewalRecord[]>;
 }
-
-const VISA_TEMPLATE_ID = 'visa';
 
 function clone<T>(value: T): T {
   if (typeof structuredClone === 'function') {
@@ -87,43 +82,6 @@ function uniqueColumnId(name: string, columns: readonly ColumnDefinition[]): str
   return candidate;
 }
 
-function visaTemplate(): SheetTemplate {
-  return {
-    id: VISA_TEMPLATE_ID,
-    name: 'Visa Template',
-    description: 'A practical starting sheet for passport and visa expiry tracking.',
-    columns: normalizeColumns([
-      { id: 'name', name: 'Name', type: 'text', position: 0 },
-      {
-        id: 'category',
-        name: 'Category',
-        type: 'dropdown',
-        options: ['Employee', 'Family', 'Client'],
-        position: 1,
-      },
-      {
-        id: 'passport_no',
-        name: 'Passport No',
-        type: 'text',
-        isPassport: true,
-        position: 2,
-      },
-      {
-        id: 'visa_type',
-        name: 'Visa Type',
-        type: 'dropdown',
-        options: ['Visit', 'Work', 'Family', 'Resident'],
-        position: 3,
-      },
-      { id: 'country', name: 'Country', type: 'text', position: 4 },
-      { id: 'visa_expiry', name: 'Visa Expiry', type: 'date_expiry', position: 5 },
-      { id: 'phone', name: 'Phone', type: 'phone', position: 6 },
-      { id: 'notes', name: 'Notes', type: 'notes', position: 7 },
-    ]),
-    rows: [],
-  };
-}
-
 function copyRows(rows: readonly SheetRow[]): SheetRow[] {
   return rows.map((row) => clone(row));
 }
@@ -132,22 +90,21 @@ function copyRows(rows: readonly SheetRow[]): SheetRow[] {
  * Renderer-local repository used until the SQLite/IPC adapter is connected.
  * Its asynchronous surface intentionally mirrors the future adapter so the
  * page does not need to change when persistence moves out of the renderer.
+ * No business columns are seeded; the sheet starts empty and users create
+ * their own columns (F3).
  */
 export class InMemorySheetRepository implements SheetRepository {
   private columns: ColumnDefinition[];
 
   private rows: SheetRow[];
 
-  private templates: SheetTemplate[];
-
   private renewals: RenewalRecord[];
 
   private auditHistory: SheetAuditEntry[];
 
-  constructor(snapshot: Partial<SheetSnapshot> = {}, templates?: SheetTemplate[]) {
+  constructor(snapshot: Partial<SheetSnapshot> = {}) {
     this.columns = normalizeColumns(snapshot.columns ?? []);
     this.rows = copyRows(snapshot.rows ?? []);
-    this.templates = templates?.map((template) => clone(template)) ?? [visaTemplate()];
     this.renewals = [];
     this.auditHistory = [];
   }
@@ -158,22 +115,6 @@ export class InMemorySheetRepository implements SheetRepository {
 
   async getRows(): Promise<SheetRow[]> {
     return copyRows(this.rows);
-  }
-
-  async getTemplates(): Promise<SheetTemplate[]> {
-    return clone(this.templates);
-  }
-
-  async loadTemplate(templateId: string): Promise<SheetSnapshot> {
-    const template = this.templates.find((candidate) => candidate.id === templateId);
-    if (!template) {
-      throw new Error(`Unknown sheet template: ${templateId}`);
-    }
-
-    this.columns = normalizeColumns(template.columns);
-    this.rows = copyRows(template.rows ?? []);
-    this.renewals = [];
-    return { columns: await this.getColumns(), rows: await this.getRows() };
   }
 
   async addColumn(input: ColumnInput): Promise<ColumnDefinition> {

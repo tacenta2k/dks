@@ -21,8 +21,6 @@ import type {
   SheetAuditOptions,
   SheetImportRecord,
   SheetRow,
-  SheetSnapshot,
-  SheetTemplate,
 } from './types';
 
 interface WindowWithDks {
@@ -293,14 +291,6 @@ export class ElectronSheetRepository implements SheetRepository {
       ...(snapshot.deletedRows ?? []).map((row) => localRow(row, 'deleted row')),
     ].filter((row): row is SheetRow => row !== null);
     return clone(uniqueRows(rows));
-  }
-
-  async getTemplates(): Promise<SheetTemplate[]> {
-    return this.fallback.getTemplates();
-  }
-
-  async loadTemplate(templateId: string): Promise<SheetSnapshot> {
-    return this.fallback.loadTemplate(templateId);
   }
 
   async addColumn(input: ColumnInput): Promise<ColumnDefinition> {

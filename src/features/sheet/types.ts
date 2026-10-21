@@ -21,14 +21,6 @@ export interface ColumnInput {
   is_passport?: boolean;
 }
 
-export interface SheetTemplate {
-  id: string;
-  name: string;
-  description?: string;
-  columns: ColumnDefinition[];
-  rows?: SheetRow[];
-}
-
 export interface SheetSnapshot {
   columns: ColumnDefinition[];
   rows: SheetRow[];
