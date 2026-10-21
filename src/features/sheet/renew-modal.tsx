@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 
-import { calculateDaysLeft, isValidIsoDate } from '../../lib/date';
+import { calculateDaysLeft, isValidIsoDate, normalizeUserDateToIso } from '../../lib/date';
 
 export interface RenewModalProps {
   rowLabel: string;
@@ -34,10 +34,13 @@ function defaultFutureExpiry(today?: string | Date): string {
 }
 
 export function validateRenewalDate(value: string, today?: string | Date): string | null {
-  if (!isValidIsoDate(value)) {
-    return 'Enter a valid ISO date (YYYY-MM-DD).';
+  // Accept DD/MM/YYYY (and ISO internally); never show ISO in messages.
+  const normalized = normalizeUserDateToIso(value);
+  const iso = normalized.iso ?? (isValidIsoDate(value) ? value : null);
+  if (!iso) {
+    return 'Choose a valid date (DD/MM/YYYY).';
   }
-  if ((calculateDaysLeft(value, today) ?? 0) <= 0) {
+  if ((calculateDaysLeft(iso, today) ?? 0) <= 0) {
     return 'Choose a future expiry date.';
   }
   return null;

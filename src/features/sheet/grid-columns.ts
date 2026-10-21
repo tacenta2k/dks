@@ -150,9 +150,13 @@ export function buildGridColumns(
         };
         definition.valueParser = (params) => {
           const value = params.newValue;
-          return value === null || value === undefined ? value : toStorableDateValue(value);
+          if (value === null || value === undefined || value === '') {
+            return value;
+          }
+          // Impossible dates keep the typed text (warned by diagnostics);
+          // never silently change it to empty or another date.
+          return toStorableDateValue(value) ?? String(value);
         };
-        definition.cellEditorParams = { useFormatter: true };
       }
       if (column.type === 'number' || column.type === 'price') {
         definition.type = 'numericColumn';
