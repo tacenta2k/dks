@@ -50,6 +50,8 @@ export interface DksLocalSnapshot {
   activeRows?: DksLocalRow[];
   deletedRows: DksLocalRow[];
   columns: DksLocalColumn[];
+  /** Soft-deleted columns, exposed so sync can push their deletion upstream. */
+  deletedColumns?: DksLocalColumn[];
   settings?: Record<string, unknown>;
   syncStatus: DksLocalSyncState;
 }

@@ -535,6 +535,13 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         }
       } else if (remote && (!local || remoteWins(localRecord!, remote))) {
         remoteRowsToApply.push(toLocalEntry(remote));
+        // The server version is authoritative and is applied to the local
+        // cache; the queued mutation for this entity is resolved by that
+        // outcome (the conflict above is recorded). Columns already consume
+        // their queue in the equivalent branch — without this, superseded
+        // outbox items stayed pending forever and the pending count only
+        // ever grew.
+        await bookkeeping.markSynced('entry', id);
       } else if (local && remote) {
         // Identical business content: any queued mutation for this entity has
         // already reached the server.
@@ -574,7 +581,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     }
 
     // Columns ---------------------------------------------------------------
-    const localColumns = snapshot.columns ?? [];
+    const localColumns = [...(snapshot.columns ?? []), ...(snapshot.deletedColumns ?? [])];
     const localColumnById = new Map(localColumns.map((column) => [column.id, column]));
     const remoteColumnById = new Map(remoteColumns
       .filter((column) => stringValue(column.id))
@@ -656,6 +663,39 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       });
       appliedEntries = remoteRowsToApply.length;
       appliedColumns = remoteColumnsToApply.length;
+    }
+
+    // Settings --------------------------------------------------------------
+    // Settings changes queue outbox rows just like entries and columns, but
+    // previously only a one-shot save in the renderer could clear them — if
+    // that attempt failed (offline, auth hiccup) the items stayed pending
+    // forever and the pending count only grew. The sync loop now retries them
+    // idempotently: it pushes the CURRENT local settings record for every key
+    // with queued changes, so a retry always uploads the latest local state
+    // and never loses an edit.
+    const settingsItems = outboxItems
+      .map(outboxItemParts)
+      .filter((parts) => parts.entityType === 'settings' && parts.status !== 'synced');
+    if (settingsItems.length > 0) {
+      const localSettings = (snapshot.settings ?? {}) as Record<string, unknown>;
+      const keys = new Set(settingsItems.map((parts) => parts.entityId));
+      try {
+        for (const key of keys) {
+          // Push the CURRENT local value; when the key is no longer stored
+          // locally the queued change is still represented as an explicit null.
+          const value = key in localSettings ? localSettings[key] : null;
+          await upsertRow(options.client, 'settings', { key, value });
+        }
+        for (const parts of settingsItems) {
+          await bookkeeping.markSynced('settings', parts.entityId);
+        }
+      } catch (caught) {
+        const message = caught instanceof Error ? caught.message : String(caught);
+        for (const parts of settingsItems) {
+          await bookkeeping.markFailed('settings', parts.entityId, message);
+        }
+        errors.push(`Settings: ${message}`);
+      }
     }
 
     // Final status ----------------------------------------------------------

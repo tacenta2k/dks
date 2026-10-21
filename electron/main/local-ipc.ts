@@ -346,6 +346,7 @@ function storeSnapshot(store: LocalIpcStore): {
   activeRows: Record<string, unknown>[];
   deletedRows: Record<string, unknown>[];
   columns: Record<string, unknown>[];
+  deletedColumns: Record<string, unknown>[];
   settings: Record<string, unknown>;
   syncStatus: SyncState;
 } {
@@ -357,12 +358,20 @@ function storeSnapshot(store: LocalIpcStore): {
   const columns = store.listColumns(false)
     .map((column) => columnFromUnknown(column))
     .filter((column): column is Record<string, unknown> => column !== null && column.deleted !== true);
+  // Soft-deleted columns are kept separate from the active set so the grid
+  // never shows them, while the sync engine can still push their deletion to
+  // the cloud and consume their outbox entries (previously these outbox items
+  // were orphaned and kept the pending count growing forever).
+  const deletedColumns = store.listColumns(true)
+    .map((column) => columnFromUnknown(column))
+    .filter((column): column is Record<string, unknown> => column !== null && column.deleted === true);
 
   return {
     rows: activeRows,
     activeRows,
     deletedRows,
     columns,
+    deletedColumns,
     settings: cloneSerializable(store.getSettings?.() ?? {}),
     syncStatus: cloneSerializable(store.getSyncStatus()),
   };

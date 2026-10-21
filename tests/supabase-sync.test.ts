@@ -7,6 +7,7 @@ import {
   type SupabaseSyncLocal,
 } from '../src/features/sync/supabase-sync';
 import type { DksLocalColumn, DksLocalRow, DksLocalSnapshot } from '../src/lib/types';
+import { createSqliteStore } from '../electron/main/sqlite';
 
 const LOCAL_ID = '11111111-1111-4111-8111-111111111111';
 const REMOTE_ID = '22222222-2222-4222-8222-222222222222';
@@ -483,5 +484,215 @@ describe('pending outbox synchronisation (B3)', () => {
     expect(result.errors[0]).toContain('not a UUID');
     expect(state.failed).toEqual([{ id: 21, message: expect.stringContaining('not a UUID') }]);
     expect(result.pushedEntries).toBe(1);
+  });
+});
+
+/**
+ * B3 regression: "Sync error · N pending" where N only ever grew (3 -> 8).
+ *
+ * Root causes found and fixed:
+ *   1. Soft-deleted columns were excluded from the sync snapshot, so their
+ *      outbox items could never be consumed and the deletion never reached
+ *      Supabase.
+ *   2. The entry "remote wins" reconciliation branch applied the server row
+ *      but never consumed the superseded outbox items.
+ *   3. Settings outbox items were only cleared by a one-shot renderer save;
+ *      if that failed they were never retried by the sync loop.
+ *
+ * These tests run the REAL SqliteStore outbox (including the real pending
+ * count shown in the UI) against an in-memory Supabase double.
+ */
+describe('outbox queue drains after successful sync (B3)', () => {
+  function createSqliteLocal() {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    const snapshot = () => ({
+      rows: store.listRows(true).map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      deletedRows: store.listRows(true).filter((row) => row.deleted === true)
+        .map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      columns: store.listColumns(false).map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      deletedColumns: store.listColumns(true).filter((column) => column.deleted === true)
+        .map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      settings: store.getSettings(),
+      syncStatus: store.getSyncStatus() as unknown as DksLocalSnapshot['syncStatus'],
+    });
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => store.setSyncStatus(state as never) as unknown as DksLocalSnapshot['syncStatus'],
+      applyRemoteSnapshot: async (input) => {
+        for (const row of input.rows) {
+          store.applyRemoteEntry(row as never);
+        }
+        for (const column of input.columns) {
+          store.applyRemoteColumn(column as never);
+        }
+        return snapshot();
+      },
+      acknowledgeOutbox: async () => store.acknowledgeOutbox() as unknown as DksLocalSnapshot['syncStatus'],
+      recordConflict: async (conflict) => {
+        store.recordConflict({ ...conflict, resolved: false } as never);
+      },
+      listOutbox: async (input) => store.listOutbox(input?.status ?? 'all') as unknown as SupabaseOutboxItem[],
+      markOutboxSynced: (id) => {
+        store.markOutboxSynced(id);
+      },
+      markOutboxFailed: (id, message) => {
+        store.markOutboxFailed(id, message);
+      },
+      retryFailedOutbox: async () => store.retryFailedOutbox(),
+    };
+    return { store, local };
+  }
+
+  function createFakeRemote(initial: Record<string, Record<string, unknown>[]> = {}, failSettings = false) {
+    const tables: Record<string, Record<string, unknown>[]> = {};
+    for (const [table, rows] of Object.entries(initial)) {
+      tables[table] = rows.map((row) => ({ ...row }));
+    }
+    const upserts: Array<{ table: string; values: Record<string, unknown>[] }> = [];
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({ data: tables[table] ?? [], error: null }),
+        upsert: async (values) => {
+          if (failSettings && table === 'settings') {
+            return { data: null, error: { message: 'settings write denied' } };
+          }
+          upserts.push({ table, values: values.map((value) => ({ ...value })) });
+          const rows = tables[table] ?? (tables[table] = []);
+          for (const value of values) {
+            const key = typeof value.id === 'string' ? 'id' : 'key';
+            const index = rows.findIndex((row) => row[key] === value[key]);
+            if (index >= 0) {
+              rows[index] = { ...rows[index], ...value };
+            } else {
+              rows.push({ ...value });
+            }
+          }
+          return { data: [...values], error: null };
+        },
+      }),
+      rpc: async (_name, args) => {
+        const id = String(args.p_entry_id ?? '');
+        tables.entries = (tables.entries ?? []).filter((row) => row.id !== id);
+        return { data: null, error: null };
+      },
+    };
+    return { client, tables, upserts };
+  }
+
+  it('drains the pending count to zero after a successful sync', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.createEntry({
+        id: '11111111-aaaa-4bbb-8ccc-000000000001',
+        data: { name: 'Queued Person' },
+        category: 'Employee',
+      });
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+
+      const { client } = createFakeRemote();
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('healthy');
+      expect(store.getPendingOutboxCount()).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('pushes a deleted column upstream and consumes its outbox item', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      const column = store.createColumn({
+        id: '11111111-aaaa-4bbb-8ccc-000000000010',
+        name: 'Temp Field',
+        type: 'text',
+        position: 0,
+      });
+      store.deleteColumn(column.id, 'admin');
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+
+      const { client, upserts } = createFakeRemote();
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('healthy');
+      const columnUpserts = upserts.filter((entry) => entry.table === 'app_columns');
+      expect(columnUpserts.some((entry) => entry.values.some((value) => (
+        value.name === 'Temp Field' && value.deleted === true
+      )))).toBe(true);
+      expect(store.getPendingOutboxCount()).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('retries queued settings through the sync loop and clears them', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.setSettings({ theme: 'dark', notification_days: [7, 1] });
+      expect(store.getPendingOutboxCount()).toBe(2);
+
+      const { client, upserts } = createFakeRemote();
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('healthy');
+      const settingsUpserts = upserts.filter((entry) => entry.table === 'settings');
+      expect(settingsUpserts.flatMap((entry) => entry.values)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ key: 'theme', value: 'dark' }),
+        expect.objectContaining({ key: 'notification_days', value: [7, 1] }),
+      ]));
+      expect(store.getPendingOutboxCount()).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps settings items pending and reports the error when the remote rejects them', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.setSettings({ theme: 'dark' });
+
+      const { client } = createFakeRemote({}, true);
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('error');
+      expect(result.errors.join(' ')).toMatch(/settings/i);
+      // Never cleared to hide the failure.
+      expect(store.getPendingOutboxCount()).toBe(1);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('consumes superseded outbox items when the server version wins', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      const row = store.createEntry({
+        id: '11111111-aaaa-4bbb-8ccc-000000000002',
+        data: { name: 'Edited locally' },
+        category: 'Employee',
+      });
+      expect(store.getPendingOutboxCount()).toBe(1);
+
+      const { client, tables } = createFakeRemote({
+        entries: [{
+          id: '11111111-aaaa-4bbb-8ccc-000000000002',
+          data: { name: 'Edited elsewhere' },
+          category: 'Employee',
+          deleted: false,
+          created_at: row.created_at,
+          updated_at: '2026-01-06T00:00:00.000Z',
+        }],
+      });
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('healthy');
+      expect(result.appliedEntries).toBe(1);
+      expect(store.getPendingOutboxCount()).toBe(0);
+      expect(store.getEntry('11111111-aaaa-4bbb-8ccc-000000000002')?.data)
+        .toEqual({ name: 'Edited elsewhere' });
+      expect(tables.entries[0].data).toEqual({ name: 'Edited elsewhere' });
+    } finally {
+      store.close();
+    }
   });
 });
