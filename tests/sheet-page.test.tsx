@@ -1,11 +1,46 @@
+import type { Session } from '@supabase/supabase-js';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
+import { AuthService, type AuthClientLike } from '../src/features/auth/auth-service';
 import { SheetPage } from '../src/features/sheet/SheetPage';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 import { App } from '../src/renderer/App';
 import { seedFixtureColumns } from './fixtures/sheet-columns';
+
+const demoSession = {
+  access_token: 'access-token',
+  refresh_token: 'refresh-token',
+  expires_in: 3600,
+  expires_at: 2_000_000_000,
+  token_type: 'bearer',
+  user: {
+    id: 'user-1',
+    email: 'admin@example.com',
+    aud: 'authenticated',
+    app_metadata: {},
+    user_metadata: {},
+    created_at: '2025-01-01T00:00:00.000Z',
+  },
+} as Session;
+
+function makeAuthClient(profile: Record<string, unknown> | null, restoredSession: Session | null = null) {
+  const client: AuthClientLike = {
+    auth: {
+      signInWithPassword: vi.fn().mockResolvedValue({ data: { session: restoredSession, user: restoredSession?.user }, error: null }),
+      getSession: vi.fn().mockResolvedValue({ data: { session: restoredSession }, error: null }),
+      signOut: vi.fn().mockResolvedValue({ error: null }),
+      onAuthStateChange: vi.fn(() => ({ data: { subscription: { unsubscribe: vi.fn() } } })),
+    },
+    from: vi.fn(() => ({
+      select: vi.fn(() => ({
+        eq: vi.fn(() => ({ maybeSingle: vi.fn().mockResolvedValue({ data: profile, error: null }) })),
+      })),
+    })),
+  };
+  return client;
+}
 
 describe('sheet page', () => {
   it('offers a first-column action in the empty state without a Visa template (F3)', async () => {
@@ -64,7 +99,15 @@ describe('sheet page', () => {
   });
 
   it('retains the default local sheet repository while navigating the workspace', async () => {
-    render(<App initialView="sheet" startInWorkspace />);
+    // Real authenticated flow (restored session) — the offline-demo
+    // startInWorkspace entry only exists when Supabase is unconfigured.
+    const service = new AuthService(makeAuthClient({
+      id: 'user-1',
+      email: 'admin@example.com',
+      role: 'admin',
+    }, demoSession));
+    render(<App authService={service} initialView="sheet" />);
+    await screen.findByRole('banner', { name: 'DKS top bar' });
 
     fireEvent.click(await screen.findByRole('button', { name: 'Add your first column' }));
     fireEvent.change(await screen.findByLabelText('Column name'), { target: { value: 'Name' } });
