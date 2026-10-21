@@ -130,6 +130,31 @@ function isConfirmed(message: string): boolean {
     : window.confirm(message);
 }
 
+/**
+ * Human-readable row label for confirmations and status messages (S1/S2):
+ * the first text-like column value wins, with a stable fallback instead of a
+ * raw record id.
+ */
+export function displayRowLabel(row: SheetRow, columns: readonly ColumnDefinition[]): string {
+  const preferred = columns.find((column) => (
+    column.deleted !== true
+    && ['text', 'notes', 'phone', 'email'].includes(column.type)
+  ));
+  const fallbacks = columns.filter((column) => (
+    column.deleted !== true && column.id !== preferred?.id
+  ));
+  for (const column of [...(preferred ? [preferred] : []), ...fallbacks]) {
+    const value = row.data[column.id] ?? row.data[column.name];
+    if (typeof value === 'string' && value.trim()) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
+  return 'Untitled record';
+}
+
 async function importSourceForFile(file: File): Promise<ImportSource> {
   if (typeof file.arrayBuffer === 'function') {
     return file;
@@ -468,6 +493,7 @@ export function AdminRecycleBinPanel({
   const [columns, setColumns] = useState<ColumnDefinition[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
+  const [busyRowId, setBusyRowId] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -488,38 +514,55 @@ export function AdminRecycleBinPanel({
   }, [refresh]);
 
   const restore = async (row: SheetRow) => {
-    if (!isConfirmed(`Restore ${row.id} to the active sheet?`)) {
+    if (busyRowId) {
+      return;
+    }
+    if (!isConfirmed(`Restore ${displayRowLabel(row, columns)} to the active sheet?`)) {
       return;
     }
     if (!repository.restoreRow) {
       setError('This repository does not support restoring rows.');
       return;
     }
+    setBusyRowId(row.id);
+    setStatus(null);
     try {
       await repository.restoreRow(row.id, actorOptions(actor));
       await refresh();
       onRepositoryChanged?.();
-      setStatus(`Restored ${row.id}.`);
+      setStatus(`Restored ${displayRowLabel(row, columns)}.`);
     } catch (caught) {
+      // The row must remain visible in the Recycle Bin until the restore has
+      // actually succeeded.
       setError(caught instanceof Error ? caught.message : 'Unable to restore the row.');
+    } finally {
+      setBusyRowId(null);
     }
   };
 
   const permanentDelete = async (row: SheetRow) => {
-    if (!isConfirmed(`Permanently delete ${row.id}? This cannot be undone.`)) {
+    if (busyRowId) {
+      return;
+    }
+    if (!isConfirmed(`Permanently delete ${displayRowLabel(row, columns)}? This cannot be undone.`)) {
       return;
     }
     if (!repository.permanentDeleteRow) {
       setError('This repository does not support permanent deletion.');
       return;
     }
+    setBusyRowId(row.id);
+    setStatus(null);
     try {
       await repository.permanentDeleteRow(row.id, actorOptions(actor));
       await refresh();
       onRepositoryChanged?.();
-      setStatus(`Permanently deleted ${row.id}.`);
+      setStatus(`Permanently deleted ${displayRowLabel(row, columns)}.`);
     } catch (caught) {
+      // Never hide the record when deletion failed; surface the real error.
       setError(caught instanceof Error ? caught.message : 'Unable to permanently delete the row.');
+    } finally {
+      setBusyRowId(null);
     }
   };
 
