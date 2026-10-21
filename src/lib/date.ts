@@ -8,7 +8,7 @@
  * components and only use UTC midnight for an integer day-number calculation.
  */
 
-export type ExpiryStatus = 'Valid' | 'Expiring Soon' | 'Urgent' | 'Expired';
+export type ExpiryStatus = 'Valid' | 'Expiring Soon' | 'Urgent' | 'Expires today' | 'Expired';
 
 export interface StatusThresholds {
   /** A value strictly above this number is considered Valid. */
@@ -182,7 +182,11 @@ export function resolveThresholds(
   };
 }
 
-/** Map a day count to the user-facing expiry status. */
+/** Map a day count to the user-facing expiry status.
+ *
+ * The reviewed UI spec keeps "Expires today" (days = 0) distinct from
+ * "Expired" (the date has already passed).
+ */
 export function statusForDays(
   days: number | null | undefined,
   thresholds: StatusThresholds = {},
@@ -193,8 +197,12 @@ export function statusForDays(
 
   const resolved = resolveThresholds(thresholds);
 
-  if (days <= resolved.expiredAt) {
+  if (days < 0) {
     return 'Expired';
+  }
+
+  if (days === 0) {
+    return 'Expires today';
   }
 
   if (days > resolved.validAbove) {
@@ -219,3 +227,157 @@ export const calculateDaysRemaining = calculateDaysLeft;
 export const getExpiryStatus = statusForDays;
 export const DEFAULT_STATUS_THRESHOLDS = DEFAULT_THRESHOLDS;
 export const getStatusForDays = statusForDays;
+
+// ---------------------------------------------------------------------------
+// User-facing DD/MM/YYYY handling (F2)
+//
+// The database stores YYYY-MM-DD.  Everything the user sees — grid cells,
+// CSV, Excel, print, PDF — uses DD/MM/YYYY.  Typing inserts separators
+// progressively and pasted values are normalised; impossible calendar dates
+// (31/02/2026) are reported and never silently converted to another date.
+// ---------------------------------------------------------------------------
+
+const DISPLAY_DATE_PATTERN = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/;
+const DASHED_DATE_PATTERN = /^(\d{1,2})-(\d{1,2})-(\d{4})$/;
+
+export interface NormalizedUserDate {
+  /** ISO calendar date when the input is a real calendar date. */
+  iso: string | null;
+  /** True when the input looks like a date but is not a possible calendar day. */
+  impossible: boolean;
+}
+
+function pad(value: number): string {
+  return String(value).padStart(2, '0');
+}
+
+/** Render a stored ISO date (or a Date) as the user-facing DD/MM/YYYY text. */
+export function formatDisplayDate(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  if (value instanceof Date) {
+    const parts = dateToCalendarParts(value);
+    return parts ? `${pad(parts.day)}/${pad(parts.month)}/${parts.year}` : '';
+  }
+  const text = String(value).trim();
+  const isoParts = parseIsoParts(text);
+  if (isoParts) {
+    return `${pad(isoParts.day)}/${pad(isoParts.month)}/${isoParts.year}`;
+  }
+  const display = DISPLAY_DATE_PATTERN.exec(text);
+  if (display) {
+    return `${pad(Number(display[1]))}/${pad(Number(display[2]))}/${display[3]}`;
+  }
+  return text;
+}
+
+export const toDisplayDate = formatDisplayDate;
+export const formatDdMmYyyy = formatDisplayDate;
+
+/** Parse DD/MM/YYYY (or dashed/compact variants) into ISO without timezone drift. */
+export function normalizeUserDateToIso(value: string | Date | null | undefined): NormalizedUserDate {
+  if (value instanceof Date) {
+    const parts = dateToCalendarParts(value);
+    return parts
+      ? { iso: `${parts.year}-${pad(parts.month)}-${pad(parts.day)}`, impossible: false }
+      : { iso: null, impossible: false };
+  }
+  if (value === null || value === undefined) {
+    return { iso: null, impossible: false };
+  }
+
+  const text = String(value).trim();
+  if (!text) {
+    return { iso: null, impossible: false };
+  }
+
+  // Already ISO.
+  if (ISO_DATE_PATTERN.test(text)) {
+    return { iso: parseIsoParts(text) ? text : null, impossible: !parseIsoParts(text) };
+  }
+
+  const display = DISPLAY_DATE_PATTERN.exec(text) ?? DASHED_DATE_PATTERN.exec(text);
+  if (display) {
+    const day = Number(display[1]);
+    const month = Number(display[2]);
+    const year = Number(display[3]);
+    const candidate = { year, month, day };
+    if (!parseIsoParts(`${year}-${pad(month)}-${pad(day)}`)) {
+      return { iso: null, impossible: true };
+    }
+    return { iso: `${candidate.year}-${pad(candidate.month)}-${pad(candidate.day)}`, impossible: false };
+  }
+
+  // Compact digits typed without separators: DDMMYYYY (10012004 → 10/01/2004).
+  const compact = /^(\d{2})(\d{2})(\d{4})$/.exec(text);
+  if (compact) {
+    return normalizeUserDateToIso(`${compact[1]}/${compact[2]}/${compact[3]}`);
+  }
+
+  // ISO with slashes: YYYY/MM/DD.
+  const isoSlashed = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(text);
+  if (isoSlashed) {
+    return normalizeUserDateToIso(`${isoSlashed[1]}-${pad(Number(isoSlashed[2]))}-${pad(Number(isoSlashed[3]))}`);
+  }
+
+  return { iso: null, impossible: false };
+}
+
+export const parseUserDate = normalizeUserDateToIso;
+export const userDateToIso = normalizeUserDateToIso;
+
+/**
+ * Format keystrokes inside a date field while the user is typing.
+ * `10` → `10/`, `1001` → `10/01/`, `10012004` → `10/01/2004`.
+ */
+export function formatDateTyping(raw: string): string {
+  const digits = raw.replace(/\D/g, '').slice(0, 8);
+  if (!digits) {
+    return '';
+  }
+  const day = digits.slice(0, 2);
+  const month = digits.slice(2, 4);
+  const year = digits.slice(4, 8);
+
+  if (digits.length <= 2) {
+    return digits.length === 2 ? `${day}/` : day;
+  }
+  if (digits.length <= 4) {
+    return digits.length === 4 ? `${day}/${month}/` : `${day}/${month}`;
+  }
+  return `${day}/${month}/${year}`;
+}
+
+export const formatDateInputTyping = formatDateTyping;
+
+/** True when a stored value is a real ISO calendar date. */
+export function isIsoDateValue(value: unknown): boolean {
+  return isValidIsoDate(value);
+}
+
+/** True when the value is a user-facing DD/MM/YYYY date (valid calendar day). */
+export function isDisplayDate(value: unknown): boolean {
+  return typeof value === 'string' && normalizeUserDateToIso(value).iso !== null
+    && DISPLAY_DATE_PATTERN.test(value.trim());
+}
+
+/**
+ * Convert a cell value to the form stored in `data` for date-type columns:
+ * valid user input becomes ISO; impossible or unparseable text stays exactly
+ * as typed so the user can see and correct it (never silently rewritten).
+ */
+export function toStorableDateValue(value: unknown): unknown {
+  if (value === null || value === undefined) {
+    return value;
+  }
+  const text = String(value);
+  if (!text.trim()) {
+    return '';
+  }
+  if (isValidIsoDate(text.trim())) {
+    return text.trim();
+  }
+  const normalized = normalizeUserDateToIso(text);
+  return normalized.impossible || !normalized.iso ? text : normalized.iso;
+}

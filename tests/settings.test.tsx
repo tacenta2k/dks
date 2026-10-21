@@ -37,7 +37,8 @@ describe('settings page', () => {
     expect(screen.getByLabelText('Green status color')).toHaveValue('#16a34a');
     expect(screen.getByLabelText('Yellow status color')).toHaveValue('#eab308');
     expect(screen.getByLabelText('Urgent status color')).toHaveValue('#f97316');
-    expect(screen.getByLabelText('Expired status color')).toHaveValue('#dc2626');
+    expect(screen.getByLabelText('Today status color')).toHaveValue('#dc2626');
+    expect(screen.getByLabelText('Expired status color')).toHaveValue('#7f1d1d');
     expect(screen.getByLabelText('Currency code')).toHaveValue('OMR');
     expect(screen.getByLabelText('Currency symbol')).toHaveValue('ر.ع.');
     expect(screen.getByLabelText('Currency decimals')).toHaveValue(3);

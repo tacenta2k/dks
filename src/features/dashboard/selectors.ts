@@ -73,6 +73,7 @@ const STATUS_ORDER: readonly ExpiryStatus[] = [
   'Valid',
   'Expiring Soon',
   'Urgent',
+  'Expires today',
   'Expired',
 ];
 
@@ -153,6 +154,8 @@ export function getDashboardSummary(
   });
 
   const countWithin = (maximum: number) => daysByRow.filter(({ days }) => withinDays(days, maximum)).length;
+  // "Expires today" (days = 0) is a distinct status; Expired counts only
+  // dates that have already passed.
   const expiredCount = daysByRow.filter(({ status }) => status === 'Expired').length;
   const cardCounts: Record<DashboardFilterId, number> = {
     all: activeRows.length,

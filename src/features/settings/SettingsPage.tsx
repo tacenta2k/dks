@@ -91,6 +91,7 @@ const STATUS_COLOR_FIELDS: ReadonlyArray<{
   { key: 'Valid', label: 'Green status color' },
   { key: 'Expiring Soon', label: 'Yellow status color' },
   { key: 'Urgent', label: 'Urgent status color' },
+  { key: 'Expires today', label: 'Today status color' },
   { key: 'Expired', label: 'Expired status color' },
 ];
 
@@ -107,11 +108,13 @@ function mergeColorSettings(
     ...(supplied.Valid !== undefined ? { Valid: supplied.Valid } : {}),
     ...(supplied['Expiring Soon'] !== undefined ? { 'Expiring Soon': supplied['Expiring Soon'] } : {}),
     ...(supplied.Urgent !== undefined ? { Urgent: supplied.Urgent } : {}),
+    ...(supplied['Expires today'] !== undefined ? { 'Expires today': supplied['Expires today'] } : {}),
     ...(supplied.Expired !== undefined ? { Expired: supplied.Expired } : {}),
     ...(supplied.green !== undefined ? { Valid: supplied.green } : {}),
     ...(supplied.yellow !== undefined ? { 'Expiring Soon': supplied.yellow } : {}),
     ...(supplied.orange !== undefined ? { Urgent: supplied.orange } : {}),
-    ...(supplied.red !== undefined ? { Expired: supplied.red } : {}),
+    ...(supplied.red !== undefined ? { 'Expires today': supplied.red } : {}),
+    ...(supplied.darkRed !== undefined ? { Expired: supplied.darkRed } : {}),
   };
 }
 
