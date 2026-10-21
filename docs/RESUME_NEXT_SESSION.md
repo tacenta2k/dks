@@ -229,3 +229,24 @@ button (for example the passport checkbox or the template action).
 - [ ] Optional: Resend API key and recipient in Supabase Edge Function
       secrets; the app must work fully without email.
 - [ ] Provide a square PNG ≥256px for the app icon.
+
+
+
+
+
+## Additional issue — Recycle Bin permanent delete fails
+
+- As Admin, clicking “Permanently delete” in the Recycle Bin fails.
+- Electron reports:
+  `Error invoking remote method 'dks:local:permanent-delete-row':
+  TypeError: Cannot read properties of undefined (reading 'ensureOpen')`
+- Expected: after confirmation, permanently delete the record, update local
+  SQLite and Supabase consistently, refresh the Recycle Bin, and record the
+  action in the audit log.
+- Investigate the IPC handler, preload bridge, repository/store initialization,
+  and any `ensureOpen` call. Do not merely suppress the exception.
+- Enforce Admin authorization on the server/RPC as well as in the UI.
+- Add tests for successful permanent deletion and rejection of a non-admin.
+- Be careful about partial completion: check the test record in both the app
+  and Supabase before retrying, since the error alone does not prove whether
+  a local or remote delete already happened.
