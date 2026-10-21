@@ -1,132 +1,432 @@
+# DKS — Project Handoff
+
+Read this file first. Old chat history may not be available on another machine.
+The current Git repository and these project documents are the project memory.
+
 ## Files to read first
-1. HANDOFF.md (this file) — overview and rules
-2. docs/RESUME_NEXT_SESSION.md — bugs and functional fixes (do these first)
-3. docs/FIXES_UI.md — locked UI redesign spec (do these second)
 
+1. `HANDOFF.md` — project overview, security rules, current status, and workflow
+2. `docs/RESUME_NEXT_SESSION.md` — non-UI bugs, functional decisions, and verification checklist
+3. `docs/FIXES_UI.md` — reviewed UI redesign specification
 
-# DKS: Project Handoff
+The non-UI and UI work are tracked separately. Do not create a
+`docs/FIXES_NON_UI.md` file unless the user explicitly requests one.
 
-Read this file first. Old chat history is not available on other machines.
-This file, the git history, and the code are the project memory.
+If requirements conflict, do not silently choose a version or invent a new
+requirement. Point out the conflict and ask the user.
 
 ## What DKS is
 
-Windows desktop app (Electron .exe) for a small Oman medical/visa office.
-It tracks visa, passport, and document expiry dates in an Excel-like grid.
-It uses Supabase for cloud data and an offline SQLite cache.
-Two shared logins: ADMIN and OFFICE. Windows notifications, tray icon, auto-update.
+DKS is a Windows desktop application (`.exe`) for a small medical/visa office
+in Oman. It tracks visas, passports, and document expiry dates in an
+Excel-like grid.
 
-## Repo and checkpoint
+Core requirements:
 
-- Repo: https://github.com/tacenta2k/dks (public), branch: main
-- Latest commit: 9c08b5e "wip: checkpoint before moving to new laptop"
-  This contains ALL current work, including unfinished sync, conflict, settings, and notification work.
-- DO NOT reset or revert to older commits. Continue on top of 9c08b5e.
-- Test status at 9c08b5e is NOT yet re-verified on the new machine. Verify first.
+- Supabase Postgres is the cloud database.
+- SQLite is used only for the local offline cache and sync queue.
+- There are two shared accounts: ADMIN and OFFICE.
+- The app supports Windows notifications, a system tray, and automatic updates.
+- Real customer data must not be used in public test data or committed to Git.
 
-## Stack (fixed, do not change)
+## Repository and current checkpoint
 
-- Electron + electron-vite, React 18, TypeScript strict, Tailwind (dark/light)
-- AG Grid Community (sheet), Zustand (state), date-fns, lucide-react
-- @supabase/supabase-js (publishable key only)
-- better-sqlite3 (offline cache + outbox), electron-log
-- electron-builder (Windows NSIS), electron-updater (GitHub Releases)
-- Recharts (dashboard), SheetJS/xlsx (CSV/XLSX), jsPDF + jspdf-autotable (PDF)
-- Node pinned to 20.19.0 in .nvmrc
-- Dockerfile and Makefile exist only for reproducibility. They are NOT app features and are not needed on Windows.
+- Repository: https://github.com/tacenta2k/dks
+- Branch: `main`
+- The repository is public. Never commit secrets or real customer records.
+- Do not pin work to an old commit hash. At the start of a session, inspect the
+  actual current state using:
 
-## Environment
+```bash
+git status
+git branch --show-current
+git log -5 --oneline
+```
 
-- Create `.env` locally in the project root. NEVER commit it:
-  VITE_SUPABASE_URL=https://vjhlccafuqupbxajccvy.supabase.co
-  VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_ETVdXQdfIfGeOyICJ-G6Mg_uv24shQk
-- The publishable key is public by design. Security comes from RLS in the database.
+- Preserve existing changes. Do not reset, revert, or check out an older commit
+  without the user's explicit permission.
+- Continue on top of the current latest commit on `main`.
 
-## Supabase
+## Project documentation
 
-- Project URL: https://vjhlccafuqupbxajccvy.supabase.co
-- Auth users (already created; UUIDs are seeded in schema.sql):
-  - ADMIN:  shahabasnavas123@gmail.com   uuid 846536af-f3c6-47c1-8559-d13442c1490a
-  - OFFICE: amervisamedical1dks@gmail.com uuid 2a959122-d789-4f2e-8fdf-958260c2e3f9
-- User passwords are NOT stored anywhere. The user types them at login. Never ask for them.
-- "Automatically expose new tables" is DISABLED. schema.sql MUST keep explicit GRANTs to `authenticated`, or every query fails.
-- Never use or request: service_role key, database password, connection string, GitHub token.
+- `docs/RESUME_NEXT_SESSION.md` is the detailed source of truth for reported
+  non-UI bugs, functional changes, environment observations, and test steps.
+- `docs/FIXES_UI.md` is the source of truth for reviewed UI/layout decisions.
+- Do not create a fourth requirements file unless the user asks.
+- When adding a new issue, update the appropriate existing document and clearly
+  distinguish confirmed behavior from something that still needs verification.
 
-## Hard rules (never violate)
+## Technology stack
 
-1. NO backups of any kind: no automatic CSV/local backup files, no Supabase Storage, no `dks-backups` bucket, no scheduled exports, no "Backup Now" button.
-2. CSV/XLSX import and export exist ONLY as manual, admin-only actions the user starts by clicking. No automatic file writes anywhere.
-3. ADMIN only: import, export, print/PDF, Settings, Audit Log, Recycle Bin, restore, permanent delete, delete a column that contains data, change which column is Primary Expiry.
-4. OFFICE: view, add, edit, duplicate rows; soft-delete with confirmation; add columns; delete a column ONLY if it is empty (server-checked); show/hide/reorder/resize columns; mark renewed; snooze/dismiss alerts. Office CAN type expiry date values in any expiry column. Only choosing the Primary column is admin-only.
-5. RLS and server functions enforce every boundary. Hiding a button is not security.
-6. Login once per PC. Session persists until the user clicks Logout.
-7. No secrets in code or git. `.env` stays gitignored.
-8. No formulas in the grid, no attachments, no Outlook/calendar sync, no multi-language.
-9. Days Left: computed only from the PRIMARY date_expiry column, always last/far right, locked, not deletable. Uses the local calendar date. Refreshes at midnight.
-10. Do not invent features. Ask when unclear.
+Do not change the stack without asking the user:
 
-## Business defaults
+- Electron + electron-vite
+- React 18
+- Strict TypeScript
+- Tailwind/app CSS with light and dark themes
+- AG Grid Community
+- Zustand where already used
+- date-fns
+- lucide-react
+- `@supabase/supabase-js` using the publishable key only
+- `better-sqlite3` for local offline cache and outbox
+- electron-log
+- electron-builder for Windows NSIS packaging
+- electron-updater for GitHub Releases
+- Recharts
+- SheetJS/xlsx for user-initiated CSV/XLSX import and export
+- jsPDF + jspdf-autotable for PDF reports
 
-- Currency: OMR, symbol ر.ع., 3 decimals (admin can change in Settings)
-- Categories: Employee, Family, Client
-- Visa types: Visit, Work, Family, Resident
-- Visa template columns: Name, Category, Passport No, Visa Type, Country, Visa Expiry, Phone, Notes
-- Oman passport: 1 letter + 7 digits, OR 8 digits (case- and space-insensitive). Invalid = red border, never blocks save.
-- Duplicate passport: non-blocking yellow warning
-- Phone/email: red border if format is invalid
-- Alert days: 90, 60, 30, 15, 7, 1, 0
-- Row colors: green > 90 days, yellow 30-90, red 1-29, dark red/gray expired. Thresholds are editable by admin.
-- Theme default: light
+Node:
+- `.nvmrc` pins Node `20.19.0`.
+- Some work was tested with Node `v24.21.0`; prefer the pinned Node version
+  for repeatable verification where possible.
+- Do not change Node or dependency versions casually.
 
-## Status
+Docker and Makefile:
+- They may exist for reproducibility, but are not app features.
+- They are not required for normal Windows testing.
 
-Verified earlier (reported by the agent):
-- Scaffold, tray, close-to-tray, single instance, autostart, themes
-- Auth, persisted session, role loading, Logout
-- supabase/schema.sql: tables, RLS, RPCs, triggers, seeds
-- SQLite store, migrations, outbox, last-write-wins merge, 60s sync, realtime refresh
-- AG Grid sheet: add-column wizard, template, row CRUD, duplicate, soft-delete, search, filters, grouping, validation, colors, Days Left, renewal
-- Dashboard cards, pie, 12-month bar
-- Admin pages: import/export, print/PDF, Recycle Bin, Audit Log
-- Notification bell, read/dismiss/snooze, OS toasts
+## Environment variables
 
-NOT yet verified or finished:
-- Conflict handling. Required behavior: row flagged yellow with tooltip "Conflict: also edited elsewhere at [time]", BOTH versions written to audit_log, no silent overwrite.
-- Office delete -> admin bell notification -> View / Restore, end to end.
-- Settings saved to Supabase and synced across PCs.
-- Changing the Primary Expiry column recalculates Days Left and colors.
-- Leftover backup code or references (must be zero).
-- Final README.
-- Live Supabase test (RLS, login, sync between PCs).
-- NSIS installer build (`npm run dist`) and install test.
+Create `.env` locally in the project root. Never commit `.env`.
 
-## Remaining work (in order)
+```env
+VITE_SUPABASE_URL=https://vjhlccafuqupbxajccvy.supabase.co
+VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_ETVdXQdfIfGeOyICJ-G6Mg_uv24shQk
+```
 
-1. Run `npm test`, `npm run typecheck`, `npm run build`. Fix failures in place. Do not reset git.
-2. Search the repo for: backup, backups, dks-backups, storage.buckets, storage.objects, Backup Now, DKS_Backups. Remove every match, including tests. Commit.
-3. Finish conflict handling per the rules above. Commit.
-4. Verify admin delete notification flow end to end. Commit.
-5. Verify settings sync and Primary Expiry propagation. Commit.
-6. Output the final `supabase/schema.sql` in ONE fenced block labeled `PASTE INTO SUPABASE SQL EDITOR`. The user runs it manually.
-7. Finalize README: setup, .env, SQL step, roles, free-tier notes, release steps, troubleshooting (SmartScreen, notifications off, offline sync).
-8. `npm run dist` to build the NSIS installer. Report the output path.
-9. Release steps are documented only; the user runs them.
+The Supabase key above is a publishable key, intended for client applications.
+Database security must come from RLS and appropriate server-side functions, not
+from hiding this key.
 
-## Manual steps (USER only; the agent must not attempt these)
+Never request, use, or commit:
 
-- Create `.env` locally (values above).
-- Run schema.sql in Supabase Dashboard > SQL Editor > New query > Run.
-- Reset both user passwords via Authentication > Users > "Send password recovery". Do NOT delete users.
-- Optional email: Resend API key goes in Supabase Edge Function secrets only. The app must work without it.
-- Installing the .exe: SmartScreen > More info > Run anyway (unsigned app).
-- Windows Settings > System > Notifications > DKS = ON.
-- Each PC: log in once with the correct role.
-- Releasing: bump version in package.json, set GH_TOKEN in that terminal session only, then `npm run release`. Never commit the token.
+- Supabase service-role/secret key
+- Supabase database password
+- Postgres connection string
+- User passwords
+- GitHub token
+- Resend API key in client code
+
+## Supabase project and users
+
+Project URL:
+
+```text
+https://vjhlccafuqupbxajccvy.supabase.co
+```
+
+Existing Auth users:
+
+```text
+ADMIN
+  email: shahabasnavas123@gmail.com
+  UUID: 846536af-f3c6-47c1-8559-d13442c1490a
+
+OFFICE
+  email: amervisamedical1dks@gmail.com
+  UUID: 2a959122-d789-4f2e-8fdf-958260c2e3f9
+```
+
+Important:
+
+- These are shared accounts. An audit event can identify the Admin or Office
+  account, but cannot identify which individual staff member used the shared
+  Office login. Do not imply otherwise.
+- User passwords are never stored in code or documentation. Users enter them
+  in the app when signing in.
+- The user was advised to reset passwords because they appeared in an earlier
+  chat. Confirm whether this has been done, but never ask the user to disclose
+  a password.
+- Do not delete or recreate these Auth users. Their UUIDs are referenced by
+  the schema seed.
+- Supabase has “Automatically expose new tables” disabled. SQL must keep
+  explicit grants to the required roles, including `authenticated`.
+
+Schema status:
+
+- `supabase/schema.sql` has already been run in Supabase SQL Editor.
+- Supabase returned `Success. No rows returned`, which is normal for DDL.
+- Do not ask the user to run the same schema again without first inspecting
+  whether it is safe and necessary.
+- If a future database change is required, prepare an appropriate migration
+  and explain its effects. The user runs SQL manually.
+
+## Security and permissions
+
+Roles:
+
+- `admin`
+- `office`
+
+Office users can:
+
+- View active rows and columns.
+- Add, edit, and duplicate rows.
+- Soft-delete rows with confirmation.
+- Add columns.
+- Use the supported row/column operations allowed by the current permission
+  rules.
+- Delete a column only if it is empty, with the empty check enforced by the
+  server/database.
+- Edit date values in any expiry column, including the primary expiry value.
+- Mark records as renewed.
+- Use the permitted reminder snooze/dismiss actions.
+
+Office users cannot, within the DKS application:
+
+- Import, export, or print/PDF.
+- Open Settings, Audit Log, or Recycle Bin.
+- Restore or permanently delete rows.
+- Delete a column containing data.
+- Choose or change which expiry column is primary.
+
+Admins can perform all supported operations, including the restricted
+administrative operations above.
+
+Security implementation requirements:
+
+- Use RLS and server functions for database access controls.
+- Enforce role restrictions in the app’s service/Electron IPC layer as well as
+  the renderer. Hiding a button alone is not enough.
+- Do not put privileged service-role credentials in the desktop application.
+
+Important limitation — do not overstate export security:
+
+Office users need permission to read records in order to use the sheet.
+Database read access does not, by itself, distinguish “displaying records” from
+“exporting records.” Therefore, RLS alone cannot prevent a technically capable
+Office user from querying records outside the DKS interface. The app can enforce
+Admin-only Import/Export/Print controls as an application policy, with role
+checks in its service and Electron handlers. Do not claim that RLS makes the
+records impossible to extract by an Office client. If the user requires that
+stronger guarantee, explain the architecture trade-off and ask before changing
+the data-access design.
+
+## Data, column, and date rules
+
+The sheet starts with no pre-seeded user columns. Users create columns through
+the column setup flow.
+
+Do not add hard-coded business columns or values:
+
+- No pre-seeded Category column or Employee/Family/Client options.
+- No pre-seeded Visa Type column or Visit/Work/Family/Resident options.
+- No pre-seeded Notes or Country column.
+- No “Load Visa Template” action.
+- Users may create their own Text, Dropdown, or Notes columns when needed.
+
+Supported generic column types include:
+
+- Text
+- Number
+- Phone
+- Email
+- Price/Amount
+- Date, followed by Start Date or Expiry Date
+- Dropdown
+- Checkbox
+- Notes
+
+Date rules:
+
+- All user-visible dates use `DD/MM/YYYY`.
+- The database stores dates as `YYYY-MM-DD`.
+- Date typing and paste should normalize to `DD/MM/YYYY` for the UI.
+- Only a `date_expiry` column can drive Days Left.
+- Multiple expiry columns are allowed, but one is designated Primary Expiry.
+- Only Admin chooses or changes the Primary Expiry column.
+- Office users can still edit date values in expiry columns.
+- Invalid dates may show a visual warning but should not silently change to a
+  different date.
+
+Passport rules:
+
+- Passport values are plain text.
+- Do not apply an Oman-specific or other country-specific passport format rule.
+- Do not add a “Passport number column” validation checkbox.
+- Duplicate passport values may show a non-blocking yellow warning.
+
+Phone and email format warnings may be visual-only and must not block saving.
+
+Days Left:
+
+- Computed from the Primary `date_expiry` value and the local calendar date.
+- Always the final/far-right locked column.
+- Not user-editable, deletable, or reorderable.
+- Recalculated when the expiry value, primary column, or local date changes.
+
+## Privacy and file handling
+
+No backups of any kind:
+
+- No automatic local CSV/Excel/JSON backup files.
+- No scheduled exports.
+- No Supabase Storage backup bucket.
+- No `dks-backups` bucket.
+- No “Backup Now” control.
+- SQLite is permitted only for the live offline cache and sync queue; it is
+  not an additional export/backup feature.
+
+Keep explicit, user-initiated CSV/XLSX import/export and Print/PDF for Admin
+only. These are data exchange/report features, not automatic backups.
+
+A code search may find tests or documentation whose purpose is to assert that
+backup functionality is absent. Do not delete such tests or documentation
+blindly; remove actual backup implementation, storage policies, schedules, and
+UI.
+
+## Current verified state and observed issues
+
+The packaged executable `release\win-unpacked\DKS.exe` was tested by the user:
+
+Verified:
+
+- The packaged executable opens.
+- Login works.
+- Typing in grid cells works.
+- The Add Column wizard opens.
+- Data was observed in Supabase `entries` and `app_columns`.
+- Settings opens in the packaged executable.
+- The Supabase schema script was applied successfully.
+
+Not yet confirmed end-to-end:
+
+- Every pending outbox item has synchronized.
+- Office/Admin RLS boundaries have all been tested.
+- Live realtime synchronization between two PCs.
+- Every setting persists and synchronizes across PCs.
+- Admin delete notification, restore, and permanent delete.
+- Export/import/print correctness in the packaged executable.
+
+Reported findings to investigate are detailed in `docs/RESUME_NEXT_SESSION.md`.
+Important examples:
+
+- CSV/XLSX export reportedly produced blank files; reproduce in the packaged
+  executable before deciding whether it is fixed.
+- The packaged app displayed `Sync error · 3 pending`; inspect those pending
+  operations and their actual errors. Do not clear the queue or discard local
+  changes.
+- Permanent delete from Recycle Bin failed with an IPC `ensureOpen` error.
+  Do not suppress the error; trace and fix the store/IPC initialization and
+  verify whether the record was partially deleted before retrying.
+- `npm run dev` started Vite but did not visibly show an Electron window.
+  `npx electron .` also showed no window. The packaged executable did work.
+  Treat the packaged executable as the primary test target until dev launch is
+  fixed.
+- A Settings freeze was reported in browser preview, but the user later
+  confirmed Settings opens in the packaged executable. Do not report this as a
+  confirmed packaged-app failure unless it can be reproduced there.
+
+Browser-preview warning:
+
+- `http://127.0.0.1:5173` opened in a normal browser is not the Electron app.
+- It does not provide the Electron preload bridge (`window.dks`) or native
+  SQLite.
+- Do not treat browser/in-memory preview data as saved app data.
+- The UI should identify preview mode clearly and warn that preview data is not
+  persisted.
+- Persistent/offline/cloud behavior must be tested in the packaged executable
+  or a real Electron window.
+
+## Reported build and test results
+
+Use the actual latest results on the current machine; do not assume these
+results still apply.
+
+Previously reported:
+
+- `npm ci` completed under Node `v24.21.0`, but the project engine requires
+  Node `>=20.19.0 <21`.
+- `npm ci` reported 28 audit vulnerabilities, including 4 critical. Review
+  before release. Do not run `npm audit fix --force` blindly.
+- npm warned that lifecycle scripts for some expected packages were not
+  approved. Follow npm’s current instructions and approve only expected
+  dependencies needed for Electron, esbuild, and better-sqlite3.
+- `npm test`: 33 test files, 126 passed and 5 failed.
+- The failing tests include outdated placeholder/workspace assumptions in
+  `tests/app-shell.test.tsx` and `tests/sheet-page.test.tsx`. Update the tests
+  to reflect the real authenticated flow; do not weaken production auth or
+  delete meaningful test coverage just to get a green result.
+- `npm run typecheck` passed.
+- `npm run build` passed, with Vite deprecation and large-chunk warnings.
+- `npm run dist` produced `release\win-unpacked\DKS.exe`, which the user ran
+  successfully. The NSIS installer step failed while extracting
+  `winCodeSign` because Windows did not permit symbolic-link creation.
+  Details and next steps are in `docs/RESUME_NEXT_SESSION.md`.
+
+Native-module commands, only if needed:
+
+```bash
+npm rebuild better-sqlite3
+npx electron-builder install-app-deps
+```
+
+## Required work order
+
+1. Read all three project documents.
+2. Inspect git status and recent history. Preserve all current work.
+3. Run `npm test`, `npm run typecheck`, and `npm run build`; report actual
+   results.
+4. Fix non-UI bugs and functional requirements in
+   `docs/RESUME_NEXT_SESSION.md`.
+5. After the non-UI work is tested, implement the UI requirements in
+   `docs/FIXES_UI.md`.
+6. Do not reintroduce anything explicitly removed in either requirements
+   document.
+7. Re-test the packaged executable, RLS, pending sync, installer, and relevant
+   user workflows.
+8. Finalize README and document release steps. The user performs releases.
+
+## User-only manual actions
+
+The AI agent must not attempt these or request secrets:
+
+- Create `.env` on a new machine; never commit it.
+- Run future SQL manually in Supabase SQL Editor if the user approves a
+  required migration.
+- Confirm whether the two previously exposed Supabase passwords have been
+  reset; never request their values.
+- Configure optional Resend secrets in Supabase Edge Function secrets if the
+  user chooses email notifications.
+- Install and test the `.exe` on office PCs.
+- Enable Windows notifications for DKS in Windows Settings.
+- Set `GH_TOKEN` in a terminal session only when publishing a release.
+- Run/publish the final release.
+
+## Packaging and release notes
+
+For Windows packaging:
+
+- Run `npm run build` first.
+- Run `npm run dist` to build locally without publishing.
+- The previous NSIS build failed because `winCodeSign` extraction required
+  symbolic-link privileges. Try an Administrator terminal or Windows Developer
+  Mode, as documented in `docs/RESUME_NEXT_SESSION.md`.
+- Do not claim the NSIS installer works until a successful installer build
+  and install test have been completed.
+
+For releases:
+
+- Public GitHub repo: `tacenta2k/dks`.
+- User-only action: bump the package version, set `GH_TOKEN` in the release
+  terminal session only, and run the documented release command.
+- Never put the token in source, `.env`, GitHub files, or the app binary.
 
 ## Working rules for the AI agent
 
-- Work phase by phase. After each phase: list changed files, give test steps, then STOP.
-- Run tests after every change. Commit each working step.
-- Never ask for or accept passwords, service_role keys, DB passwords, or GitHub tokens.
-- Do not add Docker, Makefile, backups, or extra services as "requirements".
-- If a native module error appears: `npm rebuild better-sqlite3` for tests; `npx electron-builder install-app-deps` for the Electron app.
+- Work in small, reviewable steps.
+- Before editing, inspect the current git state and preserve uncommitted work.
+- Do not make unrelated changes.
+- Run relevant tests after each implementation step; then run typecheck/build
+  before marking a phase complete.
+- Commit verified work as requested by the user. Do not silently force-push.
+- After each phase, report changed files, test results, and remaining issues,
+  then STOP and wait for the user.
+- Never ask for passwords, service-role keys, database passwords, connection
+  strings, GitHub tokens, or Resend keys.
+- Do not add backup features or claim Docker/Makefile is required for the app.
+- Do not weaken authentication or authorization to make tests pass.
+- Ask the user when a requirement is ambiguous or conflicts with the approved
+  documents.
