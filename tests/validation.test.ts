@@ -1,3 +1,4 @@
+import * as validationModule from '../src/lib/validation';
 import { describe, expect, it } from 'vitest';
 
 import { type ColumnDefinition } from '../src/lib/columns';
@@ -25,6 +26,17 @@ describe('cell diagnostics', () => {
       expect(result.valid).toBe(true);
       expect(result.severity).toBe('none');
     }
+  });
+
+  it('keeps the removed country-specific passport format API absent (F1)', () => {
+    // These helpers enforced an Oman-specific format and drove the old
+    // "invalid format" styling. They must never come back.
+    const validation = validationModule as Record<string, unknown>;
+    expect(validation.isValidOmanPassport).toBeUndefined();
+    expect(validation.validateOmanPassport).toBeUndefined();
+    expect(validation.validatePassport).toBeUndefined();
+    expect(validation.isValidPassport).toBeUndefined();
+    expect(Object.keys(validation).some((key) => /oman|format/i.test(key))).toBe(false);
   });
 
   it('compares passport text case- and spacing-insensitively for duplicate warnings', () => {

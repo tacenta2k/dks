@@ -54,8 +54,6 @@ export function normalizePassportValue(value: unknown): string {
 }
 
 export const normalizePassport = normalizePassportValue;
-export const normalizeOmanPassport = normalizePassportValue;
-export const normaliseOmanPassport = normalizePassportValue;
 
 function isFiniteNumber(value: unknown): boolean {
   if (typeof value === 'number') {
