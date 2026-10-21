@@ -435,7 +435,36 @@ export class SqliteStore {
     }
     this.now = normalizedOptions.now ?? normalizedOptions.clock ?? (() => new Date().toISOString());
     this.idFactory = normalizedOptions.idFactory ?? normalizedOptions.idGenerator ?? randomUUID;
+    this.bindInstanceMethods();
     this.applyMigrations();
+  }
+
+  /**
+   * Permanently bind every prototype method to this instance.
+   *
+   * The recycle-bin permanent-delete crash
+   * (`TypeError: Cannot read properties of undefined (reading 'ensureOpen')`)
+   * happened because IPC helpers extracted a method reference
+   * (`const remove = store.permanentDeleteEntry`) and invoked it detached, so
+   * `this` was `undefined` inside `ensureOpen()`. Call sites now bind
+   * explicitly, and this binding makes detachment safe for every method of
+   * this store — the fix lives at the store layer, not just at the one call
+   * site that was observed crashing.
+   */
+  private bindInstanceMethods(): void {
+    let prototype = Object.getPrototypeOf(this) as object | null;
+    while (prototype && prototype !== Object.prototype) {
+      for (const key of Object.getOwnPropertyNames(prototype)) {
+        if (key === 'constructor') {
+          continue;
+        }
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, key);
+        if (descriptor && typeof descriptor.value === 'function') {
+          (this as unknown as Record<string, unknown>)[key] = descriptor.value.bind(this);
+        }
+      }
+      prototype = Object.getPrototypeOf(prototype) as object | null;
+    }
   }
 
   private ensureOpen(): void {
