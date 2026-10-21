@@ -1,3 +1,9 @@
+## Files to read first
+1. HANDOFF.md (this file) — overview and rules
+2. docs/RESUME_NEXT_SESSION.md — bugs and functional fixes (do these first)
+3. docs/FIXES_UI.md — locked UI redesign spec (do these second)
+
+
 # DKS: Project Handoff
 
 Read this file first. Old chat history is not available on other machines.
