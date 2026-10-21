@@ -1,6 +1,7 @@
 import * as XLSX from 'xlsx';
 
 import type { ColumnDefinition } from '../../lib/columns';
+import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
 import { can } from '../../lib/permissions';
 import type { Role } from '../auth/auth-types';
 import type { AuditPayload } from '../audit/audit-types';
@@ -104,25 +105,150 @@ async function sourceForXlsx(source: ImportSource): Promise<string | ArrayBuffer
 
 async function parseSource(source: ImportSource, fileName?: string): Promise<ParsedSource> {
   const input = await sourceForXlsx(source);
+  const resolvedName = sourceFileName(source, fileName);
+  const isCsvText = typeof input === 'string' || /\.csv$/i.test(resolvedName);
+
+  if (isCsvText) {
+    // CSV is parsed as plain text. Letting a spreadsheet library guess types
+    // rewrites user-entered dates (10/01/2004 becomes a US-locale value) and
+    // strips leading zeroes from text such as passport numbers.
+    const text = typeof input === 'string'
+      ? input
+      : new TextDecoder('utf-8').decode(input instanceof Uint8Array ? input : new Uint8Array(input));
+    return { fileName: resolvedName, matrix: parseCsvMatrix(text) };
+  }
+
   const workbook = XLSX.read(input, {
-    type: typeof input === 'string' ? 'string' : 'array',
-    raw: false,
+    type: 'array',
+    raw: true,
     cellDates: false,
   });
   const firstSheetName = workbook.SheetNames[0];
   if (!firstSheetName) {
-    return { fileName: sourceFileName(source, fileName), matrix: [] };
+    return { fileName: resolvedName, matrix: [] };
   }
   const firstSheet = workbook.Sheets[firstSheetName];
   const matrix = XLSX.utils.sheet_to_json<unknown[]>(firstSheet, {
     header: 1,
     defval: '',
-    raw: false,
+    raw: true,
   });
   return {
-    fileName: sourceFileName(source, fileName),
+    fileName: resolvedName,
     matrix: matrix.map((row) => Array.isArray(row) ? row : []),
   };
+}
+
+/** Minimal RFC-4180-style CSV matrix parser (quotes, commas, escaped quotes). */
+export function parseCsvMatrix(text: string): string[][] {
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let field = '';
+  let inQuotes = false;
+  let index = 0;
+
+  const pushField = () => {
+    row.push(field);
+    field = '';
+  };
+  const pushRow = () => {
+    pushField();
+    rows.push(row);
+    row = [];
+  };
+
+  while (index < text.length) {
+    const char = text[index];
+    if (inQuotes) {
+      if (char === '"') {
+        if (text[index + 1] === '"') {
+          field += '"';
+          index += 2;
+          continue;
+        }
+        inQuotes = false;
+        index += 1;
+        continue;
+      }
+      field += char;
+      index += 1;
+      continue;
+    }
+    if (char === '"' && field === '') {
+      inQuotes = true;
+      index += 1;
+      continue;
+    }
+    if (char === ',') {
+      pushField();
+      index += 1;
+      continue;
+    }
+    if (char === '\r' && text[index + 1] === '\n') {
+      pushRow();
+      index += 2;
+      continue;
+    }
+    if (char === '\n' || char === '\r') {
+      pushRow();
+      index += 1;
+      continue;
+    }
+    field += char;
+    index += 1;
+  }
+  if (field !== '' || row.length > 0) {
+    pushRow();
+  }
+  return rows;
+}
+
+const EXCEL_SERIAL_MIN = 20_000;
+const EXCEL_SERIAL_MAX = 80_000;
+const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
+
+function isExcelDateSerial(value: number): boolean {
+  return Number.isFinite(value) && value >= EXCEL_SERIAL_MIN && value <= EXCEL_SERIAL_MAX;
+}
+
+function excelSerialToIso(value: number): string | null {
+  const date = new Date(EXCEL_EPOCH_UTC + Math.round(value) * 86_400_000);
+  if (Number.isNaN(date.getTime())) {
+    return null;
+  }
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, '0');
+  const day = String(date.getUTCDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+
+function excelSerialToDisplay(value: number): string {
+  const iso = excelSerialToIso(value);
+  return iso ? formatDisplayDate(iso) : String(value);
+}
+
+/** Display form used by the import preview table. */
+function previewCell(value: unknown, columnType: string | undefined): unknown {
+  if (columnType === 'date_start' || columnType === 'date_expiry') {
+    if (typeof value === 'number' && isExcelDateSerial(value)) {
+      return excelSerialToDisplay(value);
+    }
+    if (typeof value === 'string' && value.trim()) {
+      return formatDisplayDate(value.trim()) || value;
+    }
+  }
+  return value;
+}
+
+/** Storage form used when writing imported values into row data. */
+function importedValue(value: unknown, columnType: string | undefined): unknown {
+  if (columnType === 'date_start' || columnType === 'date_expiry') {
+    if (typeof value === 'number' && isExcelDateSerial(value)) {
+      return excelSerialToIso(value) ?? value;
+    }
+    return toStorableDateValue(value);
+  }
+  return value;
 }
 
 function normaliseHeader(value: unknown): string {
@@ -162,10 +288,16 @@ function mappingsForHeaders(
 function previewRows(
   headers: readonly string[],
   rawRows: readonly unknown[][],
+  mappings: readonly ImportMapping[],
+  columns: readonly ColumnDefinition[],
 ): Array<Record<string, unknown>> {
+  const typeByHeader = new Map(mappings.map((mapping) => [
+    mapping.header,
+    columns.find((column) => column.id === mapping.columnId)?.type,
+  ]));
   return rawRows.slice(0, 20).map((row) => headers.reduce<Record<string, unknown>>((record, header, index) => {
     if (header.trim()) {
-      record[header] = row[index] ?? '';
+      record[header] = previewCell(row[index] ?? '', typeByHeader.get(header));
     }
     return record;
   }, {}));
@@ -179,7 +311,7 @@ function makePreview(parsed: ParsedSource, columns: readonly ColumnDefinition[])
   return {
     fileName: parsed.fileName,
     headers,
-    rows: previewRows(headers, dataRows),
+    rows: previewRows(headers, dataRows, mappings, columns),
     rawRows: dataRows.slice(0, 20).map((row) => [...row]),
     mappings,
     unmappedHeaders,
@@ -282,6 +414,7 @@ export async function importRows(source: ImportSource, options: ImportOptions): 
 
   const records: ImportRecord[] = [];
   const rawRows = parsed.matrix.slice(1);
+  const columnTypeById = new Map(columns.map((column) => [column.id, column.type]));
   rawRows.forEach((row, rowIndex) => {
     if (!isNonEmptyRow(row)) {
       return;
@@ -289,7 +422,12 @@ export async function importRows(source: ImportSource, options: ImportOptions): 
     const data = mappings.reduce<Record<string, unknown>>((record, mapping) => {
       const value = valueForSourceRow(row, mapping.sourceIndex);
       if (value !== '') {
-        record[mapping.columnId] = value;
+        // Date columns store ISO (YYYY-MM-DD); DD/MM/YYYY (and compact/dashed
+        // variants) are normalised on import. Impossible dates keep their text
+        // so the row-level preview can surface the problem instead of silently
+        // rewriting it. Text-like values keep leading zeroes as typed.
+        const columnType = columnTypeById.get(mapping.columnId);
+        record[mapping.columnId] = importedValue(value, columnType);
       }
       return record;
     }, {});

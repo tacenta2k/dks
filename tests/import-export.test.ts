@@ -12,6 +12,8 @@ import {
 import type { ColumnDefinition } from '../src/lib/columns';
 import type { SheetRow } from '../src/features/sheet/types';
 
+const CRLF = String.fromCharCode(13, 10);
+
 const columns: ColumnDefinition[] = [
   { id: 'name', name: 'Name', type: 'text', position: 0 },
   { id: 'passport_no', name: 'Passport No', type: 'text', position: 1 },
@@ -27,34 +29,75 @@ const rows: SheetRow[] = [
 ];
 
 describe('admin import and export workflows', () => {
-  it('exports current rows as CSV using only the explicit column selection', () => {
+  it('exports current rows as CSV using the explicit column selection plus Days Left', () => {
     const result = createCsvExport({
       role: 'admin',
       rows,
       columns,
       selectedColumnIds: ['name', 'visa_expiry'],
       fileName: 'filtered.csv',
+      today: '2026-01-01',
     });
 
     expect(result.fileName).toBe('filtered.csv');
     expect(result.mimeType).toContain('text/csv');
-    expect(result.data).toBe('Name,Visa Expiry\r\n"Ada, Lovelace",2027-01-02\r\n');
+    // Dates render as DD/MM/YYYY (F2) and the generated Days Left column is
+    // appended after the visible user columns (export requirements).
+    expect(result.data).toBe(
+      ['Name,Visa Expiry,Days Left', '"Ada, Lovelace",02/01/2027,366', ''].join(CRLF),
+    );
   });
 
-  it('exports an XLSX workbook that retains explicit headers and values', () => {
+  it('exports an XLSX workbook with explicit headers, DD/MM/YYYY dates, and Days Left', () => {
     const result = createXlsxExport({
       role: 'admin',
       rows,
       columns,
-      selectedColumnIds: ['passport_no', 'name'],
+      selectedColumnIds: ['passport_no', 'name', 'visa_expiry'],
       fileName: 'filtered.xlsx',
+      today: '2026-01-01',
     });
 
     const workbook = XLSX.read(result.data, { type: 'array' });
     expect(XLSX.utils.sheet_to_json(workbook.Sheets[workbook.SheetNames[0]], { header: 1 })).toEqual([
-      ['Passport No', 'Name'],
-      ['A-1', 'Ada, Lovelace'],
+      ['Passport No', 'Name', 'Visa Expiry', 'Days Left'],
+      ['A-1', 'Ada, Lovelace', '02/01/2027', 366],
     ]);
+  });
+
+  it('omits hidden columns and computes Days Left from the primary expiry', () => {
+    const withHidden: ColumnDefinition[] = [
+      ...columns,
+      { id: 'internal', name: 'Internal', type: 'text', position: 3, visible: false },
+    ];
+    const multiRow: SheetRow[] = [
+      {
+        id: 'row-1',
+        data: { name: 'Ada', passport_no: 'A-1', visa_expiry: '2026-01-01', internal: 'secret' },
+        deleted: false,
+      },
+      {
+        id: 'row-2',
+        data: { name: 'Grace', passport_no: 'G-2', visa_expiry: '2026-01-08' },
+        deleted: false,
+      },
+    ];
+
+    const result = createCsvExport({
+      role: 'admin',
+      rows: multiRow,
+      columns: withHidden,
+      today: '2026-01-01',
+    });
+
+    expect(result.data).toBe([
+      'Name,Passport No,Visa Expiry,Days Left',
+      'Ada,A-1,01/01/2026,0',
+      'Grace,G-2,08/01/2026,7',
+      '',
+    ].join(CRLF));
+    expect(result.data).not.toContain('secret');
+    expect(result.data).not.toContain('Internal');
   });
 
   it('rejects office export and import attempts at the service boundary', async () => {
@@ -102,7 +145,8 @@ describe('admin import and export workflows', () => {
     });
 
     expect(preview.fileName).toBe('rows.xlsx');
-    expect(preview.rows).toEqual([{ Name: 'Ada', 'Visa Expiry': '2027-01-02' }]);
+    // Date columns preview in user-facing DD/MM/YYYY form.
+    expect(preview.rows).toEqual([{ Name: 'Ada', 'Visa Expiry': '02/01/2027' }]);
     expect(preview.mappings).toEqual(expect.arrayContaining([
       expect.objectContaining({ header: 'Visa Expiry', columnId: 'visa_expiry' }),
     ]));
@@ -133,6 +177,26 @@ describe('admin import and export workflows', () => {
       actorId: 'user-1',
       details: expect.objectContaining({ importedRows: 1, fileName: 'rows.csv' }),
     }));
+  });
+
+  it('normalises imported date values to ISO storage form for date columns', async () => {
+    const result = await importRows('Name,Visa Expiry\nAda,10/01/2004', {
+      role: 'admin',
+      columns,
+      fileName: 'rows.csv',
+    });
+
+    expect(result.records[0]?.data).toEqual({ name: 'Ada', visa_expiry: '2004-01-10' });
+  });
+
+  it('keeps leading zeroes in text-like values during CSV import', async () => {
+    const result = await importRows('Name,Passport No\nAda,007', {
+      role: 'admin',
+      columns,
+      fileName: 'rows.csv',
+    });
+
+    expect(result.records[0]?.data).toEqual({ name: 'Ada', passport_no: '007' });
   });
 
   it('ignores unmapped fields by default when no create-column callback is supplied', async () => {
