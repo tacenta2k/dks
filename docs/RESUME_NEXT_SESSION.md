@@ -250,3 +250,13 @@ button (for example the passport checkbox or the template action).
 - Be careful about partial completion: check the test record in both the app
   and Supabase before retrying, since the error alone does not prove whether
   a local or remote delete already happened.
+
+
+### B6 — Sync error with 3 pending changes
+The packaged DKS.exe showed “Sync error · 3 pending” while logged in as
+Admin. Some entries and columns reached Supabase, but it is unknown which
+queued operations failed. Inspect the local outbox and the actual error for
+each operation; check authorization/RLS, RPC calls and row IDs. Retry safely
+without duplicating changes or discarding pending local edits. Verify the
+same fictional test records in the app and Supabase after synchronization
+and a full restart. Do not put customer data or credentials in logs.
