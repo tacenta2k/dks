@@ -411,6 +411,14 @@ export function App({
         setSyncStatus(next);
         return next;
       },
+      listOutbox: async (input) => local.listOutbox?.(input) ?? [],
+      markOutboxSynced: async (id) => {
+        await local.markOutboxSynced?.({ id });
+      },
+      markOutboxFailed: async (id, message) => {
+        await local.markOutboxFailed?.({ id, message });
+      },
+      retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
     };
     const syncClient = client as unknown as SupabaseDataClient;
 
@@ -419,7 +427,11 @@ export function App({
         return;
       }
       running = true;
-      const result = await runSupabaseSync({ client: syncClient, local: syncLocal });
+      const result = await runSupabaseSync({
+        client: syncClient,
+        local: syncLocal,
+        userId: profile?.id ?? null,
+      });
       running = false;
       if (!stopped && result.status === 'healthy') {
         setRepositoryRevision((revision) => revision + 1);

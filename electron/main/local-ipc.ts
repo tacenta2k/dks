@@ -37,6 +37,10 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   getSettings: 'dks:local:get-settings',
   setSettings: 'dks:local:set-settings',
   setSyncStatus: 'dks:local:set-sync-status',
+  listOutbox: 'dks:local:list-outbox',
+  markOutboxSynced: 'dks:local:mark-outbox-synced',
+  markOutboxFailed: 'dks:local:mark-outbox-failed',
+  retryFailedOutbox: 'dks:local:retry-failed-outbox',
   flushSync: 'dks:local:flush-sync',
   close: 'dks:local:close',
 } as const);
@@ -84,6 +88,10 @@ export interface LocalIpcStore {
     entityId: string;
     payload: unknown;
   }) => unknown;
+  listOutbox?: (status?: string) => readonly unknown[];
+  markOutboxSynced?: (id: number | string) => void;
+  markOutboxFailed?: (id: number | string, message: string) => void;
+  retryFailedOutbox?: () => number;
   sync?: () => Promise<void> | void;
   flush: () => Promise<void> | void;
   close: () => CloseSyncResult;
@@ -280,9 +288,13 @@ function permanentDeleteRow(
   updatedBy: string | null | undefined,
   now: () => string,
 ): unknown | null {
+  // Bind the store explicitly: class methods such as SqliteStore's
+  // permanentDeleteEntry dereference `this.ensureOpen()`, and invoking a
+  // detached reference would crash with "Cannot read properties of undefined
+  // (reading 'ensureOpen')".
   const remove = store.permanentDeleteEntry ?? store.permanentDeleteRow;
   if (remove) {
-    return remove(id, idempotencyKey, updatedBy);
+    return remove.call(store, id, idempotencyKey, updatedBy);
   }
 
   // SqliteStore predates this bridge operation and intentionally keeps its
@@ -446,7 +458,9 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
     [LOCAL_IPC_CHANNELS.restoreRow]: (payload) => {
       const input = asRecord(payload, 'restore row input');
       const id = idFrom(input, 'row id');
-      const role = input.role === undefined ? 'admin' : roleFrom(input.role);
+      // Admin authorisation is mandatory at the IPC boundary as well as the
+      // preload bridge. A missing role is denied, never assumed to be admin.
+      const role = roleFrom(input.role);
       if (role !== 'admin') {
         throw new Error('administrator role is required');
       }
@@ -461,7 +475,9 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
     [LOCAL_IPC_CHANNELS.permanentDeleteRow]: (payload) => {
       const input = asRecord(payload, 'permanent-delete row input');
       const id = idFrom(input, 'row id');
-      const role = input.role === undefined ? 'admin' : roleFrom(input.role);
+      // Admin authorisation is mandatory at the IPC boundary as well as the
+      // preload bridge. A missing role is denied, never assumed to be admin.
+      const role = roleFrom(input.role);
       if (role !== 'admin') {
         throw new Error('administrator role is required');
       }
@@ -619,7 +635,7 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         ...(typeof input.createdAt === 'string' ? { createdAt: input.createdAt } : {}),
         ...(typeof input.updatedAt === 'string' ? { updatedAt: input.updatedAt } : {}),
       };
-      return cloneSerializable(add(notification));
+      return cloneSerializable(add.call(store, notification));
     },
 
     [LOCAL_IPC_CHANNELS.updateNotification]: (payload) => {
@@ -644,7 +660,7 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
       if (input.payload !== undefined) {
         patch.payload = dataObject(input.payload, 'notification payload');
       }
-      return cloneSerializable(update(notificationIdFrom(input), patch));
+      return cloneSerializable(update.call(store, notificationIdFrom(input), patch));
     },
 
     [LOCAL_IPC_CHANNELS.applyRemoteSnapshot]: (payload) => {
@@ -749,6 +765,64 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error('pendingCount must be a non-negative integer');
       }
       return cloneSerializable(store.setSyncStatus(state));
+    },
+
+    [LOCAL_IPC_CHANNELS.listOutbox]: (payload) => {
+      const input = payload === undefined ? {} : asRecord(payload, 'outbox list input');
+      const status = input.status === undefined ? 'pending' : requiredString(input.status, 'outbox status');
+      if (!store.listOutbox) {
+        throw new Error('Outbox inspection is unavailable in this local store');
+      }
+      // Metadata only: payloads repeat row data the renderer already has, and
+      // this boundary must not widen the data exposed over IPC.
+      return cloneSerializable(store.listOutbox(status).map((item) => {
+        const record = asRecord(item, 'outbox item');
+        return {
+          id: record.id,
+          idempotencyKey: record.idempotencyKey ?? record.idempotency_key,
+          operation: record.operation,
+          entityType: record.entityType ?? record.entity_type,
+          entityId: record.entityId ?? record.entity_id,
+          status: record.status,
+          attempts: record.attempts,
+          lastError: record.lastError ?? record.last_error ?? null,
+          createdAt: record.createdAt ?? record.created_at,
+        };
+      }));
+    },
+
+    [LOCAL_IPC_CHANNELS.markOutboxSynced]: (payload) => {
+      const input = asRecord(payload, 'outbox acknowledge input');
+      const id = input.id;
+      if (!((typeof id === 'number' && Number.isInteger(id)) || (typeof id === 'string' && id.trim()))) {
+        throw new Error('outbox id is required');
+      }
+      if (!store.markOutboxSynced) {
+        throw new Error('Outbox acknowledgement is unavailable in this local store');
+      }
+      store.markOutboxSynced(id as number | string);
+      return { ok: true };
+    },
+
+    [LOCAL_IPC_CHANNELS.markOutboxFailed]: (payload) => {
+      const input = asRecord(payload, 'outbox failure input');
+      const id = input.id;
+      if (!((typeof id === 'number' && Number.isInteger(id)) || (typeof id === 'string' && id.trim()))) {
+        throw new Error('outbox id is required');
+      }
+      const message = requiredString(input.message, 'outbox failure message');
+      if (!store.markOutboxFailed) {
+        throw new Error('Outbox failure recording is unavailable in this local store');
+      }
+      store.markOutboxFailed(id as number | string, message.slice(0, 500));
+      return { ok: true };
+    },
+
+    [LOCAL_IPC_CHANNELS.retryFailedOutbox]: () => {
+      if (!store.retryFailedOutbox) {
+        throw new Error('Outbox retry is unavailable in this local store');
+      }
+      return { requeued: store.retryFailedOutbox() };
     },
 
     [LOCAL_IPC_CHANNELS.flushSync]: async () => {

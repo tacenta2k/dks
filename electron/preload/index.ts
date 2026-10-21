@@ -166,6 +166,23 @@ export interface DksLocalCloseResult {
   flushed: boolean;
 }
 
+export interface DksLocalOutboxItem {
+  id: number | string;
+  idempotencyKey?: string;
+  idempotency_key?: string;
+  operation: string;
+  entityType?: string;
+  entity_type?: string;
+  entityId?: string;
+  entity_id?: string;
+  status?: string;
+  attempts?: number;
+  lastError?: string | null;
+  last_error?: string | null;
+  createdAt?: string;
+  created_at?: string;
+}
+
 export interface DksLocalApi {
   getSnapshot: () => Promise<DksLocalSnapshot>;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
@@ -188,6 +205,10 @@ export interface DksLocalApi {
   applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
   acknowledgeOutbox: () => Promise<DksLocalSyncState>;
   acknowledgeSettings?: () => Promise<DksLocalSyncState>;
+  listOutbox?: (input?: { status?: string }) => Promise<DksLocalOutboxItem[]>;
+  markOutboxSynced?: (input: { id: number | string }) => Promise<{ ok: boolean }>;
+  markOutboxFailed?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
+  retryFailedOutbox?: () => Promise<{ requeued: number }>;
   recordConflict?: (input: DksLocalConflictInput) => Promise<unknown>;
   getSettings?: () => Promise<Record<string, unknown>>;
   setSettings?: (input: { settings: Record<string, unknown> }) => Promise<Record<string, unknown>>;
@@ -245,6 +266,10 @@ const LOCAL_CHANNELS = {
   applyRemoteSnapshot: 'dks:local:apply-remote-snapshot',
   acknowledgeOutbox: 'dks:local:acknowledge-outbox',
   acknowledgeSettings: 'dks:local:acknowledge-settings',
+  listOutbox: 'dks:local:list-outbox',
+  markOutboxSynced: 'dks:local:mark-outbox-synced',
+  markOutboxFailed: 'dks:local:mark-outbox-failed',
+  retryFailedOutbox: 'dks:local:retry-failed-outbox',
   recordConflict: 'dks:local:record-conflict',
   getSettings: 'dks:local:get-settings',
   setSettings: 'dks:local:set-settings',
@@ -420,6 +445,31 @@ function validateSettingsInput(value: unknown): void {
   requireRecord(input.settings, 'settings');
 }
 
+function validateListOutbox(value: unknown): void {
+  if (value === undefined) return;
+  const input = requireRecord(value, 'outbox list input');
+  if (input.status !== undefined && typeof input.status !== 'string') {
+    throw new TypeError('outbox status must be a string');
+  }
+}
+
+function validateMarkOutboxSynced(value: unknown): void {
+  const input = requireRecord(value, 'outbox acknowledge input');
+  const id = input.id;
+  if (!((typeof id === 'string' && id.trim().length > 0)
+    || (typeof id === 'number' && Number.isSafeInteger(id)))) {
+    throw new TypeError('outbox id is required');
+  }
+}
+
+function validateMarkOutboxFailed(value: unknown): void {
+  const input = requireRecord(value, 'outbox failure input');
+  validateMarkOutboxSynced(input);
+  if (typeof input.message !== 'string' || input.message.trim().length === 0) {
+    throw new TypeError('outbox failure message is required');
+  }
+}
+
 function validateConflict(value: unknown): void {
   const input = requireRecord(value, 'conflict input');
   requireId(input.entityType, 'conflict entity type');
@@ -508,6 +558,10 @@ const localApi: DksLocalApi = Object.freeze({
   applyRemoteSnapshot: (input: DksLocalRemoteSnapshot) => invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.applyRemoteSnapshot, input, validateRemoteSnapshot),
   acknowledgeOutbox: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeOutbox, undefined),
   acknowledgeSettings: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.acknowledgeSettings, undefined),
+  listOutbox: (input: { status?: string } = {}) => invokeLocal<DksLocalOutboxItem[]>(LOCAL_CHANNELS.listOutbox, input, validateListOutbox),
+  markOutboxSynced: (input: { id: number | string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.markOutboxSynced, input, validateMarkOutboxSynced),
+  markOutboxFailed: (input: { id: number | string; message: string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.markOutboxFailed, input, validateMarkOutboxFailed),
+  retryFailedOutbox: () => invokeLocal<{ requeued: number }>(LOCAL_CHANNELS.retryFailedOutbox, undefined),
   recordConflict: (input: DksLocalConflictInput) => invokeLocal<unknown>(LOCAL_CHANNELS.recordConflict, input, validateConflict),
   getSettings: () => invokeLocal<Record<string, unknown>>(LOCAL_CHANNELS.getSettings, undefined),
   setSettings: (input: { settings: Record<string, unknown> }) => invokeLocal<Record<string, unknown>>(LOCAL_CHANNELS.setSettings, input, validateSettingsInput),
