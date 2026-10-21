@@ -1,176 +1,284 @@
 # DKS — UI Redesign Requirements (LOCKED)
 
-Status: Reviewed page-by-page and approved by the user (Aswin).
-Scope: UI/UX only — layout, spacing, page structure, menus, popups, dialogs, table display, and visual presentation.
+Status: Reviewed page-by-page and approved by the user.
+Scope: UI/UX only — layout, spacing, page structure, menus, popups, dialogs,
+table display, and visual presentation.
 
 Read together with:
-- `HANDOFF.md` — project overview, stack, roles, rules
-- `docs/RESUME_NEXT_SESSION.md` — environment results and recorded bugs
-- `docs/FIXES_NON_UI.md` — functional bugs and behavior fixes
+
+1. `HANDOFF.md` — project overview, security, roles, stack, hard rules
+2. `docs/RESUME_NEXT_SESSION.md` — non-UI bugs, functional decisions,
+   verification tasks, build notes
+
+There is NO `docs/FIXES_NON_UI.md` file.
+
+## Implementation order
+
+1. First complete the functional/non-UI work in
+   `docs/RESUME_NEXT_SESSION.md`.
+2. Ensure tests, typecheck, and build pass.
+3. Then implement this UI redesign in small, tested commits.
+4. Do not reintroduce anything listed in Section 2.
 
 Rules for the AI agent:
-- Do NOT change business logic, RLS, authentication, database schema, or sync behavior because of this file, except where the UI must display existing state.
-- Do NOT invent extra UI features, pages, buttons, or sections that are not described here.
-- Do NOT bring back any element listed in Section 2.
-- If something is unclear or not covered, keep the current behavior and ask the user instead of guessing.
-- Implement in small steps. After each step run `npm test`, `npm run typecheck`, `npm run build`, then commit.
+
+- Do NOT weaken authentication, RLS, roles, sync, or database rules to make
+  the UI easier to implement.
+- Do NOT invent extra pages, buttons, controls, business columns, or features.
+- Do NOT create fake data, seed example people, or delete existing user data.
+- Do NOT use paid AG Grid Enterprise-only features or add paid libraries.
+- Use AG Grid Community-compatible/custom components where needed.
+- After each working UI step run:
+  ```bash
+  npm test
+  npm run typecheck
+  npm run build
+  ```
+  Then commit the verified work.
+- If a requirement conflicts with `HANDOFF.md` or
+  `docs/RESUME_NEXT_SESSION.md`, stop and ask the user rather than guessing.
 
 ---
 
-## 1. Global UI Principles
+# 1. Global UI Principles
 
-DKS is a Windows desktop app for a visa/medical office. It must feel like a fast, compact, Excel-like desktop tool — NOT a website or landing page.
+DKS must feel like a compact Windows desktop office application with an
+Excel-like workspace — not a marketing website or landing page.
 
-- Use screen space efficiently. No narrow centered containers.
-- On the Visa Sheet, the grid is the main thing.
-- Remove unnecessary headings, subtitles, eyebrow labels, cards, and decorative chips.
-- No duplicate controls (every control exists in exactly one place).
-- Same compact top bar and sidebar on every page.
-- Use floating popups/dropdowns, never expanding text inside the top bar.
-- Admin-only controls are fully hidden (not disabled/greyed) for Office users.
-- Show human-readable values only: no UUIDs, no ISO timestamps, no raw JSON in visible UI.
-- All visible dates use `DD/MM/YYYY`. Date-times use `DD/MM/YYYY HH:mm` in local (Oman) time.
+Main goals:
+
+- Use screen space efficiently.
+- Avoid narrow centered containers.
+- Avoid large empty areas.
+- On Visa Sheet, the grid is the main focus.
+- Use one compact global top bar on every page.
+- Use popovers/dropdowns instead of expanding text inside the top bar.
+- Avoid duplicate controls.
+- Hide admin-only features completely for Office users.
+- Display readable text only: no UUIDs, raw JSON, raw ISO timestamps, or
+  developer labels in normal UI.
+- Visible dates: `DD/MM/YYYY`.
+- Visible date/time: `DD/MM/YYYY HH:mm` in Oman time (`Asia/Muscat`).
+- Support light and dark themes consistently.
 
 ---
 
-## 2. Removed Elements — NEVER Reintroduce
+# 2. Removed Elements — NEVER Reintroduce
 
-- Breadcrumbs like `DKS / Workspace`, `DKS / Overview`, `DKS / Administration`
+## Global shell
+
+- Breadcrumbs such as `DKS / Workspace`, `DKS / Overview`,
+  `DKS / Administration`
 - Subtitle `A focused space for your team's records`
-- Eyebrow labels: `WORKSPACE`, `OVERVIEW`, `ADMINISTRATION`, `EXPIRY RULES`, `Admin tools`
-- Developer text like `Your visa records will appear here in STEP 4.` and `STEP 2 · Role-gated workspace`
+- Eyebrow labels such as `WORKSPACE`, `OVERVIEW`, `ADMINISTRATION`,
+  `EXPIRY RULES`, `Admin tools`
+- Developer text such as:
+  - `Your visa records will appear here in STEP 4.`
+  - `STEP 2 · Role-gated workspace`
+  - `Your workspace is ready for the next step.`
 - Visible email text in the top bar
-- Standalone `Log out` button in the top bar
+- Standalone Log out button in the top bar
 - `Theme: Light ▾` / `Theme: Dark ▾` text control
-- Inline notification text in the top bar (`Notifications 0 unread / No notifications`)
-- `Offline-first` decorative pill
-- `Workspace health` box in the sidebar footer (replaced by the real sync status in the top bar)
-- `Export data` button on Dashboard or Settings
-- `ADMINISTRATOR TOOLS / Manage records` card with Export CSV / Export Excel / Import file / Print buttons
-- `Add row` button
-- `Add column` button
-- `Manage columns` button and panel
-- `Group by Category` button
-- `Actions` column in the grid (Duplicate / Delete / Renew buttons)
-- `Load Visa Template` button
-- Category filter dropdown and `Uncategorized · N` chip
-- Hide column feature (no Hide option anywhere, no "Hidden (N)" chip)
-- `Passport number column` checkbox and any passport-format validation UI
-- `Close settings` button
-- Permanent banner `Settings saved to the workspace.`
-- Any backup UI (`Backup Now`, backup section, backup info)
-- Raw row IDs like `row-7ce65046-...` as visible labels
-- Raw ISO timestamps like `2026-10-21T03:50:44.587Z`
-- Raw JSON like `{"before":null,"after":{...}}` in visible table cells
+- Inline notification content in the top bar
+- Decorative `Offline-first` pill
+- Sidebar `Workspace health` footer box
+- Export Data button on Dashboard or Settings
+
+## Visa Sheet
+
+- Add Row toolbar button
+- Add Column toolbar button
+- Manage Columns button/panel
+- Group by Category button
+- Actions grid column containing Duplicate/Delete/Renew buttons
+- Load Visa Template button
+- Built-in Category filter
+- `Uncategorized · N` chip
+- Hide column / unhide column features
+- Passport number column checkbox
+- Country-specific passport validation UI
+- Large Administrator Tools / Manage Records card
+- Separate Export buttons outside the Tools menu
+
+## Settings
+
+- Duplicate Settings headings
+- Close settings button
+- Permanent `Settings saved to the workspace` banner
+- Developer-facing Resend technical text
+- Backup controls or Backup Now UI
+
+## User-facing data
+
+- Raw UUID labels such as `row-7ce65046-...`
+- Raw ISO dates such as `2026-10-21T03:50:44.587Z`
+- Raw JSON inside normal tables
 
 ---
 
-## 3. Global App Shell
+# 3. Global App Shell
 
-### 3.1 Top Bar (every page)
+## 3.1 Compact top bar
 
-Height: about 48–52px. Compact spacing.
+Height: approximately 48–52px.
 
+```text
+[☰] Page Title                          [Sync status] [Bell] [Theme] [Avatar]
 ```
-[☰] Page Title                          [● Saved to cloud] [🔔] [☾] [S]
-```
 
-Left:
-- `☰` sidebar collapse/expand button
-- Plain page title: `Dashboard`, `Visa Sheet`, `Settings`, `Recycle Bin`, `Audit Log`
+### Left side
 
-Right:
+- Sidebar expand/collapse button
+- Current page title only:
+  - Dashboard
+  - Visa Sheet
+  - Settings
+  - Recycle Bin
+  - Audit Log
+
+### Right side
+
 - Real sync status
-- Notification bell (icon only)
-- Theme toggle (icon only)
+- Notification bell icon
+- Theme icon button
 - Profile avatar
 
-The top bar must NOT contain: breadcrumbs, subtitles, email text, logout button, search, filters, import/export, or any page-specific control. It must render on every page (it currently renders blank on Settings — fix that).
+Do NOT place Search, filters, Import, Export, Print, breadcrumbs, email, or
+Logout in the global top bar.
 
-### 3.2 Sync Status (global)
+The top bar must render consistently on every authenticated page, including
+Settings.
 
-Shown on every page because sync runs in the background.
+---
 
-```
+## 3.2 Global sync status
+
+Sync happens in the background on every page, so status belongs in the global
+top bar.
+
+Possible states:
+
+```text
 ● Saved to cloud
 ◐ Syncing…
 ○ Offline — saved locally
 ⚠ Sync error
 ```
 
-- Must reflect the real sync state, never decorative.
-- Hover or click shows a small popup: pending change count, last successful sync time, error details if any.
-- It replaces the old `Offline-first` pill and the sidebar `Workspace health` box.
+Rules:
 
-### 3.3 Notification Bell
+- Must use actual outbox/sync state, never a decorative static label.
+- `Saved to cloud` only appears after confirmed remote acknowledgement.
+- `Offline — saved locally` only appears after successful local SQLite save.
+- `Sync error` must not use a green success icon.
+- Pending count can appear, for example:
+  ```text
+  Syncing… · 3 pending
+  ```
+- Click or keyboard activation opens a compact popover with:
+  - pending change count
+  - last successful sync time
+  - safe/sanitized error message if sync failed
 
-- Compact bell icon with a small unread badge (number) when unread > 0.
-- Click opens a floating popover anchored below the bell. Click outside or press Esc to close.
-- Never render notification text inside the top bar.
-
-Empty:
-```
-Notifications
-No notifications
-```
-
-With items:
-```
-Notifications                         2 unread
-──────────────────────────────────────────────
-🔴 Ahmed Ali expires in 7 days
-   [Snooze] [Dismiss]
-──────────────────────────────────────────────
-🗑 Office deleted Priya Nair · 21/10/2026 09:12
-   [View] [Restore] [Dismiss]
-```
-
-Role rules:
-- Office: expiry alerts only.
-- Admin: expiry alerts + deletion alerts (View / Restore / Dismiss).
-
-### 3.4 Theme Toggle
-
-- Icon button only: ☀ in dark mode, ☾ in light mode.
-- One click toggles light/dark directly.
-- Tooltip: `Switch to dark mode` / `Switch to light mode`.
-- This is a personal, per-PC preference.
-
-### 3.5 Profile Avatar Menu
-
-Top bar shows only the avatar circle with the initial (e.g. `S`).
-
-Click opens popover:
-```
-shahabasnavas123@gmail.com
-[Admin]
-──────────────────────────
-Log out
-```
-
-- Role badge shows `Admin` or `Office`.
-- Logout exists only here (and in the tray menu).
+The real pending sync bug is tracked in `docs/RESUME_NEXT_SESSION.md`. Do not
+hide or clear pending operations merely to make the UI look successful.
 
 ---
 
-## 4. Sidebar
+## 3.3 Notification bell
 
-### 4.1 Expanded (about 220px)
+- Use a compact bell icon button.
+- Show unread badge only when unread count is above zero.
+- Clicking opens a floating popover below/near the bell.
+- Clicking outside or pressing Escape closes it.
+- Never insert notification text into the top bar itself.
 
+Empty state:
+
+```text
+Notifications
+
+No notifications
 ```
+
+Example alerts:
+
+```text
+Ahmed Ali expires in 7 days
+[Snooze] [Dismiss]
+
+Office account deleted Priya Nair
+21/10/2026 09:12
+[View] [Restore] [Dismiss]
+```
+
+Role behavior:
+
+- Office: expiry/reminder alerts only.
+- Admin: expiry/reminder alerts plus Office deletion alerts.
+- Office must never see Admin-only deletion details.
+- Restore appears only when the deleted row is still restorable.
+
+---
+
+## 3.4 Theme toggle
+
+- Icon-only toggle.
+- Light mode shows moon icon with tooltip:
+  `Switch to dark mode`
+- Dark mode shows sun icon with tooltip:
+  `Switch to light mode`
+- One click switches between light and dark.
+- Theme preference is personal/per-PC.
+- All grids, charts, dialogs, popovers, and pages must follow the theme.
+
+---
+
+## 3.5 Profile avatar popup
+
+Only the avatar remains visible in the top bar.
+
+Clicking it opens:
+
+```text
+shahabasnavas123@gmail.com
+[Admin]
+
+────────────────────────
+Log out
+```
+
+Rules:
+
+- Show actual logged-in email and actual role.
+- Logout exists here and in tray menu only.
+- Click outside or Esc closes the popup.
+- Do not discard pending local changes during logout.
+
+---
+
+# 4. Collapsible Sidebar
+
+## Expanded mode
+
+Width: approximately 220px.
+
+```text
 [D] DKS
-    Office workspace   (or "Admin workspace")
+    Admin workspace / Office workspace
 
-Dashboard
-Visa Sheet
-Settings        (Admin only)
-Recycle Bin     (Admin only)
-Audit Log       (Admin only)
+[Dashboard icon] Dashboard
+[Sheet icon]     Visa Sheet
+[Settings icon]  Settings        (Admin only)
+[Recycle icon]   Recycle Bin     (Admin only)
+[Audit icon]     Audit Log       (Admin only)
 ```
 
-### 4.2 Collapsed (about 56px)
+## Collapsed mode
 
-```
+Width: approximately 56px.
+
+```text
 [D]
 [Dashboard icon]
 [Sheet icon]
@@ -180,524 +288,1023 @@ Audit Log       (Admin only)
 ```
 
 Rules:
-- Collapsed shows logo and icons only, no text.
-- Tooltip with the page name on hover when collapsed.
-- Toggled by the `☰` button in the top bar.
-- State (collapsed/expanded) is remembered after restart.
-- Office users never see Settings, Recycle Bin, or Audit Log.
-- Each item gets a distinct, meaningful icon (not the same generic grid icon for all).
-- No footer box at the bottom of the sidebar.
+
+- Collapsed mode shows logo and icons only.
+- Hover/focus tooltip identifies each icon.
+- Sidebar toggle is the `☰` button in global top bar.
+- Expanded/collapsed state persists after app restart.
+- Collapsing must give more width to the current page.
+- Use distinct icons for each page.
+- Current page has clear selected state.
+- Office sees only Dashboard and Visa Sheet.
+- No bottom Workspace Health / STEP footer box.
 
 ---
 
-## 5. Visa Sheet Page (most important)
+# 5. Visa Sheet Page
 
-### 5.1 Layout
+This is the main DKS workspace.
 
-No page header, no cards, no centered container.
+## 5.1 Layout
 
-```
+```text
 Global top bar
-Sheet toolbar (one slim row)
-Grid fills ALL remaining width and height
+One compact Sheet toolbar
+Grid fills remaining width and height
 ```
 
-The grid stretches edge-to-edge (from the sidebar to the right edge, down to the bottom of the window).
+Rules:
 
-### 5.2 Sheet Toolbar
+- No big Visa Sheet title.
+- No page subtitle.
+- No outer centered card.
+- No large empty margins.
+- Grid uses nearly all remaining space.
+- Grid handles row scrolling internally.
+- Horizontal grid scroll is allowed when many columns exist.
 
-Height: about 44–48px. Only on the Visa Sheet page.
+---
 
+## 5.2 Sheet toolbar
+
+Height: approximately 44–48px.
+
+```text
+[Search records…] [Status ▾] [Today] [≤7d] [≤30d] [≤60d] [≤90d] [No expiry] [Group by ▾]      [Tools ▾]
 ```
-[🔍 Search records…] [Status: All ▾] [Today] [≤7d] [≤30d] [≤60d] [≤90d] [No expiry] [Group by ▾]      [Tools ▾]
+
+At normal desktop width, keep it as one row.
+
+### Search
+
+- Exists only here, not in global top bar.
+- Searches across visible user data.
+- Does not prioritize raw IDs as customer labels.
+
+### Status dropdown
+
+Options:
+
+```text
+All statuses
+Valid
+Expiring Soon
+Urgent
+Expired
 ```
 
-- Search: always visible, filters across all visible text.
-- Status dropdown: `All statuses`, `Valid`, `Expiring Soon`, `Urgent`, `Expired`.
-- Date chips (`Today`, `≤7d`, `≤30d`, `≤60d`, `≤90d`, `No expiry`): single-select. Clicking the active chip again clears it. There is NO separate `Expired` chip (Expired lives in the Status dropdown).
-- `Group by ▾`: small dropdown listing only user-created Text or Dropdown columns, plus `None`. Hidden completely if no suitable column exists.
-- `Tools ▾`: Admin only, right-aligned, fully hidden for Office.
+### Quick date filters
 
-Small windows:
-- Search box shrinks first.
-- Less-used chips move into a `More filters ▾` dropdown.
-- Toolbar must never wrap into multiple rows and must never overflow horizontally.
-
-### 5.3 Tools Menu (Admin only)
-
+```text
+Today
+≤7d
+≤30d
+≤60d
+≤90d
+No expiry
 ```
-Tools ▾
+
+Rules:
+
+- Single-select chips.
+- Clicking active chip clears it.
+- `Today` means Days Left = 0.
+- `≤7d` means Days Left 0–7.
+- `≤30d` means Days Left 0–30.
+- `≤60d` means Days Left 0–60.
+- `≤90d` means Days Left 0–90.
+- No expiry means blank/missing Primary Expiry.
+- Past/expired dates are NOT included in upcoming-date chips.
+- Expired is selected from Status dropdown; no separate Expired chip.
+- Search, Status, and date filters combine logically.
+
+### Group by
+
+- Lists only existing user-created Text or Dropdown columns.
+- Includes `None`.
+- Hidden completely when no appropriate column exists.
+- No Category-specific behavior.
+- Group headers appear inside the grid.
+- Group headers are not export rows, report rows, or normal data rows.
+- Use a Community-compatible/custom implementation if native AG Grid grouping
+  requires Enterprise.
+
+### Tools
+
+Admin-only, right aligned:
+
+```text
+Tools
 ├─ Import file
 ├─ Export CSV
 ├─ Export Excel
 └─ Print / PDF report
 ```
 
-- `Print / PDF report` opens the range/column selection dialog (Section 11). It never prints immediately.
-- Hidden in UI for Office AND checked by role in the service/Electron handler (hiding alone is not enough).
+Rules:
 
-### 5.4 Grid Structure
+- Fully absent for Office users.
+- Print/PDF opens report selection dialog; never prints immediately.
+- Tools must use real corrected import/export/print services.
+- Role must also be checked by service/IPC, not just by hidden UI.
 
-```
+### Smaller windows
+
+- Search shrinks first.
+- Less-used quick filters may move into `More filters ▾`.
+- Keep toolbar compact.
+- Do not wrap into several tall rows.
+- Do not overflow entire window horizontally.
+
+---
+
+## 5.3 Grid structure
+
+Example only:
+
+```text
 ┌───┬──────────────┬─────────────┬─────────────┬─────┬────────────┐
 │ # │ Name         │ Passport No │ Visa Expiry★│  +  │ Days Left  │
 ├───┼──────────────┼─────────────┼─────────────┼─────┼────────────┤
-│ 1 │ Ahmed Ali    │ IND12345    │ 15/12/2026  │     │ 65 days    │
-│ 2 │ Priya Nair   │ PAK88888    │ 02/03/2025  │     │ Expired    │
-│ 3 │              │             │             │     │ —          │ ← blank draft row
+│ 1 │ Ahmed Ali    │ TEST12345   │ 15/12/2026  │     │ 65 days    │
+│ 2 │ Priya Nair   │ SAMPLE88    │ 02/03/2025  │     │ Expired    │
+├───┼──────────────┼─────────────┼─────────────┼─────┼────────────┤
+│   │              │             │             │     │ —          │
 └───┴──────────────┴─────────────┴─────────────┴─────┴────────────┘
 ```
 
-Required behavior:
-- Row-number gutter (`1, 2, 3…`) pinned on the left. It is also the right-click target for row menus.
-- Header row sticky when scrolling down.
-- Row gutter and first data column stay visible when scrolling right.
-- Click header = sort (small ↑/↓ indicator).
-- Drag header = reorder user columns (position saved).
-- Drag column border = resize. Double-click border = auto-fit to content.
-- `Days Left` always the last column, pinned right, locked.
-- The primary expiry column shows a small `★` next to its name.
-- Compact rows: about 30–34px tall, 13–14px font.
-- Long text truncates with `…`; full value shown on hover.
-- Clean, subtle 1px Excel-like grid lines.
-- Click a cell to edit directly. Enter moves down, Tab moves right. Ctrl+C / Ctrl+V work.
-- Whole-row tint by status (colors from Settings); the Days Left cell uses a stronger version of the same color.
+Requirements:
 
-### 5.5 Date Cells
+- Row-number gutter pinned left.
+- Header stays visible while scrolling down.
+- First user data column stays visible while scrolling right when feasible.
+- Click header to sort; show small sort direction indicator.
+- Drag user column header to reorder.
+- Drag border to resize.
+- Double-click border auto-fits column content.
+- Do not use AG Grid Enterprise-only APIs.
+- Days Left:
+  - always final column
+  - pinned right
+  - locked
+  - never editable/deletable/reorderable
+- Primary expiry column shows small `★`.
+- Compact row height: approximately 30–34px.
+- Readable 13–14px text.
+- Subtle 1px grid lines.
+- Long values truncate with `…`; full value appears on hover/focus/editor.
+- Whole row is lightly tinted from expiry status.
+- Days Left cell uses stronger status color.
+- Text remains readable on tinted/selected rows.
 
-- Every Date-type column (start or expiry) displays `DD/MM/YYYY`.
-- Typing auto-inserts slashes: `10` → `10/`, `1001` → `10/01/`, `10012004` → `10/01/2004`.
-- Pasting `10012004` becomes `10/01/2004`.
-- A small calendar button / date picker remains available.
-- Invalid dates (e.g. `31/02/2026`) show a red border with a tooltip; saving is not blocked.
-- Applies only to Date-type columns, not to Text columns that happen to be named "Date".
+---
 
-### 5.6 `+` Column Header
+## 5.4 Date cells
 
-```
+Functional date handling is defined in `docs/RESUME_NEXT_SESSION.md`.
+This section defines visible behavior.
+
+- All Date-type columns display `DD/MM/YYYY`.
+- Typing `10012004` becomes `10/01/2004`.
+- Typing inserts slashes progressively.
+- Pasting date digits/text normalizes when possible.
+- Calendar/date picker remains available.
+- Invalid dates show warning border/tooltip.
+- Invalid dates must not silently become another date.
+- Applies only to real Date-type columns, not Text columns with date-like names.
+- Date-only display must not move a date because of timezone conversion.
+
+---
+
+## 5.5 `+` column header
+
+Structure:
+
+```text
 …user columns… │ + │ Days Left
 ```
 
-- Narrow header-only control (about 44–48px), pinned right, immediately before Days Left. Never scrolls out of view.
-- Body cells under it are blank and non-editable.
-- No sort, no filter, no right-click menu.
-- Excluded from CSV, Excel, PDF, and print.
-- Clicking it opens Column Setup (Section 10).
-- With zero user columns, the grid shows only `#`, `+`, and `Days Left`.
+Rules:
 
-### 5.7 Blank Draft Row
+- Width approximately 44–48px.
+- Pinned immediately before Days Left.
+- Header has accessible label `Add column`.
+- Clicking opens Column Setup dialog.
+- No sort/filter/drag/right-click menu.
+- Body cells under it remain blank/non-editable.
+- Excluded from CSV, Excel, Print, and PDF.
+- With zero user columns, show only row gutter, `+`, and Days Left.
+- No A/B/C spreadsheet-letter row.
 
-- Always pinned at the bottom of the grid and always visible, even with hundreds of rows.
-- Typing the first real value into any cell creates and saves a new entry.
-- That row then becomes a normal numbered row and a fresh blank row appears below.
-- Clicking the draft row without typing must NOT create an empty database entry.
-- The draft row is excluded from dashboard counts, export, print, notifications, sorting, and filtering.
+---
 
-### 5.8 Right-Click Menus
+## 5.6 Draft row
 
-Column header (normal user column):
-```
+There is always one blank row pinned at the bottom.
+
+Rules:
+
+- It remains visible while scrolling, sorting, grouping, and filtering.
+- It has no record number until it becomes real.
+- Focusing/clicking alone does not create a row.
+- First meaningful committed value creates exactly one row.
+- Numeric zero and explicit false/checkbox values are meaningful values.
+- Do not create a new row per keystroke.
+- After save, that row becomes normal and a fresh blank draft row appears.
+- Keep editing focus continuous; next field must stay on same record.
+- Esc cancels uncommitted edit.
+- Draft row has no Renew/Duplicate/Delete/Snooze actions.
+- Exclude draft row from:
+  - dashboard counts
+  - notifications
+  - exports
+  - print/PDF
+  - sorting
+  - data sync payloads
+- Never show draft row as an empty saved record.
+
+---
+
+## 5.7 Editing and keyboard behavior
+
+- Click cell then type to edit.
+- Double-click / F2 can also edit.
+- Enter commits and moves down.
+- Tab commits and moves right.
+- Esc cancels active edit.
+- Delete clears editable cell only; does not delete a row.
+- Ctrl+C / Ctrl+V supported through Community-compatible/custom code.
+- Paste plain values; do not interpret formulas.
+- Ctrl+Z / Ctrl+Y applies to supported edits if available.
+- System cells (Days Left, +, row-number gutter) are never editable.
+
+---
+
+## 5.8 Right-click menus
+
+### User-created column header
+
+```text
 Rename
 Duplicate column
 Delete column
 ```
-Admin right-clicking a Date (Expiry) column also sees:
-```
-★ Set as Primary Expiry
+
+Admin on Date (Expiry) column additionally sees:
+
+```text
+Set as Primary Expiry
 ```
 
 Rules:
-- `Days Left` and `+` have no rename/delete menu.
-- No Hide option.
-- Delete always asks confirmation (Section 12).
-- Office can delete only empty columns. Admin can delete a column with data after a strong warning.
-- Duplicate column copies only the name, type, and options — NOT the row values. Default name: `Original Name (copy)`.
 
-Row (right-click the row number or any cell):
-```
+- Days Left and `+` do not show Rename/Delete menu.
+- No Hide option.
+- If column is already Primary, show it as current state; do not leave app with
+  no primary expiry.
+- Office cannot change Primary Expiry selection.
+- Duplicate column copies:
+  - name
+  - type
+  - options
+  It does NOT copy row values.
+- Duplicate default name:
+  ```text
+  Original Name (copy)
+  ```
+- Deletion always confirms.
+- Server checks whether a column contains values across all relevant rows.
+- Office can delete only an empty column.
+- Admin may delete populated column after strong warning.
+
+### Existing row
+
+```text
 Mark as Renewed
 Duplicate row
 Delete row
 Snooze alert
 ```
 
-- Mark as Renewed opens the Renew dialog (Section 11).
-- Delete row asks confirmation, then moves to Recycle Bin.
-- These replace the removed Actions column.
+Rules:
 
-### 5.9 Empty States (only one at a time)
-
-- Zero columns: `Click + to add your first column`
-- Columns but zero saved rows: `Type in the blank row to add your first entry`
-- Filters return nothing: `No records match these filters`
-
-Never show two messages together (e.g. `No Rows To Show` + `No records match the current filters`). The message must never cover the blank draft row.
+- Opens from row number or normal data cell.
+- Renewal requires usable Primary Expiry.
+- Duplicate row copies user values but not ID, deletion state, audit history,
+  renewal history, or snooze state.
+- Delete performs confirmed soft delete.
+- Snooze appears only where reminder is relevant.
+- Draft row has no context menu.
 
 ---
 
-## 6. Dashboard Page
+## 5.9 Empty states
 
-### 6.1 Remove
+Show only one message at a time:
 
-- `OVERVIEW` label, big duplicate `Dashboard` heading, `Your workspace is ready for the next step.`
-- `Offline-first` pill
-- `Export data` button
+- No user columns:
+  ```text
+  Click + to add your first column
+  ```
+- Columns but no saved entries:
+  ```text
+  Type in the blank row to add your first entry
+  ```
+- Filters produce no results:
+  ```text
+  No records match these filters
+  ```
 
-The top bar already shows `[☰] Dashboard`.
+Never show both grid library empty text and application empty text.
+Do not cover `+` header or draft row.
 
-### 6.2 Stat Cards
+---
 
-Full width, compact cards (about 80px tall). Dashboard should fit on one screen without scrolling at normal desktop size.
+# 6. Dashboard
 
-Row 1 — immediate attention (5 cards):
-1. Total Entries (neutral)
-2. Expired (dark red accent)
-3. Expiring Today (red accent)
-4. This Week (orange accent)
-5. This Month (yellow accent)
+## Layout
 
-Row 2 — upcoming (4 cards):
+- Global top bar title: Dashboard.
+- Remove duplicate Dashboard/Overview heading, subtitle, Offline-first pill,
+  and Export Data button.
+- Use available width.
+- Avoid large blank margins.
+
+## Cards
+
+First row:
+
+1. Total Entries
+2. Expired
+3. Expiring Today
+4. This Week
+5. This Month
+
+Second row:
+
 6. Within 2 Months
 7. Within 3 Months
 8. Within 6 Months
 9. Within 1 Year
 
-- Clicking a card opens the Visa Sheet filtered to that range.
+Rules:
 
-### 6.3 Charts
+- Compact cards; target around 80px high on normal desktop.
+- Expired/Today visibly emphasized.
+- Reflow on smaller windows.
+- Cards clickable; open Visa Sheet with matching filter.
+- Counts exclude soft-deleted rows and draft row.
+- Use Primary Expiry only.
+- Range meanings must match report/domain logic.
 
-Side by side below the cards, filling the remaining height:
-- Left (~40%): Expiry Status donut chart with legend + counts (Valid, Expiring Soon, Urgent, Expires today, Expired).
+## Charts
+
+- Left (~40%): Expiry Status donut + legend/counts.
 - Right (~60%): Next 12 Months bar chart.
-- With no data, show a centered message inside each chart: `No expiry data yet` (no blank empty axes).
+- Stack on smaller windows if needed.
+- Status categories are mutually exclusive:
+  - Valid
+  - Expiring Soon
+  - Urgent
+  - Expires today
+  - Expired
+- Records with no valid primary expiry do not get invented into a status.
+- Empty state:
+  ```text
+  No expiry data yet
+  ```
 
 ---
 
-## 7. Recycle Bin Page (Admin only)
+# 7. Recycle Bin (Admin only)
 
-### 7.1 Layout
+## Layout
 
-Top bar: `[☰] Recycle Bin`. No breadcrumb, subtitle, `Admin tools`, big title, or record count block.
+- Global top bar title: Recycle Bin.
+- One compact search/count toolbar.
+- Full-width table.
+- No large header block, breadcrumb, subtitle, or Admin tools label.
 
-### 7.2 Toolbar
+Toolbar:
 
-```
-[🔍 Search deleted records…]                  3 items · auto-deleted after 30 days
-```
-
-### 7.3 Table (full width)
-
-```
-Name          | Passport No | Expiry     | Deleted           | Purge in | 
-Aarav Kumar   | Z1234567    | 31/12/2026 | 21/10/2026 03:50  | 29 days  | [Restore] [Delete]
+```text
+[Search deleted records…]                  N items
 ```
 
-- Name = friendly label (Name column, else first text column). Never a raw row ID.
-- No duplicate `Record` + `Name` columns.
-- Phone column dropped.
-- Expiry `DD/MM/YYYY`; Deleted `DD/MM/YYYY HH:mm` local time.
-- Purge in = days left before automatic permanent deletion.
-- Buttons short and equal: `[Restore]` `[Delete]` — never `Permanently delete Aarav Kumar`. Buttons never wrap to two lines.
-- Newest deleted first. Sticky header.
-- Empty state: `Recycle bin is empty`
+If 30-day auto-purge is confirmed active, show:
+
+```text
+N items · auto-deleted after 30 days
+```
+
+If automatic purge is not active, show truthful wording:
+
+```text
+N items · kept until permanently deleted
+```
+
+## Table
+
+Conceptual columns:
+
+```text
+Record | Passport No (if available) | Expiry | Deleted | Purge in (if active) | Actions
+```
+
+Rules:
+
+- Resolve Record from available metadata/snapshot:
+  - preferred meaningful text field
+  - otherwise `Untitled record`
+- Never show raw UUID as main label.
+- Do not require a fixed Name or Passport column.
+- Omit Passport column when not applicable.
+- Phone not shown in compact Recycle Bin.
+- Expiry: DD/MM/YYYY.
+- Deleted: DD/MM/YYYY HH:mm Oman time.
+- Newest deletion first.
+- Sticky header.
+- Short buttons:
+  ```text
+  [Restore] [Delete]
+  ```
+- Never append full customer name into every button.
+- Prevent duplicate action clicks while operation is running.
+- Failure remains visible; do not remove row falsely.
 
 Confirmations:
-- Restore: `Restore "Aarav Kumar" to the sheet?` [Cancel] [Restore]
-- Delete: `Permanently delete "Aarav Kumar"? This cannot be undone.` [Cancel] [Permanently delete]
 
-(Note: permanent delete currently crashes with an IPC `ensureOpen` error — that is a non-UI bug tracked in `RESUME_NEXT_SESSION.md`.)
+```text
+Restore "[Record label]" to the sheet?
+[Cancel] [Restore]
+```
+
+```text
+Permanently delete "[Record label]"?
+This cannot be undone.
+[Cancel] [Permanently delete]
+```
+
+Empty states:
+
+```text
+Recycle Bin is empty
+```
+
+```text
+No deleted records match this search
+```
+
+The permanent delete IPC crash is a non-UI bug in
+`docs/RESUME_NEXT_SESSION.md`; fix it before claiming Delete works.
 
 ---
 
-## 8. Audit Log Page (Admin only, read-only)
+# 8. Audit Log (Admin only, read-only)
 
-### 8.1 Layout
+## Layout
 
-Top bar: `[☰] Audit Log`. No breadcrumb, subtitle, `Admin tools`, or big title block.
+- Global top bar title: Audit Log.
+- Compact filter row.
+- Full-width table.
+- Newest event first.
+- Sticky header.
+- No Restore/Delete/Clear actions here.
 
-### 8.2 Toolbar
+Toolbar:
 
-```
-[🔍 Search activity…] [Action: All ▾] [Date range ▾] [Actor ▾]        124 events
-```
-
-- Action filter: All, Created, Edited, Soft-deleted, Restored, Permanently deleted, Renewed, Imported, Exported, Column added, Column deleted.
-- Date range: All time, Today, Last 7 days, Last 30 days.
-- Actor filter hidden if only one actor exists.
-
-### 8.3 Table (full width)
-
-```
-Time              | Actor  | Action   | Record      | Summary
-21/10/2026 07:45  | Admin  | Imported | —           | Imported 3 records from dks-test-import.csv
-21/10/2026 07:50  | Office | Deleted  | Ahmed Ali   | Moved to Recycle Bin
+```text
+[Search activity…] [Action ▾] [Date range ▾] [Actor ▾]       N events
 ```
 
-- Time: `DD/MM/YYYY HH:mm` local time.
-- Actor: `Admin` or `Office` (with email on hover). Never `Unknown`. Office is a shared account — do not imply a specific staff member.
-- Action: readable word, small colored badge.
-- Record: friendly record name, `—` if not row-related. Never UUIDs.
-- Summary: one human-readable sentence. Never raw JSON.
-- Newest first, sticky header.
-- Clicking a row opens a side details panel: `Field: old value → new value`. A small `View raw` link inside the panel may show formatted JSON for debugging only.
-- No Restore/Delete buttons here (those belong to Recycle Bin).
-- Empty state: `No audit events yet`
+- Hide Actor filter if it has no useful choices.
+- Search friendly record labels, summaries, and file names.
+
+## Table
+
+```text
+Time | Actor | Action | Record | Summary
+```
+
+Rules:
+
+- Time: DD/MM/YYYY HH:mm Oman time.
+- Actor:
+  - Admin / Office account
+  - actual email available on hover/focus
+  - never imply individual identity for shared Office login
+  - fallback: `Account unavailable`
+  - use `System` only for genuinely system-generated events
+- Action: readable colored badge.
+- Record: friendly saved label or `—`.
+- Summary: readable sentence, not raw JSON.
+- Raw event JSON only inside optional Admin details panel.
+
+Example:
+
+```text
+21/10/2026 07:45 | Admin | Imported | — | Imported 3 records from test.csv
+```
+
+## Details panel
+
+Clicking an event opens side panel:
+
+```text
+Field name: old value → new value
+```
+
+Rules:
+
+- Resolve fields using available event metadata.
+- Do not invent historical names for deleted/renamed columns.
+- Optional `View raw` link can show sanitized formatted JSON.
+- Never expose tokens/passwords/secrets.
+
+Empty states:
+
+```text
+No audit events yet
+```
+
+```text
+No events match these filters
+```
 
 ---
 
-## 9. Settings Page (Admin only)
+# 9. Settings (Admin only)
 
-### 9.1 Layout
+## 9.1 Layout
 
-Top bar: `[☰] Settings`. Remove duplicate headings, `ADMINISTRATION`, `Close settings`, `Export data`, `Offline-first`, permanent success banner, and developer Resend text.
+Use approved inner navigation layout — no long single scrolling page:
 
-Inner navigation on the left, content on the right (no long scrolling page):
-
-```
+```text
 ┌──────────────────┬───────────────────────────────────────┐
-│ Expiry rules     │  (selected section content)           │
+│ Expiry rules     │  Selected section content              │
 │ Notifications    │                                       │
 │ Workspace        │                                       │
 │ About & updates  │                                       │
 └──────────────────┴───────────────────────────────────────┘
 ```
 
-Inputs have a sensible max width (about 320px) and never stretch across the screen.
+Rules:
 
-### 9.2 Expiry Rules
+- Global top bar remains visible.
+- Inputs max width approximately 320px.
+- Responsive: inner navigation/content can stack on narrow windows.
+- Remove duplicate headings, Close Settings, Export Data, Offline-first,
+  permanent success banner, backup UI, developer Resend text.
 
-Only two editable numbers; ranges calculate automatically so gaps/overlaps are impossible:
+## 9.2 Expiry rules
 
+Two editable values:
+
+```text
+Urgent threshold:         [30] days
+Expiring soon threshold:  [90] days
 ```
-Urgent threshold:         [ 30 ] days
-Expiring soon threshold:  [ 90 ] days
-```
 
-Resulting rules shown clearly with color swatches:
+Derived ranges:
 
-```
+```text
 Valid          More than 90 days     [green]
 Expiring soon  30–90 days            [yellow]
 Urgent         1–29 days             [orange]
 Expires today  0 days                [red]
-Expired        Date has passed       [dark red / gray]
+Expired        Date has passed       [dark red/gray]
 ```
 
-- Today shows `Expires today`, not `Expired`.
-- Click a swatch to change its color.
-- Validation: urgent threshold must be lower than expiring-soon threshold.
-- Small live preview of example rows in each status.
-- `Reset to defaults` link.
+Rules:
 
-### 9.3 Notifications
+- Require whole numbers with urgent threshold lower than expiring-soon threshold.
+- No range gaps or overlaps.
+- Today means `Expires today`, not `Expired`.
+- Click color swatch to edit.
+- Include small preview of status colors.
+- `Reset to defaults` changes form draft only; does not silently overwrite cloud.
 
-Reminder days as chips (not tall input rows):
+## 9.3 Notifications
 
-```
-Remind me:  [90 ×] [60 ×] [30 ×] [15 ×] [7 ×] [1 ×] [On expiry day ×]  [+ Add day]
-```
+Reminder chips:
 
-- `0` displays as `On expiry day`.
-- `×` removes a chip; `+ Add day` shows a tiny inline number input.
-
-Summaries:
-```
-[✓] Daily summary    at [09:00]
-[✓] Weekly summary   every [Monday ▾] at [09:00]
+```text
+[90 ×] [60 ×] [30 ×] [15 ×] [7 ×] [1 ×] [On expiry day ×] [+ Add day]
 ```
 
-Email status line (plain language):
-- Configured: `Email notifications active`
-- Not configured: `Email notifications not configured. Windows notifications still work.`
+Rules:
 
-### 9.4 Workspace
+- Whole non-negative values.
+- No duplicates.
+- Zero displays as `On expiry day`.
+- Add/remove affects editable form draft.
 
+Summary settings:
+
+```text
+[ ] Daily summary   at [09:00]
+[ ] Weekly summary  every [Monday ▾] at [09:00]
 ```
+
+Rules:
+
+- Show actual saved enabled state.
+- These control Windows summaries while DKS is running.
+- Do not promise notifications while app is completely exited or PC is off.
+- Weekly summary must persist to local cache and Supabase settings.
+
+Email status:
+
+```text
+Email notifications not configured. Windows notifications still work.
+```
+
+or verified configured state.
+
+No email key field inside desktop app.
+
+## 9.4 Workspace defaults
+
+```text
 Currency:        [OMR ▾]     Symbol: [ر.ع.]    Decimals: [3]
-Primary expiry:  [★ Visa Expiry ▾]
+Primary expiry:  [Visa Expiry ▾]
 Default theme for new sign-ins: [Light ▾]
 ```
 
-- Choosing a currency auto-fills symbol and decimals (OMR → ر.ع., 3; INR → ₹, 2), still editable.
-- Primary expiry lists all Date (Expiry) columns. If one exists, it must be selected — never show `No primary expiry column` when an expiry column exists.
-- Default theme only sets the starting theme on a new PC; it never overrides a user's own toggle.
+Rules:
 
-### 9.5 About & Updates
+- Currency selection can fill symbol/decimals but values remain editable.
+- Do not convert old monetary values when currency changes.
+- Primary Expiry lists actual Date (Expiry) type columns only.
+- Text fields merely named "Visa Expiry" are not valid expiry columns.
+- No eligible expiry columns:
+  ```text
+  No expiry-date columns
+  ```
+- One eligible expiry column: use canonical automatic Primary Expiry selection.
+- Multiple: preserve selected primary; Admin can change it.
+- Do not silently replace primary.
+- Changing primary recomputes Days Left, colors, status, and reminders.
+- Default theme affects new PCs/sign-ins only; personal theme choice wins later.
 
+## 9.5 About and updates
+
+```text
+DKS · Version [actual version]          [Check for updates]
+Last checked: [actual local time]
 ```
-DKS  ·  Version 0.1.0                 [Check for updates]
-Last checked: 21/10/2026 09:10
+
+States:
+- checking
+- no update
+- update available/downloading
+- ready to restart
+- failed check
+
+Office PCs still receive automatic/background updates even though Office cannot
+open Settings.
+
+## 9.6 Settings saving
+
+Use form draft.
+
+When changed:
+
+```text
+You have unsaved changes.      [Discard] [Save settings]
 ```
 
-- Automatic background updates must still work for Office PCs even though Office cannot open Settings.
+Rules:
 
-### 9.6 Saving
-
-- A slim bar appears at the bottom only when something changed:
-  `You have unsaved changes.        [Discard] [Save settings]`
-- On save: short toast `Settings saved.` and the top-bar sync status shows the real result (Saved to cloud / Saved locally — waiting to sync / Sync error).
-- Never show a success message that contradicts a sync error.
+- Discard restores last saved values.
+- Save writes locally first and queues cloud sync.
+- Prevent duplicate saves while saving.
+- If local save fails, show error, not success.
+- If cloud pending:
+  ```text
+  Settings saved locally — waiting to sync
+  ```
+- Only show cloud success after confirmed acknowledgement.
+- Global sync status remains truthful.
+- Leaving with unsaved form changes offers:
+  ```text
+  Save / Discard / Cancel
+  ```
 
 ---
 
-## 10. Column Setup Dialog
+# 10. Column Setup dialog
 
-Opened by clicking the `+` header. Compact modal.
+Opened by clicking `+`.
 
-```
+```text
 Add column
 
-Column name:  [ e.g. Passport number ]
-Column type:  [ Text ▾ ]
+Column name: [e.g. Phone number]
+Column type: [Text ▾]
 
-            [Cancel]  [Add column]
+[Cancel] [Add column]
 ```
 
-Types: Text, Number, Phone, Email, Price / Amount, Date, Dropdown, Checkbox, Notes.
+Supported types:
 
-- Date → second choice appears: `Start date` / `Expiry date`. Only Expiry drives Days Left and colors.
-- Adding a second Expiry column asks: `Set as primary expiry?`
-- Dropdown → options input (comma-separated or one per line).
-- Price → uses currency from Settings.
-- No passport checkbox, no country validation.
-- Enter submits, Esc cancels.
+- Text
+- Number
+- Phone
+- Email
+- Price / Amount
+- Date
+- Dropdown
+- Checkbox
+- Notes
+
+Conditional behavior:
+
+- Date:
+  ```text
+  Start date / Expiry date
+  ```
+- Dropdown: option input/list.
+- Price: defaults to currency from Settings.
+- No passport-format checkbox.
+- No country-specific validation.
+
+Primary expiry rules:
+
+- First expiry column follows existing automatic-primary logic.
+- For later expiry columns, only Admin can set primary.
+- Office can add expiry column but cannot replace current primary.
+- Duplicate primary expiry column does not automatically become primary.
+
+Dialog behavior:
+
+- Name required and trimmed.
+- Preserve entered values after error.
+- Prevent duplicate submits.
+- Cancel creates nothing.
+- Enter submits only when valid.
+- Esc cancels.
 
 ---
 
-## 11. Other Dialogs
+# 11. Other dialogs
 
-### Renew (row right-click → Mark as Renewed)
-```
-Mark as renewed — Ahmed Ali
+## Renewal
 
-Current expiry:  15/12/2026
-New expiry:      [DD/MM/YYYY] [📅]
+```text
+Mark as renewed — [Record label]
 
-            [Cancel]  [Renew]
-```
-- New date must be in the future.
+Current expiry: DD/MM/YYYY or —
+New expiry:     [DD/MM/YYYY] [Calendar]
 
-### Snooze (row right-click → Snooze alert)
-```
-Snooze alerts for Ahmed Ali
-( ) 1 day   ( ) 3 days   ( ) 1 week   ( ) Until [DD/MM/YYYY]
-            [Cancel]  [Snooze]
+[Cancel] [Renew]
 ```
 
-### Print / PDF report (Tools → Print / PDF report)
+- Uses Primary Expiry.
+- New date must be future valid date.
+- Preserve renewal history and audit logging.
+- Prevent duplicate submit.
+- Do not create a separate active row.
+
+## Snooze
+
+```text
+Snooze alerts for [Record label]
+
+1 day / 3 days / 1 week / Until [DD/MM/YYYY]
+
+[Cancel] [Snooze]
 ```
-Print / PDF report
 
-Records:  [ ] Expiring today  [ ] This week   [ ] This month
-          [ ] In 2 months     [ ] In 3 months [ ] In 6 months
-          [ ] In 1 year       [ ] Expired     [ ] All
+- Does not alter expiry.
+- Invalid custom date shows warning.
 
-Columns:  [✓] Name  [✓] Passport No  [✓] Visa Expiry  [✓] Days Left  [ ] Status …
+## Print / PDF report (Admin)
 
-            [Cancel]  [Print]  [Export PDF]
+Ranges:
+
+```text
+[ ] Expiring today
+[ ] This week
+[ ] This month
+[ ] Within 2 months
+[ ] Within 3 months
+[ ] Within 6 months
+[ ] Within 1 year
+[ ] Expired
+[ ] All entries
 ```
-Report output: DKS header, generated date/time, filter summary, clean table sorted by Days Left, page numbers, dates in `DD/MM/YYYY`. Never includes the `+` column or the draft row.
 
-### Import (Tools → Import file)
-- File picker → preview first 20 rows → map file columns to existing columns → Import.
-- Dates in the file shown as `DD/MM/YYYY` in the preview.
+Columns:
+- Dynamic list of actual user-created columns
+- Days Left available
+- Do not assume Name/Passport/Visa Expiry exists
+
+Rules:
+
+- All entries is mutually exclusive with narrower range filters.
+- Avoid duplicate rows from overlapping selections.
+- Use same date range logic as Dashboard/domain services.
+- Never include:
+  - draft row
+  - `+` column
+  - Actions controls
+  - grouping headers
+  - deleted records in normal active report
+
+Output:
+- DKS header
+- generated date/time
+- selected range summary
+- readable table
+- Days Left sorted ascending
+- page numbers
+- DD/MM/YYYY dates
+
+Buttons:
+
+```text
+[Cancel] [Print] [Export PDF]
+```
+
+## Import (Admin)
+
+- Select file
+- Preview first 20 rows
+- Map file columns to actual existing app columns
+- Confirm import
+- Preserve leading zeroes in text-like values
+- Parse/display dates as DD/MM/YYYY
+- Show clear row-level mapping/parsing problems
+- Do not claim cloud success before operations actually complete
 
 ---
 
-## 12. Confirmation Dialogs
+# 12. Confirmation dialogs
 
-Short, clear, consistent:
+Row delete:
 
-- Row delete: `Move "Ahmed Ali" to the Recycle Bin?` [Cancel] [Delete]
-- Permanent delete: `Permanently delete "Ahmed Ali"? This cannot be undone.` [Cancel] [Permanently delete]
-- Empty column delete: `Delete column "Phone"?` [Cancel] [Delete column]
-- Admin deleting a column with data: `"Phone" contains data in 24 rows. Deleting it removes these values permanently.` [Cancel] [Delete column]
-- Office trying to delete a column with data: `Only an admin can delete a column that contains data.` [OK]
+```text
+Move "[Record label]" to the Recycle Bin?
+[Cancel] [Delete]
+```
 
-Destructive buttons are red. Esc / Cancel always closes safely.
+Restore:
+
+```text
+Restore "[Record label]" to the sheet?
+[Cancel] [Restore]
+```
+
+Permanent delete:
+
+```text
+Permanently delete "[Record label]"?
+This cannot be undone.
+[Cancel] [Permanently delete]
+```
+
+Empty column delete:
+
+```text
+Delete column "[Column name]"?
+[Cancel] [Delete column]
+```
+
+Admin delete populated column:
+
+```text
+"[Column name]" contains values in N records.
+Deleting it removes these values.
+[Cancel] [Delete column]
+```
+
+Office denied:
+
+```text
+Only an admin can delete a column that contains data.
+[OK]
+```
+
+Rules:
+
+- Destructive action uses red button.
+- Cancel is safe default.
+- Escape closes safely.
+- Prevent duplicate submissions.
+- Show processing/failure state.
+- Server determines data count/authorization.
 
 ---
 
-## 13. Pages Not Yet Reviewed in Detail
+# 13. Login and visual branding
 
-The **Login screen** and the **final color palette / typography system** have not been reviewed page-by-page yet. Until they are:
-- Keep the current Login screen working; only remove developer text (`STEP 2…`, placeholder text) and keep it consistent with the new compact style.
-- Use one consistent font, border radius, and spacing scale across all pages.
-- Do not invent a new brand style. Ask the user before major visual changes.
+The Login screen and final branding system were not reviewed in detail.
 
----
+Until user gives more direction:
 
-## 14. Visual Tone
-
-Use:
-- Compact desktop spacing (8px-based scale)
-- Subtle borders and clean 1px grid lines
-- High-contrast text, muted backgrounds
-- Consistent border radius on all buttons, inputs, popovers, and dialogs
-- Both light and dark themes fully supported on every page, popup, chart, and grid
-
-Avoid:
-- Landing-page hero sections and giant headings
-- Big cards wrapped around tables
-- Large empty margins
-- Decorative chips that don't reflect real state
-- Technical strings in user-facing UI
+- Keep existing login working.
+- Remove obsolete developer placeholder text if present.
+- Do not add social login, signup, passwordless login, or guest mode.
+- Do not add auth bypass.
+- Keep current visual identity consistent.
+- Do not invent new logo, fonts, or palette without user approval.
+- Use compact spacing, readable contrast, consistent border radius, and
+  accessible focus states.
 
 ---
 
-## 15. Interaction & Accessibility
+# 14. Accessibility and responsive rules
 
-- Icon-only buttons have tooltips.
-- Popovers and dropdowns close on outside click and Esc.
-- Dialogs: Enter confirms, Esc cancels, focus goes to the first input.
-- Grid keyboard: arrows move, Enter edits/moves down, Tab moves right, Esc cancels edit, Ctrl+C/V copy-paste, Ctrl+Z/Y undo/redo if implemented.
+- Icon-only controls have accessible labels and tooltips.
+- Keyboard-visible focus on all controls.
+- Menus/popovers close on outside click and Escape.
+- Dialog focus remains inside dialog and returns to opener when closed.
+- Enter confirms only appropriate dialogs/forms.
+- Multiline fields allow Enter for new line.
+- Use real buttons and proper labels.
+- Maintain readable contrast in both themes.
+- No essential data hidden solely to force one-screen layout.
+- Tables scroll internally.
+- Settings/dialogs may scroll when needed.
+- Popovers and dialogs remain inside application viewport.
+- Overlays must not shift underlying top bar/grid layout.
 
 ---
 
-## 16. Verification Checklist
+# 15. Verification checklist
 
-Global:
-- [ ] Top bar 48–52px, shows title / sync / bell / theme icon / avatar on every page (including Settings)
-- [ ] No breadcrumb, subtitle, email text, or logout button in top bar
-- [ ] Sidebar collapses to icons, expands with text, remembers state
-- [ ] Office sees only Dashboard and Visa Sheet in sidebar
-- [ ] Sync pill shows real state with details on hover/click
-- [ ] Bell opens a floating popover
-- [ ] Theme icon toggles directly
-- [ ] Avatar popover shows email, role, Log out
+## Global
 
-Visa Sheet:
-- [ ] No Add row / Add column / Manage columns / Group by Category / Actions column / Load template
-- [ ] One-row toolbar; Tools menu Admin-only
-- [ ] Grid full width and height
-- [ ] Row numbers on left, `+` and Days Left pinned right
-- [ ] Blank draft row creates entries only when typing
-- [ ] Right-click column and row menus work, no Hide option
-- [ ] `★ Set as Primary Expiry` for Admin on expiry columns
-- [ ] Dates DD/MM/YYYY with auto-slash
-- [ ] One empty-state message at a time
+- [ ] Compact top bar on every authenticated page.
+- [ ] No breadcrumbs/subtitles/email/logout clutter.
+- [ ] Sidebar collapses and remembers state.
+- [ ] Office sees only allowed navigation.
+- [ ] Real sync state and pending/error details.
+- [ ] Bell opens popover without changing top bar height.
+- [ ] Theme toggle updates all UI.
+- [ ] Avatar popup shows email, role, Logout.
 
-Dashboard:
-- [ ] No inner header, no Export data
-- [ ] 5 + 4 card layout, urgent first, cards clickable
-- [ ] Charts side by side, clean empty state
+## Visa Sheet
 
-Recycle Bin:
-- [ ] Friendly names, no UUIDs, no ISO times
-- [ ] Short Restore/Delete buttons with confirmations
-- [ ] Purge-in column, search, empty state
+- [ ] Removed buttons/features do not return.
+- [ ] One responsive toolbar.
+- [ ] Tools only for Admin.
+- [ ] Grid fills screen.
+- [ ] Row numbers, frozen first data column, sticky header.
+- [ ] `+` pinned before Days Left.
+- [ ] Draft row creates exactly one record after meaningful input.
+- [ ] No row created from focus alone.
+- [ ] Draft/system/group rows excluded from export/counts.
+- [ ] Right-click column/row menus work.
+- [ ] Office edits expiry values but cannot choose primary expiry.
+- [ ] No Hide or passport format validation.
+- [ ] Dates use DD/MM/YYYY.
+- [ ] One context-aware empty state.
+- [ ] No AG Grid Enterprise warning/watermark.
 
-Audit Log:
-- [ ] Readable time/actor/action/record/summary
-- [ ] No raw JSON in table; details panel works
-- [ ] Filters work; read-only
+## Dashboard
 
-Settings:
-- [ ] Inner navigation with 4 sections, no long scroll
-- [ ] Two-number thresholds with live preview, "Expires today" wording
-- [ ] Notification chips, daily + weekly summary
-- [ ] Primary expiry correctly selected
-- [ ] Unsaved-changes bar; truthful save status
-- [ ] No Export data / Close settings / Offline-first / backup UI
+- [ ] Nine statistics retained, compact and responsive.
+- [ ] Card filters match labels.
+- [ ] Charts use non-overlapping categories.
+- [ ] Clean chart empty state.
+- [ ] No duplicate page header or Export Data.
+
+## Recycle Bin
+
+- [ ] Friendly labels / truthful fallback.
+- [ ] Dates in DD/MM/YYYY HH:mm.
+- [ ] Short Restore/Delete actions.
+- [ ] Search and empty state.
+- [ ] Retention wording truthful.
+- [ ] Known permanent-delete bug fixed.
+
+## Audit Log
+
+- [ ] Readable Time / Actor / Action / Record / Summary.
+- [ ] Shared Office account not attributed to person.
+- [ ] Filters/details panel work.
+- [ ] Raw JSON only in optional technical details.
+- [ ] Read-only.
+
+## Settings
+
+- [ ] Inner settings navigation layout.
+- [ ] Two-boundary expiry range editor.
+- [ ] Expiry today distinct from expired.
+- [ ] Reminder chips, daily and weekly schedules.
+- [ ] Primary expiry uses actual Date (Expiry) columns.
+- [ ] Personal theme not overwritten.
+- [ ] Save/Discard and truthful sync feedback.
+- [ ] Actual app version/update state.
+- [ ] No backup UI.
+
+## Safety
+
+- [ ] Existing customer data is preserved.
+- [ ] Pending sync operations are not discarded.
+- [ ] No secrets in logs/UI.
+- [ ] Tests/typecheck/build pass after each completed phase.
 
 End of UI redesign requirements.
