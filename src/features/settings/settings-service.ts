@@ -32,6 +32,10 @@ const SETTINGS_KEYS = Object.freeze([
   'thresholds',
   'notification_days',
   'daily_summary_enabled',
+  'daily_summary_time',
+  'weekly_summary_enabled',
+  'weekly_summary_day',
+  'weekly_summary_time',
   'currency',
   'theme',
   'primary_expiry_column_id',
@@ -70,6 +74,18 @@ function rowsToSettings(rows: readonly unknown[]): PartialSettings {
     ...(typeof values.get('daily_summary_enabled') === 'boolean'
       ? { dailySummaryEnabled: values.get('daily_summary_enabled') as boolean }
       : {}),
+    ...(typeof values.get('daily_summary_time') === 'string'
+      ? { dailySummaryTime: values.get('daily_summary_time') as string }
+      : {}),
+    ...(typeof values.get('weekly_summary_enabled') === 'boolean'
+      ? { weeklySummaryEnabled: values.get('weekly_summary_enabled') as boolean }
+      : {}),
+    ...(typeof values.get('weekly_summary_day') === 'number'
+      ? { weeklySummaryDay: values.get('weekly_summary_day') as number }
+      : {}),
+    ...(typeof values.get('weekly_summary_time') === 'string'
+      ? { weeklySummaryTime: values.get('weekly_summary_time') as string }
+      : {}),
     ...(currency ? { currency: currency as PartialSettings['currency'] } : {}),
     ...(theme === 'light' || theme === 'dark' || theme === 'system' ? { theme } : {}),
     ...(typeof primaryExpiryColumnId === 'string' ? { primaryExpiryColumnId } : {}),
@@ -89,6 +105,10 @@ export function partialSettingsToRecord(
   if (settings.thresholds) result.thresholds = settings.thresholds;
   if (settings.notificationDays) result.notification_days = settings.notificationDays;
   if (settings.dailySummaryEnabled !== undefined) result.daily_summary_enabled = settings.dailySummaryEnabled;
+  if (settings.dailySummaryTime !== undefined) result.daily_summary_time = settings.dailySummaryTime;
+  if (settings.weeklySummaryEnabled !== undefined) result.weekly_summary_enabled = settings.weeklySummaryEnabled;
+  if (settings.weeklySummaryDay !== undefined) result.weekly_summary_day = settings.weeklySummaryDay;
+  if (settings.weeklySummaryTime !== undefined) result.weekly_summary_time = settings.weeklySummaryTime;
   if (settings.currency) result.currency = settings.currency;
   if (settings.theme) result.theme = settings.theme;
   if (settings.primaryExpiryColumnId !== undefined) result.primary_expiry_column_id = settings.primaryExpiryColumnId;
@@ -100,6 +120,10 @@ export function settingsToRows(settings: DksSettings): PersistedSetting[] {
     { key: 'thresholds', value: settings.thresholds },
     { key: 'notification_days', value: settings.notificationDays },
     { key: 'daily_summary_enabled', value: settings.dailySummaryEnabled },
+    { key: 'daily_summary_time', value: settings.dailySummaryTime },
+    { key: 'weekly_summary_enabled', value: settings.weeklySummaryEnabled },
+    { key: 'weekly_summary_day', value: settings.weeklySummaryDay },
+    { key: 'weekly_summary_time', value: settings.weeklySummaryTime },
     { key: 'currency', value: settings.currency },
     { key: 'theme', value: settings.theme },
     { key: 'primary_expiry_column_id', value: settings.primaryExpiryColumnId },

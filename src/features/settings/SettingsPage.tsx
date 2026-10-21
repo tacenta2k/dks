@@ -29,6 +29,10 @@ export interface DksSettings {
   thresholds: SettingsThresholds;
   notificationDays: number[];
   dailySummaryEnabled: boolean;
+  dailySummaryTime: string;
+  weeklySummaryEnabled: boolean;
+  weeklySummaryDay: number;
+  weeklySummaryTime: string;
   currency: CurrencySettings;
   primaryExpiryColumnId: string;
   theme: ThemePreference;
@@ -44,6 +48,10 @@ export interface PartialSettings {
   colors?: Partial<StatusColors> | Record<string, string>;
   notificationDays?: number[];
   dailySummaryEnabled?: boolean;
+  dailySummaryTime?: string;
+  weeklySummaryEnabled?: boolean;
+  weeklySummaryDay?: number;
+  weeklySummaryTime?: string;
   currency?: Partial<CurrencySettings>;
   primaryExpiryColumnId?: string;
   theme?: ThemePreference;
@@ -75,6 +83,10 @@ export const DEFAULT_SETTINGS: DksSettings = {
   },
   notificationDays: [...DEFAULT_NOTIFICATION_DAYS],
   dailySummaryEnabled: true,
+  dailySummaryTime: '09:00',
+  weeklySummaryEnabled: false,
+  weeklySummaryDay: 1,
+  weeklySummaryTime: '09:00',
   currency: {
     code: 'OMR',
     symbol: 'ر.ع.',
@@ -118,12 +130,44 @@ function mergeColorSettings(
   };
 }
 
+const WEEKDAY_LABELS: readonly [string, number][] = [
+  ['Monday', 1],
+  ['Tuesday', 2],
+  ['Wednesday', 3],
+  ['Thursday', 4],
+  ['Friday', 5],
+  ['Saturday', 6],
+  ['Sunday', 7],
+];
+
+function normalizeTimeOfDay(value: unknown, fallback: string): string {
+  return typeof value === 'string' && /^([01]\d|2[0-3]):[0-5]\d$/.test(value)
+    ? value
+    : fallback;
+}
+
+function normalizeWeekday(value: unknown, fallback: number): number {
+  const day = Number(value);
+  return Number.isInteger(day) && day >= 1 && day <= 7 ? day : fallback;
+}
+
 function resolveSettings(
   input: ResolvedSettingsInput | undefined,
   columns: readonly ColumnDefinition[] = [],
 ): DksSettings {
   const suppliedThresholds = input?.thresholds ?? {};
   const expiryColumn = getPrimaryExpiryColumn(columns);
+  // A blank (or stale) stored id must not win over the actual primary expiry
+  // column: only accept an id that exists among the active expiry columns.
+  const suppliedExpiryId = typeof input?.primaryExpiryColumnId === 'string'
+    ? input.primaryExpiryColumnId.trim()
+    : '';
+  const activeExpiryColumns = columns.filter((column) => (
+    column.deleted !== true && column.type === 'date_expiry'
+  ));
+  const resolvedExpiryId = activeExpiryColumns.some((column) => column.id === suppliedExpiryId)
+    ? suppliedExpiryId
+    : expiryColumn?.id ?? '';
   return {
     thresholds: {
       ...DEFAULT_THRESHOLDS,
@@ -133,6 +177,10 @@ function resolveSettings(
     notificationDays: input?.notificationDays?.map((day) => Number(day)).filter(Number.isFinite)
       ?? [...DEFAULT_NOTIFICATION_DAYS],
     dailySummaryEnabled: input?.dailySummaryEnabled ?? DEFAULT_SETTINGS.dailySummaryEnabled,
+    dailySummaryTime: normalizeTimeOfDay(input?.dailySummaryTime, DEFAULT_SETTINGS.dailySummaryTime),
+    weeklySummaryEnabled: input?.weeklySummaryEnabled ?? DEFAULT_SETTINGS.weeklySummaryEnabled,
+    weeklySummaryDay: normalizeWeekday(input?.weeklySummaryDay, DEFAULT_SETTINGS.weeklySummaryDay),
+    weeklySummaryTime: normalizeTimeOfDay(input?.weeklySummaryTime, DEFAULT_SETTINGS.weeklySummaryTime),
     currency: {
       ...DEFAULT_SETTINGS.currency,
       ...(input?.currency ?? {}),
@@ -140,7 +188,7 @@ function resolveSettings(
         ? Number(input?.currency?.decimals)
         : DEFAULT_SETTINGS.currency.decimals,
     },
-    primaryExpiryColumnId: input?.primaryExpiryColumnId ?? expiryColumn?.id ?? '',
+    primaryExpiryColumnId: resolvedExpiryId,
     theme: input?.theme ?? DEFAULT_SETTINGS.theme,
   };
 }
@@ -382,18 +430,65 @@ export function SettingsPage({
               Add notification day
             </button>
           </fieldset>
-          <label className="settings-toggle">
-            <input
-              aria-label="Daily summary"
-              type="checkbox"
-              checked={settings.dailySummaryEnabled}
-              onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryEnabled: event.target.checked }))}
-            />
-            <span>
-              <strong>Daily summary</strong>
-              <small>Send a daily digest when summary delivery is configured.</small>
-            </span>
-          </label>
+          <div className="settings-summary-options" role="group" aria-label="Summary schedules">
+            <label className="settings-toggle">
+              <input
+                aria-label="Daily summary"
+                type="checkbox"
+                checked={settings.dailySummaryEnabled}
+                onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryEnabled: event.target.checked }))}
+              />
+              <span>
+                <strong>Daily summary</strong>
+                <small>Send a daily digest when summary delivery is configured.</small>
+              </span>
+            </label>
+            <label className="settings-toggle">
+              <input
+                aria-label="Weekly summary"
+                type="checkbox"
+                checked={settings.weeklySummaryEnabled}
+                onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryEnabled: event.target.checked }))}
+              />
+              <span>
+                <strong>Weekly summary</strong>
+                <small>Send one digest a week on the chosen day.</small>
+              </span>
+            </label>
+            <div className="settings-field-grid settings-field-grid--three settings-field-grid--spaced">
+              <label className="settings-field">
+                <span>Weekly summary day</span>
+                <select
+                  aria-label="Weekly summary day"
+                  value={settings.weeklySummaryDay}
+                  onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryDay: Number(event.target.value) }))}
+                >
+                  {WEEKDAY_LABELS.map(([label, value]) => (
+                    <option key={label} value={value}>{label}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-field">
+                <span>Weekly summary time</span>
+                <input
+                  aria-label="Weekly summary time"
+                  type="time"
+                  value={settings.weeklySummaryTime}
+                  onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryTime: event.target.value || DEFAULT_SETTINGS.weeklySummaryTime }))}
+                />
+              </label>
+              <label className="settings-field">
+                <span>Daily summary time</span>
+                <input
+                  aria-label="Daily summary time"
+                  type="time"
+                  value={settings.dailySummaryTime}
+                  onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryTime: event.target.value || DEFAULT_SETTINGS.dailySummaryTime }))}
+                />
+              </label>
+            </div>
+            <p className="settings-muted">Day and time use this device&apos;s local time zone.</p>
+          </div>
         </div>
       </section>
 

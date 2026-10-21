@@ -319,8 +319,8 @@ export function AppShell({
       <div className="app-shell__body">
         <header className="top-bar" role="banner" aria-label="DKS top bar">
           <div className="top-bar__heading">
-             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.eyebrow}</p>
-            <p className="top-bar__context">A focused space for your team&apos;s records</p>
+             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.title}</p>
+            <p className="top-bar__context">{copy.eyebrow}</p>
           </div>
           <div className="top-bar__actions">
             <NotificationBell

@@ -95,6 +95,17 @@
   gap: 14px;
 }
 
+.settings-field-grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-summary-options {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 100%;
+}
+
 .settings-field-grid--four {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -284,6 +295,10 @@
 }
 
 @media (max-width: 900px) {
+  .settings-field-grid--three {
+    grid-template-columns: 1fr;
+  }
+
   .settings-field-grid--four,
   .settings-maintenance__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
