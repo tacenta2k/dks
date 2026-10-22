@@ -200,8 +200,12 @@ export function buildGridColumns(
     sortable: false,
     filter: false,
     editable: false,
-    width: 245,
-    minWidth: 245,
+    // USER DECISION (R2-09): three compact icon-only buttons fit inside a
+    // ~100px column; nothing overflows the row or needs an overlay.
+    width: 100,
+    minWidth: 100,
+    maxWidth: 100,
+    cellClass: 'sheet-actions-cell',
     cellRenderer: RowActionsCell,
   };
 

@@ -453,3 +453,112 @@ says otherwise; nothing is marked CONFIRMED here.
 - Tests: ``tests/sync-indicator.test.ts`` (5 tests).
 
 **Batch A gate:** 43 test files / 242 tests passed; typecheck clean; build ✓.
+
+## 9. Batch B — shell, notifications, theme (R2-02, R2-11, R2-07, R2-08)
+
+### 9.1 R2-02 — one clean notification popover for both roles
+
+- `NotificationBell` was rewritten: the popover is anchored under the bell with
+  a title row (`Notifications` + unread count), a borderless list where each
+  item is **one-line message** + a small secondary line (**record · date**,
+  `DD/MM/YYYY`, or record · deleted time for admin alerts), then **one compact
+  button row**. No bullet markers, no native `datetime-local` input, no custom
+  snooze.
+- Snooze choices are gated by the days left (`snoozeOptionsForDaysLeft`):
+  `D >= 7` → 1 day / 3 days / 1 week; `3 <= D < 7` → 1 day / 3 days;
+  `1 <= D < 3` → 1 day; `D <= 0` → Mark read only. A snooze is never longer
+  than the time left.
+- Admin deletion alerts keep **View · Restore · Dismiss**.
+- Bell click toggles; Esc and outside-click close. The popover stays mounted
+  and open after an action; the item updates in place or leaves the list, and
+  the unread badge is derived from the same state so it updates immediately.
+- New CSS (`.notification-bell*`) — the popover previously had **no styles at
+  all**, which is what made the Admin popover look "messy" and left Office on
+  the unstyled old markup.
+- Tests: `tests/notification-popover.test.tsx` (9); updated
+  `tests/notifications.test.ts` to the new contract (no custom snooze).
+
+### 9.2 R2-11 — Office shell parity
+
+- Both roles render the same `AppShell`: sidebar (no Workspace-health footer),
+  compact top bar, sync pill with expandable details, bell popover and avatar
+  menu. Office only has fewer nav items (Dashboard + Visa Sheet) and no admin
+  actions (no Tools menu, no Settings/Recycle Bin/Audit Log).
+- Tests: `tests/office-shell.test.tsx` (3) — same top bar/bell/sync popover for
+  Office, no admin nav or Tools, admin deletion alerts not exposed to Office.
+
+### 9.3 R2-07 — AG Grid follows the dark theme
+
+- The sheet grid now gets `ag-theme-quartz-dark` alongside the base theme when
+  the app resolves to dark (`sheetGridThemeClass`), plus theme-token overrides
+  for surfaces, header, editors, menus and scrollbars
+  (`--ag-background-color`, `--ag-foreground-color`, …).
+- Recycle Bin and Audit Log are plain HTML tables that already use the theme
+  variables; explicit dark rules were added so no row/panel renders white.
+- Tests: `sheetGridThemeClass` assertions in `tests/theme-personal.test.tsx`.
+
+### 9.4 R2-08 — opening/saving Settings no longer resets the theme
+
+- The Settings page used to push its "Theme default" value into the live
+  session on every save (and the remote settings load applied it to any
+  sign-in). Now a personal theme choice always wins:
+  - saving Settings no longer changes the active theme;
+  - the workspace default is applied only when this PC has **no saved personal
+    preference** (`hasSavedThemePreference`), i.e. a new sign-in.
+- Tests: `tests/theme-personal.test.tsx` (4) — personal dark survives saving a
+  light workspace default and opening Settings; toggle stays authoritative.
+
+## 10. Batch C — Visa Sheet (R2-04, R2-09)
+
+### 10.1 R2-04 — final Status dropdown + date chips
+
+- Status dropdown is now exactly: All statuses · Valid · Expiring soon ·
+  Expired · No expiry. "Urgent" and "Expires today" were removed (they remain
+  row colours / Days Left badges).
+- "Expiring soon" = **every non-expired row with `0 <= Days Left <= threshold`**
+  (workspace expiring-soon threshold, default 90) — deliberately wider than the
+  old status band.
+- Chips are exactly Today · ≤7d · ≤30d · ≤60d · ≤90d; the Expired and
+  No-expiry chips are gone. Single-select; clicking the active chip clears it.
+- Tests: `tests/sheet-filters.test.ts` (4); `tests/sheet-page.test.tsx` updated
+  to assert the final five options and five chips.
+
+### 10.2 R2-09 — full-width sheet, Tools menu, draft row, column menu
+
+- **Full width/height**: `.content--sheet` removes the centered 1280px wrapper
+  and its wide padding (10–12px), the sheet fills `100vh - 50px`, the grid
+  fills the remaining height with `domLayout="normal"` so it scrolls
+  internally.
+- **Administrator Tools card removed** and replaced by the Admin-only
+  **Tools ▾ toolbar menu**: Import file / Export CSV / Export Excel /
+  Print-PDF report (fully absent for Office; the services/IPC still enforce the
+  role).
+- **Add row / Add column / Manage columns removed**:
+  - Add row → pinned blank **draft row** (SHEET-11): focus alone creates
+    nothing; the first committed meaningful value (`0`/`false` included)
+    creates exactly one record, then a fresh blank draft appears;
+  - Add column → the `+` column header (already present);
+  - Manage columns → **column-header right-click menu** (SHEET-13): Rename /
+    Duplicate column / Delete column, plus Admin-only "Set as Primary Expiry"
+    on Date (Expiry) columns. No Hide option; system columns (`#`, Actions,
+    `+`, Days Left) never open it; duplicates get "Original (copy)" and copy
+    the definition only; deletes confirm and Office may only delete empty
+    columns.
+- **Actions column kept** per the user decision, but compact: three icon-only
+  ~24px buttons (duplicate / delete / renew) with tooltips, in a ~100px column
+  that fits the row with no overflow.
+- **Group by (SHEET-04)** implemented Community-compatibly with synthetic
+  full-width group header rows (no Enterprise row grouping); it lists only
+  existing Text/Dropdown columns and is hidden when there are none.
+- **Keyboard (SHEET-12)** pinned to an explicit Community contract
+  (`GRID_KEYBOARD_PROPS`): click-to-type, F2/double-click, Enter commits+down,
+  Tab right, Esc cancels, Delete clears a cell, Ctrl+C/V plain text,
+  Ctrl+Z/Y undo/redo.
+- Tests: `tests/sheet-grouping.test.ts` (4), `tests/column-context-menu.test.ts`
+  (4), `tests/grid-behaviour.test.ts` (4), `tests/draft-row.test.tsx` (2);
+  `tests/sheet-page.test.tsx` and `tests/admin-features.test.tsx` updated from
+  the removed buttons to the Tools menu / `+` header / draft row.
+
+**Batch B+C gate:** 51 test files / 276 tests passed; typecheck clean; build ✓.
+(R2-12 re-verified after R2-01: the outbox now drains and the pill only reads
+"Saved to cloud" with zero pending items.)

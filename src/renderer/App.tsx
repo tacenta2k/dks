@@ -4,6 +4,7 @@ import { useStore } from 'zustand';
 import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
 import {
+  hasSavedThemePreference,
   loadThemePreference,
   resolveTheme,
   saveThemePreference,
@@ -214,7 +215,10 @@ export function App({
         }
         setWorkspaceSettings(remote);
         setSettingsLoadError(null);
-        if (remote.theme) {
+        // R2-08: the workspace "default theme" only applies to a NEW sign-in on
+        // a PC with no saved personal preference. A personal choice always wins
+        // and is never overwritten by loading/opening Settings.
+        if (remote.theme && !hasSavedThemePreference()) {
           setThemePreference(remote.theme);
           appStore.getState().setTheme(remote.theme);
           saveThemePreference(remote.theme);
@@ -299,11 +303,9 @@ export function App({
       setRepositoryRevision((revision) => revision + 1);
     }
 
-    if (settings.theme !== themePreference) {
-      setThemePreference(settings.theme);
-      appStore.getState().setTheme(settings.theme);
-      saveThemePreference(settings.theme);
-    }
+    // R2-08: saving the workspace settings (including the "Theme default" for
+    // new sign-ins) must NOT re-theme the current session. The personal toggle
+    // in the top bar owns the active theme.
 
     if (authStatus === 'demo') {
       return;

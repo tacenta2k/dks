@@ -71,9 +71,17 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
+    // R2-09: Import / Export CSV / Export Excel / Print live in the compact
+    // Admin-only "Tools ▾" toolbar menu (no Administrator Tools card).
+    expect(screen.queryByText(/administrator tools/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/manage records/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Tools/ })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Export CSV' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Export Excel' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Excel' }));
 
     await waitFor(() => expect(saved).toHaveLength(2));
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
@@ -116,7 +124,8 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    fireEvent.click(screen.getByRole('button', { name: 'Print' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Print / PDF report' }));
     expect(screen.getByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Print report' }));
     fireEvent.click(screen.getByRole('button', { name: 'Export PDF' }));

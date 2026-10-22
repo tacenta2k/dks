@@ -31,6 +31,18 @@ function getStorage(): Storage | undefined {
   }
 }
 
+/** R2-08: does this PC already hold a personal theme choice? */
+export function hasSavedThemePreference(storage: Storage | undefined = getStorage()): boolean {
+  if (!storage) {
+    return false;
+  }
+  try {
+    return isThemePreference(storage.getItem(THEME_STORAGE_KEY));
+  } catch {
+    return false;
+  }
+}
+
 export function loadThemePreference(storage: Storage | undefined = getStorage()): ThemePreference {
   if (!storage) {
     return DEFAULT_THEME_PREFERENCE;

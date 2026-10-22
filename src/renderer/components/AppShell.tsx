@@ -571,7 +571,10 @@ export function AppShell({
           </div>
         </header>
 
-        <main className="content" aria-label={copy.title}>
+        <main
+          className={`content${effectiveView === 'sheet' ? ' content--sheet' : ''}`}
+          aria-label={copy.title}
+        >
 
            {effectiveView === 'dashboard' ? (
              // No revision in the key: remounting on every sync destroyed
@@ -584,23 +587,27 @@ export function AppShell({
                 refreshToken={pageRefreshToken}
               />
            ) : effectiveView === 'sheet' ? (
-             <div className="admin-integrated-sheet">
-               <AdminSheetActions
-                 repository={sheetRepository}
-                 role={role}
-                 actor={actor}
-                 onSaveExport={onSaveExport}
-                 onSavePdf={onSavePdf}
-                 onPrint={onPrint}
-                 onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
-               />
-                <SheetPage
-                  repository={sheetRepository}
-                  hideAdminActions
-                  role={role}
-                  refreshToken={pageRefreshToken}
-                />
-              </div>
+             // R2-09: no centered wrapper and no Administrator Tools card. The
+             // grid fills the page; the Admin-only Tools menu lives in the
+             // sheet's single toolbar, and Office gets no tools at all.
+             <SheetPage
+               repository={sheetRepository}
+               role={role}
+               refreshToken={pageRefreshToken}
+               theme={resolvedTheme}
+               thresholds={dashboardThresholds}
+               toolsMenu={(
+                 <AdminSheetActions
+                   repository={sheetRepository}
+                   role={role}
+                   actor={actor}
+                   onSaveExport={onSaveExport}
+                   onSavePdf={onSavePdf}
+                   onPrint={onPrint}
+                   onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
+                 />
+               )}
+             />
            ) : effectiveView === 'recycle-bin' ? (
               <AdminRecycleBinPanel
                 repository={sheetRepository}

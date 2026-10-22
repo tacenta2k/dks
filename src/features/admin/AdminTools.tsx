@@ -309,7 +309,34 @@ export function AdminSheetActions({
   const [importColumnTypes, setImportColumnTypes] = useState<Record<string, ImportColumnType>>({});
   const [importConversions, setImportConversions] = useState<Record<string, 'keep' | 'date_start' | 'date_expiry'>>({});
   const [reportOpen, setReportOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const toolsRef = useRef<HTMLElement>(null);
+
+  // R2-09: the Administrator Tools card became a compact "Tools ▾" menu.
+  // Escape / outside click closes it; picking an item closes it too.
+  useEffect(() => {
+    if (!toolsOpen) {
+      return undefined;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setToolsOpen(false);
+      }
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (toolsRef.current && target && !toolsRef.current.contains(target)) {
+        setToolsOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [toolsOpen]);
 
   const refresh = useCallback(async () => {
     setLoading(true);
@@ -516,49 +543,85 @@ export function AdminSheetActions({
 
   return (
     <>
-      <section className="admin-sheet-actions" aria-label="Admin sheet actions">
-        <div className="admin-sheet-actions__heading">
-          <div>
-            <p className="admin-eyebrow">Administrator tools</p>
-            <h2>Manage records</h2>
-          </div>
-          {loading ? <span className="admin-sheet-actions__loading">Loading…</span> : null}
-        </div>
-        <div className="admin-sheet-actions__buttons">
-           {can(role, 'export') ? (
-             <>
-               <p className="admin-inline-message admin-inline-message--warning">
-                 Exported files contain sensitive data. Protect them and delete them when no longer needed.
-               </p>
-               <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('csv')}>
-                Export CSV
-              </button>
-              <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('xlsx')}>
-                Export Excel
-              </button>
-            </>
-          ) : null}
-          {can(role, 'import') ? (
-            <>
-              <button className="button button--quiet" type="button" disabled={busy} onClick={() => fileInput.current?.click()}>
+      <section className="sheet-tools" aria-label="Admin sheet actions" ref={toolsRef}>
+        <button
+          className="sheet-tools__button"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={toolsOpen}
+          disabled={busy}
+          onClick={() => setToolsOpen((open) => !open)}
+        >
+          Tools <span aria-hidden="true">▾</span>
+        </button>
+        {toolsOpen ? (
+          <div className="sheet-tools__menu" role="menu" aria-label="Sheet tools">
+            {can(role, 'import') ? (
+              <button
+                className="sheet-tools__item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setToolsOpen(false);
+                  fileInput.current?.click();
+                }}
+              >
                 Import file
               </button>
-              <input
-                ref={fileInput}
-                className="admin-file-input"
-                aria-label="Import CSV or Excel file"
-                type="file"
-                accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-                onChange={(event) => void onFileChange(event)}
-              />
-            </>
-          ) : null}
-          {can(role, 'print') ? (
-            <button className="button button--quiet" type="button" onClick={() => setReportOpen(true)}>
-              Print
-            </button>
-          ) : null}
-        </div>
+            ) : null}
+            {can(role, 'export') ? (
+              <>
+                <button
+                  className="sheet-tools__item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void exportRows('csv');
+                  }}
+                >
+                  Export CSV
+                </button>
+                <button
+                  className="sheet-tools__item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void exportRows('xlsx');
+                  }}
+                >
+                  Export Excel
+                </button>
+              </>
+            ) : null}
+            {can(role, 'print') ? (
+              <button
+                className="sheet-tools__item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setToolsOpen(false);
+                  setReportOpen(true);
+                }}
+              >
+                Print / PDF report
+              </button>
+            ) : null}
+            <p className="sheet-tools__note">
+              Exported files contain sensitive data. Protect them and delete them when no longer needed.
+            </p>
+          </div>
+        ) : null}
+        <input
+          ref={fileInput}
+          className="admin-file-input"
+          aria-label="Import CSV or Excel file"
+          type="file"
+          accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+          onChange={(event) => void onFileChange(event)}
+        />
+        {loading ? <span className="sheet-tools__loading">Loading…</span> : null}
         {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
         {status ? <p className="admin-inline-message" role="status">{status}</p> : null}
       </section>
