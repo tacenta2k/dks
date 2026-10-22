@@ -52,6 +52,20 @@ const defaultExists = (candidate: string): boolean => {
 };
 
 /**
+ * The path flavour that belongs to the *simulated* platform, not to the host
+ * running the code.
+ *
+ * `path.join` follows `process.platform`, so a win32 resolution executed on
+ * POSIX (unit tests, CI) used to produce mixed separators, and a POSIX
+ * resolution executed on Windows produced `\\opt\\dks\\resources\\icon.png`.
+ * Picking the implementation from the platform argument makes the result
+ * deterministic everywhere.
+ */
+export function pathImplementationFor(platform: NodeJS.Platform): path.PlatformPath {
+  return platform === 'win32' ? path.win32 : path.posix;
+}
+
+/**
  * Resolution order:
  *   packaged    → <resources>/icon.ico, <resources>/icon.png
  *   development → <appPath>/build/icon.ico, <appPath>/build/icon.png
@@ -61,12 +75,15 @@ const defaultExists = (candidate: string): boolean => {
 export function resolveAppIcon(input: AppIconResolutionInput): AppIconLocation {
   const exists = input.exists ?? defaultExists;
   const platform = input.platform ?? process.platform;
+  const platformPath = pathImplementationFor(platform);
   const extensions = platform === 'win32' ? ['ico', 'png'] : ['png', 'ico'];
   const directory = input.isPackaged
     ? input.resourcesPath
-    : path.join(input.appPath, 'build');
+    : platformPath.join(input.appPath, 'build');
 
-  const candidates = extensions.map((extension) => path.join(directory, `${APP_ICON_BASENAME}.${extension}`));
+  const candidates = extensions.map(
+    (extension) => platformPath.join(directory, `${APP_ICON_BASENAME}.${extension}`),
+  );
   const found = candidates.find((candidate) => exists(candidate));
 
   return {

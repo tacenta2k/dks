@@ -1,8 +1,9 @@
 import { readFileSync, statSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import * as path from 'node:path';
 import { describe, expect, it } from 'vitest';
 
-import { resolveAppIcon } from '../electron/main/icons';
+import { pathImplementationFor, resolveAppIcon } from '../electron/main/icons';
 
 const ROOT = resolve(__dirname, '..');
 const ICO = resolve(ROOT, 'build/icon.ico');
@@ -70,26 +71,122 @@ describe('app icon assets (R3 batch H)', () => {
   });
 });
 
+/**
+ * CRLF-safe helpers.
+ *
+ * A Windows checkout hands us `\r\n`; the sandbox hands us `\n`. Tests must not
+ * depend on which one they got, so every read normalises first and the YAML is
+ * inspected structurally instead of with a multi-line regex.
+ */
+function readNormalised(file: string): string {
+  return readFileSync(resolve(ROOT, file), 'utf8').replace(/\r\n?/g, '\n');
+}
+
+function stripYamlValue(raw: string): string {
+  const withoutComment = raw.replace(/\s+#.*$/, '').trim();
+  return withoutComment.replace(/^(['"])(.*)\1$/, '$2');
+}
+
+/** `key: value` of one indented block (`win:`, `nsis:`, …). */
+function yamlSection(source: string, section: string): Map<string, string> {
+  const lines = source.replace(/\r\n?/g, '\n').split('\n');
+  const values = new Map<string, string>();
+  let inside = false;
+  for (const rawLine of lines) {
+    const line = rawLine.replace(/\s+$/, '');
+    if (!line.trim() || line.trimStart().startsWith('#')) {
+      continue;
+    }
+    const indented = /^\s/.test(line);
+    if (!indented) {
+      const key = line.split(':')[0].trim();
+      inside = key === section;
+      continue;
+    }
+    if (!inside) {
+      continue;
+    }
+    const trimmed = line.trim();
+    // Sequence entries (`- from: …`) belong to lists, not to this map.
+    if (trimmed.startsWith('-')) {
+      continue;
+    }
+    const separator = trimmed.indexOf(':');
+    if (separator <= 0) {
+      continue;
+    }
+    const key = trimmed.slice(0, separator).trim();
+    const value = stripYamlValue(trimmed.slice(separator + 1));
+    if (!values.has(key)) {
+      values.set(key, value);
+    }
+  }
+  return values;
+}
+
+/** `key: value` of the document's top level. */
+function yamlTopLevel(source: string): Map<string, string> {
+  const values = new Map<string, string>();
+  for (const rawLine of source.replace(/\r\n?/g, '\n').split('\n')) {
+    const line = rawLine.replace(/\s+$/, '');
+    if (!line || /^\s/.test(line) || line.trimStart().startsWith('#')) {
+      continue;
+    }
+    const separator = line.indexOf(':');
+    if (separator <= 0) {
+      continue;
+    }
+    const value = stripYamlValue(line.slice(separator + 1));
+    if (value) {
+      values.set(line.slice(0, separator).trim(), value);
+    }
+  }
+  return values;
+}
+
 describe('electron-builder icon wiring (R3 batch H)', () => {
-  const builder = readFileSync(resolve(ROOT, 'electron-builder.yml'), 'utf8');
+  const builder = readNormalised('electron-builder.yml');
 
   it('points the exe, installer and Add/Remove Programs at build/icon.ico', () => {
-    expect(builder).toMatch(/^win:\n(?:.*\n)*?\s+icon: build\/icon\.ico$/m);
-    expect(builder).toContain('installerIcon: build/icon.ico');
-    expect(builder).toContain('uninstallerIcon: build/icon.ico');
-    expect(builder).toContain('installerHeaderIcon: build/icon.ico');
-    expect(builder).toMatch(/^icon: build\/icon\.png$/m);
+    const win = yamlSection(builder, 'win');
+    expect(win.get('icon')).toBe('build/icon.ico');
+    expect(win.get('executableName')).toBe('DKS');
+
+    const nsis = yamlSection(builder, 'nsis');
+    expect(nsis.get('installerIcon')).toBe('build/icon.ico');
+    expect(nsis.get('uninstallerIcon')).toBe('build/icon.ico');
+    expect(nsis.get('installerHeaderIcon')).toBe('build/icon.ico');
+    expect(nsis.get('shortcutName')).toBe('DKS');
   });
 
   it('keeps the DKS identity and ships the PNG for the window icon', () => {
-    expect(builder).toMatch(/^productName: DKS$/m);
-    expect(builder).toMatch(/^appId: com\.dks\.tracker$/m);
+    const top = yamlTopLevel(builder);
+    expect(top.get('productName')).toBe('DKS');
+    expect(top.get('appId')).toBe('com.dks.tracker');
+    expect(top.get('icon')).toBe('build/icon.png');
     expect(builder).toContain('from: build/icon.png');
     expect(builder).toContain('to: icon.png');
   });
 
+  it('parses the same values from a CRLF checkout (Windows)', () => {
+    // The failure this locks: a multi-line regex with `$` never matched a
+    // Windows checkout because every line ended with `\r`.
+    const crlf = builder.replace(/\n/g, '\r\n');
+    expect(crlf).toContain('\r\n');
+    expect(crlf).not.toBe(builder);
+
+    expect(yamlTopLevel(crlf).get('productName')).toBe('DKS');
+    expect(yamlTopLevel(crlf).get('appId')).toBe('com.dks.tracker');
+    expect(yamlTopLevel(crlf).get('icon')).toBe('build/icon.png');
+    expect(yamlSection(crlf, 'win').get('icon')).toBe('build/icon.ico');
+    const nsis = yamlSection(crlf, 'nsis');
+    expect(nsis.get('installerIcon')).toBe('build/icon.ico');
+    expect(nsis.get('uninstallerIcon')).toBe('build/icon.ico');
+    expect(nsis.get('installerHeaderIcon')).toBe('build/icon.ico');
+  });
+
   it('loads the window icon through nativeImage in the main process', () => {
-    const main = readFileSync(resolve(ROOT, 'electron/main/index.ts'), 'utf8');
+    const main = readNormalised('electron/main/index.ts');
     expect(main).toContain('nativeImage.createFromPath');
     expect(main).toContain('icon: windowIcon');
     expect(main).toContain('resolveAppIcon');
@@ -99,73 +196,131 @@ describe('electron-builder icon wiring (R3 batch H)', () => {
 });
 
 describe('app icon resolution rules (R3 batch H)', () => {
-  it('uses the icon next to the packaged resources', () => {
+  const winResources = 'C:\\Program Files\\DKS\\resources';
+  const winAppPath = 'C:\\Program Files\\DKS\\resources\\app.asar';
+  const posixResources = '/opt/dks/resources';
+  const posixAppPath = '/opt/dks/resources/app.asar';
+
+  it('uses the icon next to the packaged resources on Windows', () => {
     const location = resolveAppIcon({
       isPackaged: true,
-      appPath: 'C:\\Program Files\\DKS\\resources\\app.asar',
-      resourcesPath: 'C:\\Program Files\\DKS\\resources',
+      appPath: winAppPath,
+      resourcesPath: winResources,
       platform: 'win32',
       exists: (candidate) => candidate.endsWith('icon.ico'),
     });
-    expect(location.path).toBe(join('C:\\Program Files\\DKS\\resources', 'icon.ico'));
+    // Expected value is built with the same path flavour as the simulated
+    // platform, never with the host's `path.join`.
+    expect(location.path).toBe(path.win32.join(winResources, 'icon.ico'));
     expect(location.source).toBe('packaged');
   });
 
   it('falls back to the png when the ico is unavailable', () => {
     const location = resolveAppIcon({
       isPackaged: true,
-      appPath: '/opt/dks/resources/app.asar',
-      resourcesPath: '/opt/dks/resources',
+      appPath: posixAppPath,
+      resourcesPath: posixResources,
       platform: 'linux',
       exists: (candidate) => candidate.endsWith('icon.png'),
     });
-    expect(location.path).toBe('/opt/dks/resources/icon.png');
+    expect(location.path).toBe(path.posix.join(posixResources, 'icon.png'));
     expect(location.source).toBe('packaged');
   });
 
-  it('reads the repository build/ folder during development', () => {
+  it('reads the repository build/ folder during development (Windows)', () => {
+    const appPath = 'C:\\dev\\dks';
     const location = resolveAppIcon({
       isPackaged: false,
-      appPath: '/home/user/dks',
-      resourcesPath: '/home/user/dks/node_modules/electron/dist/resources',
+      appPath,
+      resourcesPath: 'C:\\dev\\dks\\node_modules\\electron\\dist\\resources',
       platform: 'win32',
       exists: (candidate) => candidate.endsWith('icon.png'),
     });
-    expect(location.path).toBe('/home/user/dks/build/icon.png');
+    expect(location.path).toBe(path.win32.join(appPath, 'build', 'icon.png'));
     expect(location.source).toBe('development');
+    expect(location.path).not.toContain('/');
+  });
+
+  it('reads the repository build/ folder during development (POSIX)', () => {
+    const appPath = '/home/user/dks';
+    const location = resolveAppIcon({
+      isPackaged: false,
+      appPath,
+      resourcesPath: '/home/user/dks/node_modules/electron/dist/resources',
+      platform: 'linux',
+      exists: (candidate) => candidate.endsWith('icon.png'),
+    });
+    expect(location.path).toBe(path.posix.join(appPath, 'build', 'icon.png'));
+    expect(location.source).toBe('development');
+    expect(location.path).not.toContain('\\');
+  });
+
+  it('uses the simulated platform separators on any host', () => {
+    // Regression: `path.join` follows process.platform, so a win32 case run on
+    // POSIX produced mixed separators and a POSIX case run on Windows produced
+    // "\opt\dks\resources\icon.png".
+    const win = resolveAppIcon({
+      isPackaged: true,
+      appPath: winAppPath,
+      resourcesPath: winResources,
+      platform: 'win32',
+      exists: () => true,
+    });
+    const posix = resolveAppIcon({
+      isPackaged: true,
+      appPath: posixAppPath,
+      resourcesPath: posixResources,
+      platform: 'darwin',
+      exists: () => true,
+    });
+
+    expect(win.path).toBe(path.win32.join(winResources, 'icon.ico'));
+    expect(win.path).not.toContain('/');
+    expect(posix.path).toBe(path.posix.join(posixResources, 'icon.png'));
+    expect(posix.path).not.toContain('\\');
+
+    // The helper the resolver uses follows the simulated platform too.
+    expect(pathImplementationFor('win32').join('C:\\a', 'b')).toBe('C:\\a\\b');
+    expect(pathImplementationFor('linux').join('/a', 'b')).toBe('/a/b');
+    expect(pathImplementationFor('darwin').join('/a', 'b')).toBe('/a/b');
   });
 
   it('prefers the .ico on Windows and the .png elsewhere', () => {
     const both = (candidate: string) => candidate !== '';
     const win = resolveAppIcon({
       isPackaged: true,
-      appPath: 'C:\\dks\\resources\\app.asar',
-      resourcesPath: 'C:\\dks\\resources',
+      appPath: winAppPath,
+      resourcesPath: winResources,
       platform: 'win32',
       exists: both,
     });
     const linux = resolveAppIcon({
       isPackaged: true,
-      appPath: '/opt/dks/resources/app.asar',
-      resourcesPath: '/opt/dks/resources',
+      appPath: posixAppPath,
+      resourcesPath: posixResources,
       platform: 'linux',
       exists: both,
     });
-    expect(win.path?.endsWith('.ico')).toBe(true);
-    expect(linux.path?.endsWith('.png')).toBe(true);
+    expect(win.candidates.map((candidate) => path.win32.extname(candidate))).toEqual(['.ico', '.png']);
+    expect(linux.candidates.map((candidate) => path.posix.extname(candidate))).toEqual(['.png', '.ico']);
+    expect(win.path).toBe(path.win32.join(winResources, 'icon.ico'));
+    expect(linux.path).toBe(path.posix.join(posixResources, 'icon.png'));
   });
 
   it('reports a missing icon instead of inventing a path', () => {
     const location = resolveAppIcon({
       isPackaged: true,
-      appPath: '/opt/dks/resources/app.asar',
-      resourcesPath: '/opt/dks/resources',
+      appPath: posixAppPath,
+      resourcesPath: posixResources,
       platform: 'win32',
       exists: () => false,
     });
     expect(location.path).toBeNull();
     expect(location.source).toBe('missing');
-    expect(location.candidates).toHaveLength(2);
+    expect(location.candidates).toEqual([
+      path.win32.join(posixResources, 'icon.ico'),
+      path.win32.join(posixResources, 'icon.png'),
+    ]);
   });
 });
 

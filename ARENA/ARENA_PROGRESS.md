@@ -1121,3 +1121,59 @@ renderer build clean. `electron-builder --win --dir` **loaded the configuration
 successfully** and then stopped at `@electron/rebuild` cross-compiling
 better-sqlite3 for win32 from Linux — an environment limit of this sandbox, not
 a configuration error.
+
+## 20. Round 3 — Batch I: Windows test portability (icon suite)
+
+The user ran `01be50c` on Windows: `typecheck` and `build` passed, `npm test`
+reported 355 passed / **3 failed — all in `tests/app-icon.test.ts`**. Both
+failures were host assumptions in the tests, not defects in the icon wiring
+(the real `electron-builder.yml` was correct).
+
+### 20.1 What failed and why
+
+| # | Test | Cause |
+|---|---|---|
+| 1 | electron-builder icon wiring | The assertion was a multi-line regex (`/^win:\n(?:.*\n)*?\s+icon: …$/m`). A Windows checkout reads `electron-builder.yml` with CRLF, so every line ended `\r` and `$` never matched — the config itself was fine. |
+| 2 | packaged PNG fallback | Expected `/opt/dks/resources/icon.png`; the resolver used host `path.join`, which on Windows produced `\opt\dks\resources\icon.png` — mixed separators. |
+| 3 | development `build/icon.png` | Same cause: `path.join('/home/user/dks', 'build')` on Windows → `\home\user\dks\build`. |
+
+### 20.2 Fixes
+
+- `electron/main/icons.ts`: new `pathImplementationFor(platform)` →
+  `path.win32` for `win32`, `path.posix` for everything else.
+  `resolveAppIcon()` joins with that implementation, so the result depends on
+  the **simulated platform**, not on the host that happens to run the code.
+  Behaviour on real machines is unchanged (`process.platform` is still the
+  default), so the icon configuration itself was not touched.
+- `tests/app-icon.test.ts`:
+  - `readNormalised()` strips `\r` before anything looks at a text file.
+  - `electron-builder.yml` is now inspected **structurally** (`yamlTopLevel` /
+    `yamlSection` read `key: value` pairs) instead of with a fragile multi-line
+    regex; the assertions compare values (`build/icon.ico`, `DKS`,
+    `com.dks.tracker`, the three NSIS icon keys).
+  - A new test converts the real YAML to CRLF in memory and re-asserts every
+    icon/identity key, which locks the Windows failure without needing Windows.
+  - Expected paths are built with `path.win32.join` / `path.posix.join` for the
+    platform each test simulates — never with the host's `path.join`.
+  - Development resolution is now covered for **both** flavours (Windows
+    `C:\dev\dks` and POSIX `/home/user/dks`), plus a determinism test asserting
+    a win32 result contains no `/`, a POSIX result no `\`, and that
+    `pathImplementationFor` follows the argument.
+  - Added 3 tests (15 → 18); nothing was skipped, removed or loosened.
+
+Verification of the Windows behaviour without Windows: the suite was re-run with
+`process.platform` forced to `win32` **and** with `electron-builder.yml`
+temporarily converted to CRLF — 18/18 passed in both runs (temporary harness
+files deleted afterwards).
+
+### 20.3 `npm run dist` on Windows (user's run)
+
+Packaging reached the Windows step and stopped while extracting `winCodeSign`,
+because that archive contains symlinks and the terminal was not elevated. That
+is an environment permission, not a repository setting: run the CMD as
+Administrator, or enable Windows **Developer Mode** (Settings → System →
+For developers → Developer Mode) so non-elevated processes may create symlinks,
+then run `npm run dist` again. No build configuration was changed for this.
+
+Gate: 59 files / **361 tests** (358 before + the 3 new portability tests),
+`tsc` (both configs) clean, `build:electron` + renderer build clean.
