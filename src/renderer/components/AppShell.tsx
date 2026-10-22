@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from
 import { can } from '../../lib/permissions';
 import { formatLocalDateTime } from '../../lib/date';
 import { resolveSyncIndicator } from '../../lib/sync-indicator';
+import { LOCAL_STORE_ERROR_HEADLINE } from '../../lib/local-store-error';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
@@ -55,6 +56,11 @@ export interface AppShellProps {
   syncStatus?: DksLocalSyncState;
   /** Per-item pending outbox details (sanitised) for the sync status panel. */
   pendingOutbox?: readonly SyncPendingItem[];
+  /**
+   * R7: set when the local SQLite store could not be opened. The shell then
+   * shows a real error state instead of an "offline" pill.
+   */
+  localStoreError?: string | null;
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
   repositoryRevision?: number;
@@ -274,6 +280,7 @@ export function AppShell({
     pendingCount: 0,
   },
   pendingOutbox = [],
+  localStoreError = null,
   isDemoMode = false,
   sheetRepository,
   repositoryRevision = 0,
@@ -367,7 +374,14 @@ export function AppShell({
   // (status healthy AND no pending items); any queued or failed item shows
   // "Sync error · N pending" (or "Syncing… · N pending") so the pill can
   // never claim success while work is outstanding.
-  const syncIndicator = resolveSyncIndicator(syncStatus.status, syncStatus.pendingCount);
+  const localStoreFailureMessage = typeof localStoreError === 'string' && localStoreError.trim()
+    ? localStoreError.trim()
+    : null;
+  // R7: a missing local database is never reported as "offline"; "Offline —
+  // saved locally" would be a lie because nothing can be saved at all.
+  const syncIndicator = localStoreFailureMessage
+    ? { key: 'error' as const, label: LOCAL_STORE_ERROR_HEADLINE, pendingSuffix: '' }
+    : resolveSyncIndicator(syncStatus.status, syncStatus.pendingCount);
   const syncStateKey = syncIndicator.key;
   const pendingSuffix = syncIndicator.pendingSuffix;
   const syncLabel = syncIndicator.label;
@@ -582,6 +596,22 @@ export function AppShell({
           className={`content${effectiveView === 'sheet' ? ' content--sheet' : ''}`}
           aria-label={copy.title}
         >
+          {localStoreFailureMessage ? (
+            <div className="local-store-error" role="alert" data-testid="local-store-error">
+              <p className="local-store-error__headline">
+                <span className="local-store-error__dot" aria-hidden="true" />
+                {LOCAL_STORE_ERROR_HEADLINE}
+              </p>
+              <p className="local-store-error__body">
+                Entries cannot be read or saved on this device until the local database starts.
+                Settings and the cloud connection are unaffected.
+              </p>
+              <details className="local-store-error__details">
+                <summary>Technical details</summary>
+                <p>{localStoreFailureMessage}</p>
+              </details>
+            </div>
+          ) : null}
 
            {effectiveView === 'dashboard' ? (
              // No revision in the key: remounting on every sync destroyed

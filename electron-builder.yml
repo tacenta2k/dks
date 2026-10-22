@@ -17,8 +17,25 @@ extraResources:
   - from: build/icon.png
     to: icon.png
 asar: true
+# R7: better-sqlite3 ships a native .node binary that must live outside the
+# asar archive (Electron cannot dlopen a file inside an asar). Without this the
+# module is not loadable from the installed app.
 asarUnpack:
   - node_modules/better-sqlite3/**
+# R7: production dependencies (better-sqlite3 included) are always collected by
+# electron-builder independently of `files`; the `files` globs above are NOT
+# what ships node_modules. What broke the packaged app was the *ABI* of the
+# shipped binary (a Node-ABI `npm rebuild` left in the tree), so the dist path
+# is guarded twice: scripts/verify-native-modules.mjs (before packaging) and
+# afterPack (below, against the packaged app.asar.unpacked copy).
+npmRebuild: true
+# Not enabled on purpose: it always compiles from source (needs MSVC + headers
+# even when a valid Electron prebuild exists). The verification hooks above
+# rebuild for Electron and then prove the packaged binary loads.
+buildDependenciesFromSource: false
+# R7: dist-time proof that the packaged better_sqlite3.node loads under the
+# packaged Electron binary. Throws — and aborts the installer — otherwise.
+afterPack: scripts/after-pack.cjs
 extraMetadata:
   main: dist-electron/main/index.js
 win:

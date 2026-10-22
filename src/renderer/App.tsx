@@ -10,6 +10,7 @@ import {
   saveThemePreference,
 } from '../lib/theme';
 import type { AppView, DksLocalSyncState, ThemePreference } from '../lib/types';
+import { localStoreErrorMessage } from '../lib/local-store-error';
 import { sanitizeSyncError } from '../lib/sync-error';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
@@ -119,6 +120,9 @@ export function App({
     pendingCount: 0,
   });
   const [pendingOutbox, setPendingOutbox] = useState<readonly SyncPendingItem[]>([]);
+  // R7: a local-storage failure is not "offline". It is surfaced explicitly so
+  // the shell never claims the data was saved locally when it was not.
+  const [localStoreError, setLocalStoreError] = useState<string | null>(null);
   const [workspaceSettings, setWorkspaceSettings] = useState<PartialSettings | undefined>(undefined);
   const [auditProfiles, setAuditProfiles] = useState<AuditProfile[]>([]);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
@@ -568,11 +572,19 @@ export function App({
     void local
       .getSnapshot()
       .then((snapshot) => {
-        if (!cancelled && snapshot.syncStatus) {
+        if (cancelled) {
+          return;
+        }
+        setLocalStoreError(null);
+        if (snapshot.syncStatus) {
           setSyncStatus(snapshot.syncStatus);
         }
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocalStoreError(localStoreErrorMessage(error));
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -729,6 +741,7 @@ export function App({
       health={health}
       syncStatus={syncStatus}
       pendingOutbox={pendingOutbox}
+      localStoreError={localStoreError}
       isDemoMode={authStatus === 'demo'}
       sheetRepository={sheetRepository}
       settings={workspaceSettings}

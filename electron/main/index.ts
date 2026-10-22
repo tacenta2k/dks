@@ -30,9 +30,17 @@ import { resolveAppIcon, type AppIconLocation } from './icons';
 import type { Tray } from 'electron';
 import { createSqliteStore, type SqliteStore } from './sqlite';
 import {
+  LOCAL_IPC_CHANNELS,
   registerLocalIpcHandlers,
+  registerLocalStoreFailureIpcHandlers,
   type LocalIpcMain,
 } from './local-ipc';
+import {
+  createLocalStoreFailure,
+  localStoreUnavailableMessage,
+  LOCAL_STORE_LOG_FALLBACK,
+  type LocalStoreFailure,
+} from './local-store-diagnostics';
 
 /**
  * R2-05: Windows resolves the toast/notification author from the application
@@ -155,6 +163,14 @@ let updaterService: UpdaterService | undefined;
 let updaterScheduler: UpdaterScheduler | undefined;
 let localStore: SqliteStore | undefined;
 let unregisterLocalIpc: (() => void) | undefined;
+/** R7: why the local store is unavailable, shared with the failure stubs. */
+let localStoreFailure: LocalStoreFailure | null = null;
+let unregisterLocalStoreFailureIpc: (() => void) | undefined;
+
+/** Diagnostics for the local store, for logging and tests. */
+export function getLocalStoreFailure(): LocalStoreFailure | null {
+  return localStoreFailure;
+}
 
 function safeInvoke(action: () => void): void {
   try {
@@ -387,6 +403,7 @@ function closeLocalStore(): void {
     safeInvoke(() => unregisterLocalIpc?.());
     unregisterLocalIpc = undefined;
   }
+  unregisterLocalStoreFailureIpc = undefined;
 
   if (!localStore) {
     return;
@@ -403,8 +420,38 @@ function closeLocalStore(): void {
 }
 
 /**
+ * The real log file electron-log writes to. Resolved defensively: it is only
+ * used to point the user (and the failure message) at the right file.
+ */
+function resolveMainLogPath(): string {
+  try {
+    const file = log.transports?.file?.getFile?.();
+    const candidate = typeof file?.path === 'string' ? file.path.trim() : '';
+    return candidate || LOCAL_STORE_LOG_FALLBACK;
+  } catch {
+    return LOCAL_STORE_LOG_FALLBACK;
+  }
+}
+
+/** userData path for diagnostics only — never lets a failure escape. */
+function safeUserDataPath(): string | null {
+  try {
+    return app.getPath('userData');
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Open exactly one app-owned local store after Electron is ready. The user
  * data path stays in the main process; only structured records cross IPC.
+ *
+ * R7: a failed open must not leave the `dks:local:*` channels unregistered.
+ * The renderer used to receive `No handler registered for
+ * 'dks:local:get-snapshot'`, which hid the real cause (a `better_sqlite3.node`
+ * built for the wrong runtime ABI) and left the UI claiming "offline".
+ * Every channel is now registered as a failing stub that returns the real,
+ * bounded reason plus the log path.
  */
 function openLocalStore(): void {
   if (localStore) {
@@ -416,6 +463,9 @@ function openLocalStore(): void {
     const userDataPath = app.getPath('userData');
     opened = createSqliteStore({ userDataPath });
     localStore = opened;
+    localStoreFailure = null;
+    unregisterLocalStoreFailureIpc?.();
+    unregisterLocalStoreFailureIpc = undefined;
     unregisterLocalIpc = registerLocalIpcHandlers({
       ipcMain: ipcMain as unknown as LocalIpcMain,
       store: localStore,
@@ -423,11 +473,39 @@ function openLocalStore(): void {
     log.info('[dks] local SQLite store opened and IPC handlers registered');
   } catch (error) {
     // The shell and cloud features can still start when local storage is not
-    // available; the renderer simply observes an absent local bridge.
-    log.error('[dks] failed to open the local SQLite store', error);
+    // available, but the renderer must be told why.
+    const failure = createLocalStoreFailure(error, resolveMainLogPath());
+    localStoreFailure = failure;
+    log.error('[dks] failed to open the local SQLite store', {
+      message: failure.message,
+      abiMismatch: failure.abiMismatch,
+      logPath: failure.logPath,
+      userDataPath: safeUserDataPath(),
+      platform: process.platform,
+      arch: process.arch,
+      electronVersion: process.versions.electron,
+      nodeAbi: process.versions.modules,
+    }, error);
     safeInvoke(() => opened?.close());
     localStore = undefined;
     unregisterLocalIpc = undefined;
+
+    const ipc = ipcMain as unknown as LocalIpcMain;
+    try {
+      unregisterLocalStoreFailureIpc?.();
+      unregisterLocalStoreFailureIpc = registerLocalStoreFailureIpcHandlers({
+        ipcMain: ipc,
+        failure,
+      });
+      unregisterLocalIpc = unregisterLocalStoreFailureIpc;
+      log.error(
+        `[dks] local storage unavailable; registered ${Object.keys(LOCAL_IPC_CHANNELS).length} `
+        + `failing local IPC handlers. ${localStoreUnavailableMessage(failure)}. `
+        + `Full diagnostics: ${failure.logPath ?? LOCAL_STORE_LOG_FALLBACK}`,
+      );
+    } catch (registrationError) {
+      log.error('[dks] could not register the local storage failure handlers', registrationError);
+    }
   }
 }
 

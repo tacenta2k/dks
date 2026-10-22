@@ -272,6 +272,61 @@ button:focus-visible {
   font-weight: 650;
 }
 
+/* R7: the local SQLite store could not be opened. This is a real error state —
+   never an "offline" badge — and it must stay readable in both themes. */
+.local-store-error {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(229, 72, 77, 0.4);
+  border-left: 4px solid #e5484d;
+  border-radius: 12px;
+  background: rgba(229, 72, 77, 0.08);
+}
+
+.local-store-error__headline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--color-danger, #e5484d);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.local-store-error__dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #e5484d;
+}
+
+.local-store-error__body {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.local-store-error__details {
+  margin-top: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.local-store-error__details summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.local-store-error__details p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
 /* Blocker 3: expandable pending-change details under the sync status. */
 .sync-status__issues {
   margin-top: 6px;

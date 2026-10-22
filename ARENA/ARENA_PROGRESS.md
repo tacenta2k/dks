@@ -1177,3 +1177,151 @@ then run `npm run dist` again. No build configuration was changed for this.
 
 Gate: 59 files / **361 tests** (358 before + the 3 new portability tests),
 `tsc` (both configs) clean, `build:electron` + renderer build clean.
+
+## 21. Fix — packaged Windows build: local SQLite store (native ABI)
+
+### 21.1 Symptom (user, packaged `release\DKS-0.1.0-win-x64.exe`)
+
+The installed app opened but every local call failed:
+
+```
+Error invoking remote method 'dks:local:get-snapshot':
+Error: No handler registered for 'dks:local:get-snapshot'
+```
+
+and the top-bar pill stayed on "Offline — saved locally". `npm run dev` was
+fine. The user reproduced it twice (fresh install each time) and confirmed:
+
+`C:\Program Files\DKS\resources\app.asar.unpacked\node_modules\better-sqlite3\build\Release\better_sqlite3.node`
+exists and is dated at install time.
+
+### 21.2 Root cause (read from source, not guessed)
+
+1. **`files` was not the problem.** The initial suspicion was that
+   `files: [dist-electron/**, package.json]` excluded `node_modules`.
+   `app-builder-lib/out/util/appFileCopier.js` →
+   `computeNodeModuleFileSets()` always collects **production dependencies**
+   separately from the `files` matcher into `node_modules/<name>`. That is why a
+   binary was shipped at all — adding `node_modules/**` would have changed
+   nothing (and only bloated the asar).
+2. **The ABI was the problem.** The shipped `better_sqlite3.node` was the
+   **Node ABI 137** build (a stray `npm rebuild better-sqlite3` in the same
+   tree before `npm run dist`), while Electron 34 needs **ABI 132**.
+3. `@electron/rebuild` 3.6.1 (`lib/rebuild.js` `rebuildModuleAt`) returns early
+   when `prebuildInstallNativeModuleExists()` is true ("skipping … as it was
+   prebuilt") / when `.forge-meta` already matches, so nothing replaced the
+   wrong binary before it was copied into `app.asar.unpacked`.
+4. At runtime `better-sqlite3` v12 loads its addon lazily on the first
+   `new Database()`, so `require('better-sqlite3')` succeeded and the main
+   process stayed alive; `createSqliteStore()` threw
+   `NODE_MODULE_VERSION mismatch` inside `openLocalStore()`.
+5. `openLocalStore()`'s catch logged and left `localStore` /
+   `unregisterLocalIpc` undefined — **no handler was registered**, the renderer
+   got Electron's raw "No handler registered" error, `.catch(() => undefined)`
+   swallowed it, and `syncStatus` kept its initial `offline` value.
+
+### 21.3 Packaging: a Node-ABI binary can no longer be packaged
+
+- `electron-builder.yml`: `asar: true` and
+  `asarUnpack: node_modules/better-sqlite3/**` kept (a `.node` inside an asar
+  is not loadable); `npmRebuild: true` made explicit;
+  `buildDependenciesFromSource: false` documented (it would force an MSVC
+  compile even when a valid Electron prebuild exists);
+  `afterPack: scripts/after-pack.cjs` added.
+- **`scripts/verify-native-modules.mjs`** (new) runs *before*
+  electron-builder from `npm run dist` / `npm run release`
+  (`npm run verify:native`). It loads the module with the project's own
+  Electron binary in `ELECTRON_RUN_AS_NODE` mode and opens an in-memory
+  database — Node refuses to dlopen a mismatched ABI, so this is the real
+  assertion. On failure it deletes the stale
+  `node_modules/better-sqlite3/build` output, runs
+  `electron-builder install-app-deps` (rebuild for Electron), re-checks, and
+  **exits 1** with instructions if it still fails.
+- **`scripts/after-pack.cjs`** (new) repeats the probe against the artefact
+  that actually ships: `resources/app.asar.unpacked/node_modules/better-sqlite3/build/Release/better_sqlite3.node`,
+  loaded by the **packaged** Electron executable. Missing/unpackable/bad-ABI
+  binding throws and aborts the installer build.
+- No binary is vendored in the repo; the rebuild stays a local build step.
+
+### 21.4 Main process: startup is resilient and diagnosable
+
+- `electron/main/local-store-diagnostics.ts` (new, no Electron imports so it is
+  unit-testable): `createLocalStoreFailure()` bounds/collapses the raw error,
+  detects the native-module ABI error and distils it to
+  "built for ABI 137 but this build needs ABI 132", carries the real log path,
+  and `localStoreUnavailableMessage()` builds the one sentence every failing
+  channel returns.
+- `electron/main/index.ts` `openLocalStore()`:
+  - on success clears any previous failure / stubs;
+  - on failure logs the full diagnostic (message, ABI flag, log path, userData
+    path, platform, arch, Electron version, Node ABI, the thrown error) to
+    `%APPDATA%\DKS\logs\main.log` via electron-log, then **registers the failing
+    stubs for all 30 `dks:local:*` channels**; registration is idempotent and
+    is cleared by `closeLocalStore()`.
+- `electron/main/local-ipc.ts`: new `createLocalStoreFailureHandlers()` and
+  `registerLocalStoreFailureIpcHandlers()`; every channel rejects with
+  `Local database unavailable: <reason>. <reinstall hint when ABI>. (<channel>) Log: <path>`.
+  No channel can be left unregistered again.
+- `electron/preload/index.ts`: the bounded error cap goes 240 → 400 chars so the
+  log path is not cut off mid-message (it still strips any non-Error value).
+
+### 21.5 Renderer: a real error state, never a false "offline"
+
+- `src/lib/local-store-error.ts` (new): strips the
+  `Error invoking remote method '…': Error: ` wrapper, bounds the text.
+- `src/renderer/App.tsx`: the snapshot restore now sets `localStoreError` when
+  `local.getSnapshot()` rejects (and clears it on success).
+- `src/renderer/components/AppShell.tsx`: the sync pill reads
+  **"Local database unavailable"** (error dot) instead of
+  "Offline — saved locally", and a `role="alert"` banner explains that entries
+  cannot be read or saved on this device, with the technical details (reason +
+  log path) in an expandable block. `src/renderer/styles.css` styles it for both
+  themes. The Dashboard itself is untouched.
+
+### 21.6 Tests (381 total, +20)
+
+- `tests/packaging-native-modules.test.ts` (6): `better-sqlite3` is a
+  production dependency; `asar: true`; `asarUnpack` covers the whole module;
+  `files` ships `dist-electron/**` + `package.json`; `npmRebuild: true`;
+  `npm run dist` runs `verify:native` **after** `build` and **before**
+  electron-builder; `afterPack` hook wired; both scripts exist and contain the
+  Electron-ABI probe / rebuild / packaged-artefact check.
+- `tests/local-store-failure.test.ts` (12): ABI detection, bounded/collapsed
+  messages, fallback log path, all 30 channels registered as failing stubs with
+  reason + channel + log path, non-ABI failures stay meaningful, a stale
+  success handler is replaced, unregistration and re-registration are clean, and
+  the renderer helper strips the IPC wrapper.
+- `tests/sync-status-ui.test.tsx` (+2): a store failure shows the alert banner
+  and never "Offline — saved locally"; a healthy store shows no banner.
+
+### 21.7 Gate
+
+`npm rebuild better-sqlite3` (sandbox needs `--nodedir=/usr/local`) then
+`npm test` → **61 files / 381 tests passed**, `npm run typecheck` clean,
+`npm run build` clean. One earlier full run reported a single failure that did
+not reproduce in the two subsequent full runs; it was not in any of the new
+suites.
+
+### 21.8 Windows re-verify (user only)
+
+1. Close DKS, then in the repo delete the stale native build so nothing can be
+   reused: `rmdir /s /q node_modules\better-sqlite3\build` (or delete the whole
+   `node_modules` and run `npm install`).
+2. Elevated CMD in the repo (elevation is needed for the winCodeSign symlinks):
+   `npm run dist`.
+   - `verify:native` must print
+     `[dks] better-sqlite3 loads under Electron (module ABI 132) — safe to package`.
+   - `afterPack` must print
+     `[dks] packaged better-sqlite3 loads under Electron (module ABI 132)`.
+   - If either prints `NATIVE MODULE CHECK FAILED` / throws, the build stops
+     instead of producing a broken installer — send that output back.
+3. Uninstall DKS, install `release\DKS-0.1.0-win-x64.exe`.
+4. Launch it: the sheet/dashboard must load with no `No handler registered`
+   error. Create a row, quit fully (tray → Exit), reopen — the row must persist.
+5. If the store still cannot open, the app now shows
+   **"Local database unavailable"** instead of "Offline"; expand *Technical
+   details* and send `%APPDATA%\DKS\logs\main.log` (the message names the exact
+   log path).
+
+**This is not verified by me.** I cannot run the packaged Windows app; only the
+user can confirm it, so the status stays `IMPLEMENTED_AWAITING_CONFIRMATION`.

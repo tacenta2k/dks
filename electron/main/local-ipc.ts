@@ -12,6 +12,10 @@ import type {
   RemoteEntryInput,
 } from './sqlite';
 import type { SyncState, SyncStatus } from './sync';
+import {
+  localStoreUnavailableMessage,
+  type LocalStoreFailure,
+} from './local-store-diagnostics';
 
 /** Stable channel names shared by the main-process registration and preload. */
 export const LOCAL_IPC_CHANNELS = Object.freeze({
@@ -918,3 +922,46 @@ export function registerLocalIpcHandlers(
 }
 
 export const installLocalIpcHandlers = registerLocalIpcHandlers;
+
+/**
+ * R7: when the local store cannot be opened the app must still answer every
+ * `dks:local:*` channel. A rejected handler with a descriptive message is far
+ * better than Electron's `No handler registered for 'dks:local:get-snapshot'`,
+ * which told the user (and the renderer) nothing about the real cause.
+ */
+export function createLocalStoreFailureHandlers(
+  failure: LocalStoreFailure,
+): LocalIpcHandlers {
+  const handlers = {} as Record<LocalIpcChannel, LocalIpcHandler>;
+  for (const channel of Object.values(LOCAL_IPC_CHANNELS) as LocalIpcChannel[]) {
+    handlers[channel] = () => {
+      throw new Error(localStoreUnavailableMessage(failure, channel));
+    };
+  }
+  return handlers;
+}
+
+export interface LocalStoreFailureIpcDependencies {
+  ipcMain: LocalIpcMain;
+  failure: LocalStoreFailure;
+}
+
+export function registerLocalStoreFailureIpcHandlers(
+  dependencies: LocalStoreFailureIpcDependencies,
+): () => void {
+  const handlers = createLocalStoreFailureHandlers(dependencies.failure);
+  const channels = Object.keys(handlers) as LocalIpcChannel[];
+
+  for (const channel of channels) {
+    // Idempotent: a retry after a transient failure replaces the stub instead
+    // of throwing "Attempted to register a second handler".
+    dependencies.ipcMain.removeHandler?.(channel);
+    dependencies.ipcMain.handle(channel, (_event, payload) => handlers[channel](payload, _event));
+  }
+
+  return () => {
+    for (const channel of channels) {
+      dependencies.ipcMain.removeHandler?.(channel);
+    }
+  };
+}

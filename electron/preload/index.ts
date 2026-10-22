@@ -539,9 +539,11 @@ async function invokeLocal<T>(
     return cloneSerializable(result) as T;
   } catch (caught) {
     // Preserve a useful, bounded error while preventing a renderer caller from
-    // receiving an arbitrary thrown value from the main process.
+    // receiving an arbitrary thrown value from the main process. R7: the local
+    // store failure message carries the reason, the channel and the log path,
+    // so the cap has to stay above that (~300 chars) or the path is cut off.
     const message = caught instanceof Error && caught.message.trim()
-      ? caught.message.trim().slice(0, 240)
+      ? caught.message.trim().slice(0, 400)
       : 'Local operation failed';
     throw new Error(message);
   }
