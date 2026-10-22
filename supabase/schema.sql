@@ -138,6 +138,41 @@ begin
 end;
 $$;
 
+-- Both accounts may edit live rows.  The creator must not change afterwards,
+-- and Office must never be able to restore a deleted row through an UPDATE.
+create or replace function public.entries_keep_created_by()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  new.created_by := old.created_by;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_office_restore()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'UPDATE' and public.is_office() then
+    if old.deleted is true and new.deleted is false then
+      raise exception 'Only administrators may restore entries'
+        using errcode = '42501';
+    end if;
+    if old.deleted is true then
+      raise exception 'Only administrators may update deleted entries'
+        using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
 create or replace function public.is_admin()
 returns boolean
 language sql
@@ -697,6 +732,16 @@ create trigger app_columns_primary_expiry_guard
 before insert or update or delete on public.app_columns
 for each row execute function public.guard_primary_expiry_column();
 
+drop trigger if exists entries_keep_created_by on public.entries;
+create trigger entries_keep_created_by
+before update on public.entries
+for each row execute function public.entries_keep_created_by();
+
+drop trigger if exists entries_guard_office_restore on public.entries;
+create trigger entries_guard_office_restore
+before update on public.entries
+for each row execute function public.guard_office_restore();
+
 drop trigger if exists entries_primary_expiry_guard on public.entries;
 create trigger entries_primary_expiry_guard
 before insert or update on public.entries
@@ -879,22 +924,41 @@ drop policy if exists entries_insert_authenticated on public.entries;
 create policy entries_insert_authenticated
 on public.entries for insert to authenticated
 with check (
-  (public.is_admin() or public.is_office())
+  auth.uid() is not null
+  and (public.is_admin() or public.is_office())
   and created_by = auth.uid()
-  and not deleted
+  and deleted is false
+  and deleted_at is null
+  and deleted_by is null
 );
 
+-- The UPDATE policy never tests created_by: either account may edit (or soft
+-- delete) any live row, including rows created by the other account.  Office
+-- cannot see or update an already-deleted row, so restoring stays an
+-- administrator-only operation (restore_entry).  created_by is kept immutable
+-- by the entries_keep_created_by trigger.
 drop policy if exists entries_update_authenticated on public.entries;
 create policy entries_update_authenticated
 on public.entries for update to authenticated
-using (public.is_admin() or (public.is_office() and not deleted))
+using (
+  public.is_admin()
+  or (public.is_office() and deleted is false)
+)
 with check (
   public.is_admin()
   or (
     public.is_office()
     and (
-      (not deleted and deleted_at is null and deleted_by is null)
-      or (deleted and deleted_at is not null and deleted_by = auth.uid())
+      (
+        deleted is false
+        and deleted_at is null
+        and deleted_by is null
+      )
+      or (
+        deleted is true
+        and deleted_at is not null
+        and (deleted_by is null or deleted_by = auth.uid())
+      )
     )
   )
 );

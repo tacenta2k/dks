@@ -1,6 +1,8 @@
 # DKS — Session Progress (Agent)
 
-Session branch: `arena/0e0155c1-dks` (PR #1 open, kept open).
+Session branch: `arena/cce2ff33-dks` (round 2; PR #1 merged into `main`).
+Round-2 work is listed in section 8 onwards. Nothing in this file is
+"CONFIRMED" unless the user verified it on Windows.
 Companion file: `ARENA/TO_DO_LIST.md` (single implementation checklist).
 Source docs (read-only): `HANDOFF.md`, `docs/RESUME_NEXT_SESSION.md`, `docs/FIXES_UI.md`.
 
@@ -22,6 +24,26 @@ Recorded exactly as verified by the user; nothing else is treated as confirmed:
 | 6 | Sync status can become healthy (pending items reach cloud) | CRIT-04 |
 | 7 | Recycle Bin shows "Deleted by"; Audit Log filters work; weekly Settings controls exist | RBIN-05, AUDIT-02/05, SET-03 |
 | 8 | `author` present in `package.json` (S8) | PKG-01 |
+
+### Round 2 user-confirmed results (recorded verbatim, STEP 0)
+
+Real Windows tests in the packaged app confirmed WORKING:
+
+| # | Item | Source ID |
+|---|------|-----------|
+| 9 | Input/typing focus fix (no lag, focus retained) | SHEET-19 |
+| 10 | Passport works as plain text | SHEET-17 |
+| 11 | Permanent delete from the Recycle Bin | CRIT-02 |
+| 12 | CSV/Excel import + export | CRIT-03 |
+| 13 | Days Left | SHEET-20 |
+| 14 | Admin sync reaches "Saved to cloud" | CRIT-04 |
+| 15 | Dashboard ("perfect") | DASH-01..03 |
+| 16 | Audit Log entries + filters | AUDIT-02/03/05 |
+| 17 | Recycle Bin "Deleted by" | RBIN-05 |
+| 18 | Settings weekly summary | SET-03 |
+| 19 | New global shell / top bar / sidebar present | SHELL-01/06/07 |
+
+NOT working / not done: the round-2 list (R2-01 .. R2-15) in section 8.
 
 ## 2. Completed this session (IMPLEMENTED_AWAITING_CONFIRMATION unless noted)
 
@@ -325,3 +347,109 @@ old failed outbox item is fine — the fix makes the insert succeed):
    removes the `created_by` clause from the failure path; any residual failure
    would be role-related or a live-schema drift, which the sanitized error will
    reveal without requiring a RLS weakening.)
+
+---
+
+# ROUND 2 — critical fixes + remaining UI work
+
+Round-2 scope: the R2 list supplied by the user (R2-01 .. R2-15), worked in
+batches A–D. Every item below is `IMPLEMENTED_AWAITING_CONFIRMATION` unless it
+says otherwise; nothing is marked CONFIRMED here.
+
+## 8. Batch A — critical / functional (R2-01, R2-03, R2-05, R2-12)
+
+### 8.1 R2-01 — entries RLS: Office can sync edits and deletes
+
+**Root cause (confirmed by the shipped code and the user's log):**
+
+- The entries UPDATE policy's ``WITH CHECK`` only accepted one exact row
+  shape, and the client wrote *every* row (including rows that already
+  existed remotely) through ``upsert`` = ``INSERT … ON CONFLICT DO UPDATE``.
+  The INSERT half of that statement re-ran the INSERT policy, which requires
+  ``created_by = auth.uid()`` and ``not deleted``. Office editing an
+  Admin-created row (``created_by = Admin``) and Office soft-deleting a row
+  (``deleted = true``) therefore both failed with
+  ``new row violates row-level security policy for table "entries"``.
+- ``attempts`` was only incremented by ``markOutboxProcessing``, which the
+  sync loop never calls, so failed items always read ``attempted 0×``.
+
+**SQL delivered — the user must run this in Supabase:**
+
+- ``ARENA/sql/fix-entries-rls.sql`` — idempotent (drops + recreates every
+  policy/trigger), RLS stays enabled, no anon grants, no service-role, no
+  hard deletes. Implements:
+  - INSERT: any authenticated admin/office, ``created_by = auth.uid()``,
+    never born deleted.
+  - UPDATE: both roles may update **any live row** (no ``created_by`` test at
+    all), including setting ``deleted = true`` with ``deleted_at`` and
+    ``deleted_by``. Office cannot see or update an already-deleted row
+    (USING clause: ``is_admin() or (is_office() and deleted is false)``), so
+    restore stays admin-only.
+  - ``entries_keep_created_by`` BEFORE UPDATE trigger: ``created_by`` is
+    copied from OLD, so it can never change after insert.
+  - ``entries_guard_office_restore`` BEFORE UPDATE trigger: a hard error if
+    Office ever tries to move a deleted row back to active.
+  - DELETE: admin only (unchanged).
+- ``supabase/schema.sql`` received the same policies and both triggers, so a
+  fresh install matches the migration.
+- Reported to the user in the first progress message so the SQL could be run
+  while the rest of the batches were being implemented.
+
+**Client fixes:**
+
+- ``supabase-sync.ts`` now distinguishes writes: a row the remote has never
+  seen is a real ``INSERT`` (created_by stamped); an existing row is a real
+  ``UPDATE`` (``.update(values).eq('id', …)``, no ``created_by`` in the
+  payload). Test doubles / older clients that only expose ``upsert`` keep
+  using the idempotent upsert fallback, so no coverage was lost.
+- ``columns`` follow the same insert-vs-update split.
+- ``markOutboxFailed`` now increments ``attempts``, so the sync detail panel
+  shows a real attempt count instead of ``attempted 0×``.
+
+**Tests added (`tests/entries-rls.test.ts`, 14 tests):**
+
+- Office updates a live Admin-created row → allowed, ``created_by`` stays Admin.
+- Office soft-deletes a live Admin-created row → allowed, ``deleted_by`` set.
+- Office updating/restoring an already-deleted row → rejected (0 rows +
+  trigger error).
+- A rogue payload cannot rewrite ``created_by``.
+- INSERT policy: both roles, own ``created_by`` only, never born deleted.
+- Admin paths unchanged (sees deleted rows, restores; hard delete admin-only).
+- Sync client uses UPDATE (not upsert) for existing rows, INSERT for new rows,
+  drains the outbox after success.
+- ``markOutboxFailed`` increments attempts (1 → 2).
+- The migration file is idempotent / RLS-safe, and ``schema.sql`` mirrors it.
+
+### 8.2 R2-03 — sign-in clicks ignored during the health check
+
+- ``AuthScreen`` used ``authStatus === 'loading'`` (which the Supabase health
+  probe also sets) to disable the inputs and the button. It now tracks the
+  sign-in request locally: inputs are never disabled, only the Sign in button
+  is disabled (with ``aria-busy``) while a sign-in request is in flight.
+- The form is not remounted by the health check (asserted by a test that
+  re-renders with a changed health result and checks the same input node).
+- Tests: ``tests/auth-screen.test.tsx`` (4 tests).
+
+### 8.3 R2-05 — app name in Windows notifications
+
+- ``electron/main/index.ts`` now calls ``app.setName('DKS')`` and
+  ``app.setAppUserModelId('com.dks.tracker')`` at module load (before any
+  window, tray or notification), exported as ``configureAppIdentity()`` for
+  testability. ``productName``/``appId`` in ``electron-builder.yml`` are
+  unchanged.
+- Honest limitation: a **development** build may still show
+  ``Electron.app.electron`` because Windows resolves the notification author
+  from the installed Start Menu shortcut. Verify the name in the packaged NSIS
+  installer, not in ``npm run dev``.
+
+### 8.4 R2-12 — sync pill truthfulness
+
+- New pure helper ``src/lib/sync-indicator.ts``. Rules: pending > 0 can never
+  read "Saved to cloud"; ``syncing`` → "Syncing… · N pending"; ``error`` or
+  any non-syncing pending work → "Sync error · N pending"; ``offline`` with an
+  empty outbox → "Offline — saved locally"; only ``healthy`` + 0 pending →
+  "Saved to cloud".
+- ``AppShell`` uses the helper for the pill and its ``data-state`` colour.
+- Tests: ``tests/sync-indicator.test.ts`` (5 tests).
+
+**Batch A gate:** 43 test files / 242 tests passed; typecheck clean; build ✓.

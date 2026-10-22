@@ -1177,7 +1177,12 @@ export class SqliteStore {
 
   public markOutboxFailed(id: number | string, message: string): void {
     this.ensureOpen();
-    this.database.prepare('UPDATE outbox SET status = \'failed\', last_error = ? WHERE id = ?').run(message, id);
+    // A failed attempt is still an attempt: the sync detail panel shows
+    // "attempted N×" from this counter, which previously stayed at 0 because
+    // only the (barely used) processing transition incremented it.
+    this.database.prepare(
+      'UPDATE outbox SET status = \'failed\', last_error = ?, attempts = attempts + 1 WHERE id = ?',
+    ).run(message, id);
   }
 
   /** Mark the local mutation queue complete after a full remote reconciliation. */

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from
 
 import { can } from '../../lib/permissions';
 import { formatLocalDateTime } from '../../lib/date';
+import { resolveSyncIndicator } from '../../lib/sync-indicator';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
@@ -354,25 +355,15 @@ export function AppShell({
   const actor: AdminActor | null = profile
     ? { id: profile.id, name: profile.fullName ?? profile.email, email: profile.email }
     : null;
-  // FIXES_UI §3.2: four real states from the outbox — never a decorative label.
-  // "Saved to cloud" only after confirmed acknowledgement (status healthy, no
-  // pending); "Sync error" never uses a success icon (see data-state → CSS).
-  const syncStateKey: 'cloud' | 'syncing' | 'offline' | 'error' =
-    syncStatus.status === 'error'
-      ? 'error'
-      : syncStatus.status === 'syncing'
-        ? 'syncing'
-        : syncStatus.pendingCount > 0 || syncStatus.status === 'offline'
-          ? 'offline'
-          : 'cloud';
-  const pendingSuffix = syncStatus.pendingCount > 0 ? ` · ${syncStatus.pendingCount} pending` : '';
-  const syncLabel = syncStateKey === 'error'
-    ? `Sync error${pendingSuffix}`
-    : syncStateKey === 'syncing'
-      ? `Syncing…${pendingSuffix}`
-      : syncStateKey === 'offline'
-        ? `Offline — saved locally${pendingSuffix}`
-        : 'Saved to cloud';
+  // FIXES_UI §3.2 / R2-12: four real states from the outbox — never a
+  // decorative label. "Saved to cloud" only after confirmed acknowledgement
+  // (status healthy AND no pending items); any queued or failed item shows
+  // "Sync error · N pending" (or "Syncing… · N pending") so the pill can
+  // never claim success while work is outstanding.
+  const syncIndicator = resolveSyncIndicator(syncStatus.status, syncStatus.pendingCount);
+  const syncStateKey = syncIndicator.key;
+  const pendingSuffix = syncIndicator.pendingSuffix;
+  const syncLabel = syncIndicator.label;
   const brandCaption = profile?.role === 'admin' ? 'Admin workspace' : 'Office workspace';
 
   return (

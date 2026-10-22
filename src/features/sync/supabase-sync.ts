@@ -21,6 +21,21 @@ export interface SupabaseTableQuery {
     values: readonly Record<string, unknown>[],
     options?: { onConflict?: string },
   ) => Promise<SupabaseQueryResult>;
+  /**
+   * Optional real INSERT.  Using a plain insert (instead of an upsert) for new
+   * rows keeps the INSERT policy check on the intended path.
+   */
+  insert?: (values: readonly Record<string, unknown>[]) => Promise<SupabaseQueryResult>;
+  /**
+   * Optional real UPDATE.  Using a plain update (instead of `upsert`) for rows
+   * that already exist avoids re-running the INSERT policy's WITH CHECK on the
+   * UPDATE branch — that is what produced the Office "new row violates
+   * row-level security policy for table entries" error for edits and soft
+   * deletes of rows created by another account.
+   */
+  update?: (values: Record<string, unknown>) => {
+    eq: (column: string, value: string) => Promise<SupabaseQueryResult>;
+  };
   delete?: () => {
     eq: (column: string, value: string) => Promise<SupabaseQueryResult>;
   };
@@ -357,6 +372,41 @@ async function upsertRow(
 }
 
 /**
+ * Write one row with the operation that matches its state:
+ *   'insert' — the remote has never seen this row (INSERT policy applies);
+ *   'update' — the remote already has it (UPDATE policies apply).
+ * Test doubles / older clients that do not expose the specialised methods keep
+ * working through the idempotent upsert fallback.
+ */
+async function writeRow(
+  client: SupabaseDataClient,
+  table: string,
+  value: Record<string, unknown>,
+  mode: 'insert' | 'update',
+): Promise<void> {
+  const query = client.from(table);
+  const id = value.id;
+
+  if (mode === 'update' && typeof query.update === 'function') {
+    const result = await query.update(value).eq('id', String(id ?? ''));
+    if (result.error) {
+      throw new Error(result.error.message || `Unable to write ${table}`);
+    }
+    return;
+  }
+
+  if (mode === 'insert' && typeof query.insert === 'function') {
+    const result = await query.insert([value]);
+    if (result.error) {
+      throw new Error(result.error.message || `Unable to write ${table}`);
+    }
+    return;
+  }
+
+  await upsertRow(client, table, value);
+}
+
+/**
  * Permanently delete one entry in Supabase.  The guarded RPC enforces the
  * administrator rule server-side; the direct DELETE remains only as a
  * compatibility path for clients predating the RPC.
@@ -496,6 +546,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       payload: Record<string, unknown>;
       softDeleted: boolean;
       requiresActiveInsert: boolean;
+      mode: 'insert' | 'update';
     }
     const entryPushes: EntryPush[] = [];
     const remoteRowsToApply: Record<string, unknown>[] = [];
@@ -541,6 +592,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
           }),
           softDeleted,
           requiresActiveInsert,
+          mode: remote ? 'update' : 'insert',
         });
         if (requiresActiveInsert) {
           // Follow-up pass: apply the deletion on the now-existing remote row.
@@ -554,6 +606,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
             }),
             softDeleted: true,
             requiresActiveInsert: false,
+            mode: 'update',
           });
         }
       } else if (remote && (!local || remoteWins(localRecord!, remote))) {
@@ -588,7 +641,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       let succeeded = true;
       for (const push of pushes) {
         try {
-          await upsertRow(options.client, 'entries', push.payload);
+          await writeRow(options.client, 'entries', push.payload, push.mode);
         } catch (caught) {
           const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
           succeeded = false;
@@ -613,14 +666,18 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       .filter((column) => stringValue(column.name))
       .map((column) => [stringValue(column.name).toLowerCase(), column]));
     const consumedRemoteColumnIds = new Set<string>();
-    const columnPushes: { column: DksLocalColumn; remoteId?: string }[] = [];
+    const columnPushes: {
+      column: DksLocalColumn;
+      remoteId?: string;
+      mode: 'insert' | 'update';
+    }[] = [];
     const remoteColumnsToApply: Record<string, unknown>[] = [];
 
     for (const local of localColumns) {
       const remote = remoteColumnById.get(local.id)
         ?? remoteColumnByName.get(local.name.toLowerCase());
       if (!remote) {
-        columnPushes.push({ column: local });
+        columnPushes.push({ column: local, mode: 'insert' });
         continue;
       }
       const remoteId = stringValue(remote.id);
@@ -641,7 +698,10 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         await options.local.recordConflict?.(conflict);
       }
       if (localWins(localRecord, remote)) {
-        columnPushes.push({ column: local, remoteId });
+        // app_columns has no created_by clause on UPDATE, but the same
+        // insert-vs-update split keeps a row created by another account
+        // editable by both roles.
+        columnPushes.push({ column: local, remoteId, mode: 'update' });
       } else {
         remoteColumnsToApply.push(toLocalColumn(remote, local.id));
         await bookkeeping.markSynced('column', local.id);
@@ -662,9 +722,13 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       }
     }
 
-    for (const { column, remoteId } of columnPushes) {
+    for (const { column, remoteId, mode } of columnPushes) {
       try {
-        await upsertRow(options.client, 'app_columns', toRemoteColumn(column, now(), remoteId));
+        const payload = toRemoteColumn(column, now(), remoteId);
+        if (mode === 'update' && remoteId) {
+          payload.id = remoteId;
+        }
+        await writeRow(options.client, 'app_columns', payload, mode);
         pushedColumns += 1;
         await bookkeeping.markSynced('column', column.id);
       } catch (caught) {

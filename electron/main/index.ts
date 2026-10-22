@@ -30,6 +30,37 @@ import {
   type LocalIpcMain,
 } from './local-ipc';
 
+/**
+ * R2-05: Windows resolves the toast/notification author from the application
+ * identity. Without these two calls a development build shows
+ * "Electron.app.electron". They must run before any window, tray or
+ * notification is created, so they are applied at module load (the main entry
+ * imports this module before `app.whenReady()`).
+ *
+ * productName / appId in electron-builder.yml stay unchanged: the packaged
+ * installer still ships DKS with com.dks.tracker.
+ */
+export const APP_DISPLAY_NAME = 'DKS' as const;
+export const APP_USER_MODEL_ID = 'com.dks.tracker' as const;
+
+export function configureAppIdentity(): void {
+  try {
+    app.setName(APP_DISPLAY_NAME);
+  } catch (error) {
+    log.warn('[dks] app.setName failed', error);
+  }
+  try {
+    // Required on Windows for toast notifications to be attributed to DKS.
+    app.setAppUserModelId(APP_USER_MODEL_ID);
+  } catch (error) {
+    log.warn('[dks] app.setAppUserModelId failed', error);
+  }
+}
+
+// Applied immediately (not inside whenReady) so no notification or window can
+// be created before the identity is set.
+configureAppIdentity();
+
 export const APP_VERSION_CHANNEL = 'dks:app-version' as const;
 export const MINIMIZE_TO_TRAY_CHANNEL = 'dks:minimize-to-tray' as const;
 export const QUIT_CHANNEL = 'dks:quit' as const;

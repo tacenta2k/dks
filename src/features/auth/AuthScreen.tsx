@@ -1,4 +1,4 @@
-import { FormEvent, useState } from 'react';
+import { FormEvent, useRef, useState } from 'react';
 
 import { isSupabaseConfigured } from '../../lib/supabase';
 import type { AuthStatus, SupabaseHealth } from './auth-types';
@@ -28,12 +28,21 @@ export function AuthScreen({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [validationError, setValidationError] = useState<string | null>(null);
-  const isSubmitting = authStatus === 'loading';
+  // R2-03: ONLY an in-flight sign-in disables the form.  The Supabase health
+  // check also flips the shared auth status to "loading"; reusing that status
+  // here disabled the inputs (and swallowed the first click) while the health
+  // probe was still running.
+  const [submitting, setSubmitting] = useState(false);
+  const submittingRef = useRef(false);
+  const isSubmitting = submitting;
   const safeDemoAvailable =
     demoAvailable && !isSupabaseConfigured() && (import.meta.env.DEV || import.meta.env.MODE === 'test');
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    if (submittingRef.current) {
+      return;
+    }
     const normalizedEmail = email.trim();
     if (!normalizedEmail || !password) {
       setValidationError('Enter your email and password.');
@@ -41,7 +50,14 @@ export function AuthScreen({
     }
 
     setValidationError(null);
-    await onSignIn(normalizedEmail, password);
+    submittingRef.current = true;
+    setSubmitting(true);
+    try {
+      await onSignIn(normalizedEmail, password);
+    } finally {
+      submittingRef.current = false;
+      setSubmitting(false);
+    }
   };
 
   const errorMessage = validationError ?? authError;
@@ -55,7 +71,7 @@ export function AuthScreen({
 
   return (
     <main className="login-page" aria-labelledby="login-title">
-      <section className="login-card">
+      <section className="login-card" data-auth-status={authStatus}>
         <div className="brand-mark brand-mark--large" aria-hidden="true">
           <span>D</span>
         </div>
@@ -86,7 +102,6 @@ export function AuthScreen({
               autoComplete="username"
               value={email}
               onChange={(event) => setEmail(event.target.value)}
-              disabled={isSubmitting}
               required
             />
           </div>
@@ -99,11 +114,15 @@ export function AuthScreen({
               autoComplete="current-password"
               value={password}
               onChange={(event) => setPassword(event.target.value)}
-              disabled={isSubmitting}
               required
             />
           </div>
-          <button className="button button--primary button--wide" type="submit" disabled={isSubmitting}>
+          <button
+            className="button button--primary button--wide"
+            type="submit"
+            disabled={isSubmitting}
+            aria-busy={isSubmitting}
+          >
             {isSubmitting ? 'Signing in…' : 'Sign in'}
             <span aria-hidden="true">→</span>
           </button>
