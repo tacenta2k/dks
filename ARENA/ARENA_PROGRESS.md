@@ -218,6 +218,33 @@ Per `docs/FIXES_UI.md` §9.1 / §13 / §4+3.2:
   effect is a safe no-op there.
 - Gate: typecheck 0; **39 files / 217 tests passed**; build ✓.
 
+### 2.9 UI batch 5 — Visa Sheet grid structure (SHEET-01, SHEET-06, SHEET-10) — THIS TURN
+Per `docs/FIXES_UI.md` §5.1/§5.3/§5.5:
+- **Grid fills height (SHEET-01):** `.sheet-grid` height changed from a fixed
+  420px to `calc(100vh - 214px)` (min 320px) so the grid fills the available
+  viewport below the 50px top bar + toolbar and scrolls internally.
+- **Row-number gutter + freeze (SHEET-06):** added a narrow `__rowNumber`
+  column pinned left (1-based number via `node.rowIndex` — AG Grid v32 has no
+  `rowNumbers` colDef property) and froze the first data column (`pinned:
+  'left'`). Click-to-sort / resize / column drag / sticky header were already
+  on (Community defaults). Double-click autofit is **deferred** (no stable
+  v32 API verified here).
+- **`+` add-column header (SHEET-10):** added a `__addColumn` column pinned
+  before Days Left with a compact `+` header button (aria-label "Add column")
+  that opens Column Setup; blank body cells; no sort/filter/drag/menu; excluded
+  from exports (synthetic, not a data column).
+- **Verified in jsdom:** the `grid-date-editor-e2e` suite mounts the **real**
+  AgGridReact with the real `buildGridColumns` output, so a new test asserts the
+  `+` header opens Column Setup (callback fires), the gutter renders a row
+  number, the `+` body is blank, and the first data column is pinned left.
+  No coverage removed; suite grew 217 → **218**.
+- **Deferred (honest — need a visual/dev pass or are test-locked):** SHEET-04
+  (Group by), SHEET-12 (keyboard editing — largely Community defaults),
+  SHEET-13/14 (right-click column/row menus), SHEET-11 (draft row), SHEET-16
+  (button removal — depends on SHEET-11 + test-locked buttons), SHEET-03 (chip
+  label rename — the "7 days" button is asserted by the sheet test).
+- Gate: typecheck 0; **39 files / 218 tests passed**; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
@@ -234,7 +261,8 @@ Per `docs/FIXES_UI.md` §9.1 / §13 / §4+3.2:
 - [x] **UI batch 2: Visa Sheet structure (SHEET-02/03/08/15/16-partial)** — one-row toolbar, admin de-dup, empty states, dense rows. See §2.6. (SHEET-01/04/10/11/13/14/16-button-removals deferred — see §2.6.)
 - [x] **UI batch 3: Dashboard / Recycle Bin / Audit Log (DASH-01, RBIN-01/02, AUDIT-01/04)** — dashboard spacing, RB search/count + empty states, audit details side panel. See §2.7.
 - [x] **UI batch 4: Settings inner nav, login cleanup, restart persistence (SET-01, SET-12, SYNC-10)** — see §2.8.
-- [ ] Remaining deferred sheet items (SHEET-01/04/06/10/11/12/13/14/16) — need new AG Grid interaction surfaces; existing test-covered controls kept to avoid regression.
+- [x] **UI batch 5: Visa Sheet grid structure (SHEET-01, SHEET-06, SHEET-10)** — grid height, row-number gutter + freeze, `+` add-column header. See §2.9.
+- [ ] Remaining deferred sheet items: SHEET-04 (Group by), SHEET-11 (draft row), SHEET-12 (keyboard), SHEET-13/14 (right-click menus), SHEET-16 (button removal), SHEET-03 (chip labels) — visual/dev pass or test-locked (see §2.9).
 - [ ] PKG-07 UI verification checklist (user-facing) + SYNC-09 dev-window focus (main-process) — see Notes.
 
 ### Commit map (this session, this lineage)
@@ -244,7 +272,8 @@ Per `docs/FIXES_UI.md` §9.1 / §13 / §4+3.2:
 - `f6411a8` feat: rebuild global shell and navigation (compact top bar, collapsible sidebar) — UI batch 1
 - `02172d3` feat: consolidate Visa Sheet toolbar, admin tools, and empty states — UI batch 2
 - `626b18b` feat: rebuild Dashboard, Recycle Bin, and Audit Log layouts — UI batch 3
-- `<tip>` feat: Settings inner nav, login cleanup, restart sync persistence — UI batch 4 (this commit)
+- `2832644` feat: Settings inner nav, login cleanup, restart sync persistence — UI batch 4
+- `<tip>` feat: Visa Sheet grid structure (height, gutter, freeze, `+` header) — UI batch 5 (this commit)
 - (remote `origin/arena/0e0155c1-dks` updated on push; see `git log`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)

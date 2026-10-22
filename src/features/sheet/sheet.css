@@ -270,11 +270,37 @@
 
 .sheet-grid {
   width: 100%;
-  height: 420px;
-  min-height: 300px;
+  height: calc(100vh - 214px);
+  min-height: 320px;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 10px;
+}
+
+/* FIXES_UI §5.5 (SHEET-10): the compact `+` add-column header button. */
+.sheet-add-column-header {
+  width: 100%;
+  height: 100%;
+  min-width: 40px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary-strong);
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+.sheet-add-column-header:hover {
+  background: var(--color-primary-soft);
+}
+
+/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. */
+.sheet-row-number-cell {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  text-align: center;
 }
 
 /* FIXES_UI §5.3 (SHEET-08): denser rows for a dense office data-entry screen. */

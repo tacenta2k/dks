@@ -198,6 +198,8 @@ export function SheetPage({
     onDuplicate: handleDuplicate,
     onDelete: handleDelete,
     onRenew: handleRenew,
+    // FIXES_UI §5.5 (SHEET-10): the `+` header opens Column Setup.
+    onAddColumn: () => setWizardOpen(true),
   }), [handleDuplicate, handleDelete, handleRenew]);
 
   const gridColumnDefs = useMemo(

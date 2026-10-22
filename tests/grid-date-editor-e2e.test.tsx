@@ -225,3 +225,46 @@ describe('grid date editor end-to-end (F2)', () => {
     expect(editedCell?.textContent).toContain('10/01/2004');
   }, 15_000);
 });
+
+describe('sheet grid: add-column header + row-number gutter (SHEET-10 / SHEET-06)', () => {
+  it('renders a `+` header that opens Column Setup, a row-number gutter, and the frozen first data column', async () => {
+    const onAddColumn = vi.fn();
+    const defs = buildGridColumns(columns as never, {
+      onDuplicate: vi.fn(),
+      onDelete: vi.fn(),
+      onRenew: vi.fn(),
+      onAddColumn,
+    }, 'admin') as ColDef[];
+    const source = buildGridRows(sourceRows, columns as never).rows;
+
+    render(
+      <div style={{ width: '900px', height: '500px' }}>
+        <AgGridReact
+          rowData={source}
+          columnDefs={defs}
+          defaultColDef={{ flex: 1, minWidth: 120, resizable: true, sortable: true, editable: true }}
+          getRowId={(params) => params.data.__rowId}
+        />
+      </div>,
+    );
+
+    // The `+` add-column header is present and opens Column Setup on click.
+    const addColumnButton = await screen.findByRole('button', { name: 'Add column' });
+    fireEvent.click(addColumnButton);
+    expect(onAddColumn).toHaveBeenCalledTimes(1);
+
+    // Row-number gutter + the add-column column headers are in the grid.
+    const grid = document.querySelector('.ag-root') as HTMLElement;
+    expect(grid.querySelector('.ag-header-cell[col-id="__rowNumber"]')).not.toBeNull();
+    expect(grid.querySelector('.ag-header-cell[col-id="__addColumn"]')).not.toBeNull();
+    // The gutter renders a 1-based row number; the `+` column body is blank.
+    expect(grid.querySelector('.ag-cell[col-id="__rowNumber"]')?.textContent).toContain('1');
+    expect(grid.querySelector('.ag-cell[col-id="__addColumn"]')?.textContent ?? '').toBe('');
+    // First data column is frozen (pinned left) and the gutter / `+` columns
+    // are locked in place (verified at the column-def level — jsdom does not
+    // fully materialise AG Grid's pinned wrapper classes).
+    expect(defs.find((column) => column.colId === 'name')?.pinned).toBe('left');
+    expect(defs.find((column) => column.colId === '__rowNumber')?.pinned).toBe('left');
+    expect(defs.find((column) => column.colId === '__addColumn')?.pinned).toBe('right');
+  }, 15_000);
+});
