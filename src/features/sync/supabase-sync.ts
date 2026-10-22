@@ -1,3 +1,4 @@
+import { sanitizeSyncError } from '../../lib/sync-error';
 import type {
   DksLocalColumn,
   DksLocalRow,
@@ -402,10 +403,14 @@ function createBookkeeping(
   };
 
   const markFailed = async (entityType: string, entityId: string, message: string): Promise<void> => {
+    // Defence in depth: the outbox is the long-lived store of per-item
+    // failure reasons; never persist a raw (possibly credential-bearing)
+    // message even if a future caller forgets to sanitise.
+    const safe = sanitizeSyncError(message) || message;
     const bucket = pendingByKey.get(`${entityType}:${entityId}`) ?? [];
     for (const item of bucket) {
       consumedIds.add(item.id);
-      await options.local.markOutboxFailed?.(item.id, message);
+      await options.local.markOutboxFailed?.(item.id, safe);
     }
   };
 
@@ -460,7 +465,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         await bookkeeping.markSynced('entry', entryId);
         deletedRemotely += 1;
       } catch (caught) {
-        const message = caught instanceof Error ? caught.message : String(caught);
+        const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
         await bookkeeping.markFailed('entry', entryId, message);
         errors.push(`Permanently delete ${entryId}: ${message}`);
       }
@@ -567,7 +572,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         try {
           await upsertRow(options.client, 'entries', push.payload);
         } catch (caught) {
-          const message = caught instanceof Error ? caught.message : String(caught);
+          const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
           succeeded = false;
           await bookkeeping.markFailed('entry', id, message);
           errors.push(`Row ${id}: ${message}`);
@@ -645,7 +650,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         pushedColumns += 1;
         await bookkeeping.markSynced('column', column.id);
       } catch (caught) {
-        const message = caught instanceof Error ? caught.message : String(caught);
+        const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
         await bookkeeping.markFailed('column', column.id, message);
         errors.push(`Column ${column.name}: ${message}`);
       }
@@ -690,7 +695,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
           await bookkeeping.markSynced('settings', parts.entityId);
         }
       } catch (caught) {
-        const message = caught instanceof Error ? caught.message : String(caught);
+        const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
         for (const parts of settingsItems) {
           await bookkeeping.markFailed('settings', parts.entityId, message);
         }
@@ -749,7 +754,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       error: firstError,
     };
   } catch (caught) {
-    const message = caught instanceof Error ? caught.message : String(caught);
+    const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
     errors.push(message);
     await options.local.setSyncStatus({ status: 'error', lastError: message }).catch(() => undefined);
     return {

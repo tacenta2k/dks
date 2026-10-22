@@ -8,6 +8,7 @@ import {
 } from '../src/features/sync/supabase-sync';
 import type { DksLocalColumn, DksLocalRow, DksLocalSnapshot } from '../src/lib/types';
 import { createSqliteStore } from '../electron/main/sqlite';
+import { sanitizeSyncError } from '../src/lib/sync-error';
 
 const LOCAL_ID = '11111111-1111-4111-8111-111111111111';
 const REMOTE_ID = '22222222-2222-4222-8222-222222222222';
@@ -694,5 +695,165 @@ describe('outbox queue drains after successful sync (B3)', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+/**
+ * Blocker 3: "sync pending stuck" — pending must never hide and the exact
+ * (sanitised) failure reason must reach the UI. The real SqliteStore outbox
+ * (including the live pending count the sidebar shows) is exercised against
+ * a Supabase double that rejects with a credential-bearing message.
+ */
+describe('sync failure surfacing (Blocker 3)', () => {
+  function createSqliteLocal() {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    const snapshot = () => ({
+      rows: store.listRows(true).map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      deletedRows: store.listRows(true).filter((row) => row.deleted === true)
+        .map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      columns: store.listColumns(false).map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      deletedColumns: store.listColumns(true).filter((column) => column.deleted === true)
+        .map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      settings: store.getSettings(),
+      syncStatus: store.getSyncStatus() as unknown as DksLocalSnapshot['syncStatus'],
+    });
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => store.setSyncStatus(state as never) as unknown as DksLocalSnapshot['syncStatus'],
+      applyRemoteSnapshot: async (input) => {
+        for (const row of input.rows) {
+          store.applyRemoteEntry(row as never);
+        }
+        for (const column of input.columns) {
+          store.applyRemoteColumn(column as never);
+        }
+        return snapshot();
+      },
+      acknowledgeOutbox: async () => store.acknowledgeOutbox() as unknown as DksLocalSnapshot['syncStatus'],
+      recordConflict: async (conflict) => {
+        store.recordConflict({ ...conflict, resolved: false } as never);
+      },
+      listOutbox: async (input) => store.listOutbox(input?.status ?? 'all') as unknown as SupabaseOutboxItem[],
+      markOutboxSynced: (id) => {
+        store.markOutboxSynced(id);
+      },
+      markOutboxFailed: (id, message) => {
+        store.markOutboxFailed(id, message);
+      },
+      retryFailedOutbox: async () => store.retryFailedOutbox(),
+    };
+    return { store, local };
+  }
+
+  /** A remote that rejects every entries upsert with a fixed (secret-laden) message. */
+  function createFailingRemote(message: string) {
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({ data: [], error: null }),
+        upsert: async () => {
+          if (table === 'entries') {
+            return { data: null, error: { message } };
+          }
+          return { data: [], error: null };
+        },
+      }),
+    };
+    return { client };
+  }
+
+  const SECRET = 'eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.deadbeef00112233';
+
+  it('keeps pending visible and stores a sanitised per-item reason on rejection', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.createEntry({
+        id: '11111111-aaaa-4bbb-8ccc-000000000001',
+        data: { name: 'Queued One' },
+        category: 'Employee',
+      });
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+
+      const { client } = createFailingRemote(`row-level security violation: apikey=${SECRET} rejected`);
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('error');
+      // The pending count is NEVER cleared to hide the failure.
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+      const pending = store.listOutbox('failed');
+      expect(pending.length).toBeGreaterThan(0);
+      for (const item of pending) {
+        const reason = String(item.lastError ?? item.last_error ?? '');
+        // The credential never survives into the stored reason.
+        expect(reason).not.toContain(SECRET);
+        expect(reason).not.toContain('apikey=');
+        // The actual failure reason still reaches the user.
+        expect(reason).toContain('row-level security');
+      }
+      // The surfaced sync status error is sanitised too.
+      const status = store.getSyncStatus();
+      const lastError = String(status.lastError ?? '');
+      expect(lastError).not.toContain(SECRET);
+      expect(lastError).not.toContain('apikey=');
+      expect(lastError).toContain('row-level security');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('drains to healthy and records lastSyncAt when the remote accepts', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      // The user's real scenario: 2 local rows -> 2 pending -> sync accepts.
+      store.createEntry({
+        id: '11111111-aaaa-4bbb-8ccc-000000000002',
+        data: { name: 'Queued One' },
+        category: 'Employee',
+      });
+      store.createEntry({
+        id: '11111111-aaaa-4bbb-8ccc-000000000003',
+        data: { name: 'Queued Two' },
+        category: 'Employee',
+      });
+      expect(store.getPendingOutboxCount()).toBe(2);
+
+      // Reuse the passing fake remote shape from the B3 suite above.
+      const tables: Record<string, Record<string, unknown>[]> = { entries: [] };
+      const client: SupabaseDataClient = {
+        from: (table) => ({
+          select: async () => ({ data: tables[table] ?? [], error: null }),
+          upsert: async (values) => {
+            const rows = tables[table] ?? (tables[table] = []);
+            for (const value of values) {
+              rows.push({ ...value });
+            }
+            return { data: [...values], error: null };
+          },
+        }),
+        rpc: async (_name, args) => {
+          const id = String(args.p_entry_id ?? '');
+          tables.entries = (tables.entries ?? []).filter((row) => row.id !== id);
+          return { data: null, error: null };
+        },
+      };
+      const result = await runSupabaseSync({ client, local });
+
+      expect(result.status).toBe('healthy');
+      expect(store.getPendingOutboxCount()).toBe(0);
+      const status = store.getSyncStatus();
+      expect(status.status).toBe('healthy');
+      expect(status.lastSyncAt).toBeTruthy();
+      expect(status.lastError).toBeNull();
+      expect(status.pendingCount).toBe(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('sanitizeSyncError redacts credentials while keeping the reason', () => {
+    const secret = 'sk-live_9f8e7d6c5b4a3210';
+    const raw = `upsert failed: fetch https://x.supabase.co/rest/v1/entries?apikey=${secret}`;
+    const out = sanitizeSyncError(raw);
+    expect(out).not.toContain(secret);
+    expect(out).toContain('upsert failed');
   });
 });

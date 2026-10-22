@@ -32,6 +32,15 @@ import type { AuditProfile } from '../../features/audit/AuditLogPage';
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
 
+/** One queued local change shown under the sync status (Blocker 3). */
+export interface SyncPendingItem {
+  id: number | string;
+  entityType: string;
+  operation: string;
+  attempts: number;
+  lastError: string | null;
+}
+
 export interface AppShellProps {
   activeView?: ShellView;
   onNavigate?: (view: AppView) => void;
@@ -42,6 +51,8 @@ export interface AppShellProps {
   userEmail?: string | null;
   health?: SupabaseHealth;
   syncStatus?: DksLocalSyncState;
+  /** Per-item pending outbox details (sanitised) for the sync status panel. */
+  pendingOutbox?: readonly SyncPendingItem[];
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
   repositoryRevision?: number;
@@ -141,6 +152,7 @@ export function AppShell({
     lastError: null,
     pendingCount: 0,
   },
+  pendingOutbox = [],
   isDemoMode = false,
   sheetRepository,
   repositoryRevision = 0,
@@ -316,6 +328,24 @@ export function AppShell({
             <div>
               <p className="sync-status__title">Workspace health</p>
               <p className="sync-status__detail">{syncDetail}</p>
+              {(syncStatus.lastError !== null || pendingOutbox.length > 0) ? (
+                <details className="sync-status__issues">
+                  <summary className="sync-status__error">
+                    {syncStatus.lastError
+                      ?? `${pendingOutbox.length} pending change${pendingOutbox.length === 1 ? '' : 's'}`}
+                  </summary>
+                  {pendingOutbox.length > 0 ? (
+                    <ul className="sync-status__list">
+                      {pendingOutbox.map((item) => (
+                        <li key={item.id}>
+                          {item.entityType} · {item.operation} · attempted {item.attempts}×
+                          {item.lastError ? ` · ${item.lastError}` : ' · waiting for sync'}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </details>
+              ) : null}
             </div>
           </div>
           <p className="sidebar__version">STEP 2 · Role-gated workspace</p>
