@@ -114,8 +114,8 @@ describe('sheet page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
     expect(await screen.findByText('Days Left')).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Dashboard' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Open Sheet' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Dashboard' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Visa Sheet' }));
 
     expect(await screen.findByText('Days Left')).toBeInTheDocument();
   }, 10_000);

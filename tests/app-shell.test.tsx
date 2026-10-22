@@ -85,8 +85,9 @@ describe('DKS renderer shell', () => {
     });
     expect(screen.getByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Primary navigation' })).toBeInTheDocument();
+    // FIXES_UI §3.1: the page title lives in the top bar; the old subtitle and
+    // developer "next step" copy are removed (no content intro).
     expect(screen.getByRole('heading', { name: 'Dashboard' })).toBeInTheDocument();
-    expect(screen.getByText('Your workspace is ready for the next step.')).toBeInTheDocument();
   });
 
   it('switches between dashboard and sheet from the sidebar with a restored session', async () => {
@@ -95,11 +96,11 @@ describe('DKS renderer shell', () => {
 
     await screen.findByRole('banner', { name: 'DKS top bar' });
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Sheet' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Visa Sheet' }));
 
     expect(screen.getByRole('heading', { name: 'Visa sheet' })).toBeInTheDocument();
-    expect(screen.getByText('Your visa records will appear here in STEP 4.')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open Dashboard' })).toHaveAttribute('aria-current', 'false');
+    // FIXES_UI §2: the "…appear here in STEP 4" developer copy is removed.
+    expect(screen.getByRole('button', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'false');
   });
 
   it('changes and persists the selected theme from the top bar after sign-in', async () => {
@@ -108,8 +109,9 @@ describe('DKS renderer shell', () => {
 
     await screen.findByRole('banner', { name: 'DKS top bar' });
 
-    fireEvent.click(screen.getByRole('button', { name: /theme: system/i }));
-    fireEvent.click(screen.getByRole('menuitemradio', { name: 'Dark' }));
+    // FIXES_UI §3.4: icon-only toggle (no "Theme: X" dropdown). One click
+    // switches light -> dark and the personal preference persists.
+    fireEvent.click(screen.getByRole('button', { name: 'Switch to dark mode' }));
 
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
     expect(window.localStorage.getItem('dks.theme-preference')).toBe('dark');

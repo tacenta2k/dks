@@ -128,9 +128,10 @@ describe('settings page', () => {
     );
 
     const banner = screen.getByRole('banner', { name: 'DKS top bar' });
-    expect(banner).toHaveTextContent(/DKS/);
-    // The top bar names the current page and section instead of an empty strip.
-    expect(banner).toHaveTextContent(/Settings/);
-    expect(banner).toHaveTextContent(/Administration/);
+    // FIXES_UI §3.1: the top bar shows the current page title (not an empty
+    // strip). The old breadcrumb ("DKS / …") and section eyebrow
+    // ("Administration") are removed.
+    expect(banner).toHaveTextContent('Settings');
+    expect(banner).not.toHaveTextContent('Administration');
   });
 });

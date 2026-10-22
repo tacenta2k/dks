@@ -88,20 +88,67 @@ and are committed on this branch. They are **not** treated as user-confirmed.
 - B6 (dev window visibility) was reworked; its final packaged status should be
   re-checked by the user alongside the RLS fix (see Section 5).
 
+### 2.5 UI batch 1 — Global shell & navigation (SHELL-01..07) — THIS TURN
+Per `docs/FIXES_UI.md` §2 (removed elements), §3 (top bar), §4 (sidebar):
+- **Compact top bar (50px)** on every authenticated page: left = `☰` sidebar
+  toggle + page title (h1); right = `[Sync] [Bell] [Theme] [Avatar]`. Removed
+  from the top bar: breadcrumb, eyebrow/context, visible email, standalone
+  Log out, "Theme: X" text dropdown.
+- **Global sync status (SHELL-02)** moved from the sidebar footer to the top
+  bar as a real-state control: `● Saved to cloud` / `◐ Syncing…` /
+  `○ Offline — saved locally` / `⚠ Sync error` (dot colour follows state;
+  error is never green). Pending count suffix preserved. Click/keyboard opens
+  a compact popover with last-sync time (DD/MM/YYYY HH:mm), pending count, and
+  the sanitised per-item outbox breakdown. The popover stays mounted (the
+  Blocker-3 `details.sync-status__issues` + per-item rows remain queryable —
+  `tests/sync-status-ui.test.tsx` still passes).
+- **Notification bell (SHELL-03)**: unchanged contract (unread badge,
+  click-to-open, role-gated View/Restore); added Escape + outside-click close.
+- **Theme (SHELL-04)**: icon-only toggle (moon in light → "Switch to dark
+  mode", sun in dark → "Switch to light mode"); one click switches; preference
+  persists per-PC via `onThemeChange`.
+- **Avatar popup (SHELL-05)**: only the avatar is visible; click opens a menu
+  with actual email + actual role + divider + Log out; Esc/outside close.
+- **Collapsible sidebar (SHELL-06)**: 220px expanded / 56px collapsed
+  (icons + logo only, `title` tooltips); toggled by `☰`; state persisted in
+  `localStorage['dks.sidebarCollapsed']`; distinct SVG icons per page;
+  selected state; Office sees only Dashboard + Visa Sheet; removed the
+  "Workspace health" footer box + "STEP 2" text.
+- **Removed (SHELL-07)**: breadcrumbs, subtitles, eyebrow labels, developer
+  STEP text, "Offline-first" pill, sidebar health footer, and the shared
+  content-intro "Export data" button (export lives in the sheet Tools menu).
+  Also removed the duplicate page `<h1>` + "Admin tools" eyebrow from
+  `RecycleBinPage` and `AuditLogPage` (page title now in the top bar) — a
+  prerequisite for batch 3's §7/§8 layouts.
+- **Tests updated to documented behaviour** (no coverage removed): nav
+  aria-labels ("Open X" → page name), identity/log-out moved to the avatar
+  popup, theme icon-toggle interaction, top-bar title assertion, and the two
+  standalone panel tests (heading now App-level). B3 sync, notifications,
+  theme, and permissions contracts preserved.
+- Gate: rebuild 0; **39 files / 217 tests passed**; typecheck 0; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
 - No new requirement docs were created; the three source docs were not edited.
 
 ## 4. Current work (in progress)
-- [x] Entries RLS insert authorization (CRIT-01) — implemented + regression test.
+- [x] Entries RLS insert authorization (CRIT-01) — implemented + 4 regression tests.
 - [x] `ARENA/TO_DO_LIST.md` + `ARENA/ARENA_PROGRESS.md` created.
-- [ ] Full gate (rebuild + test + typecheck + build) before committing the RLS fix.
-- [ ] Commit RLS fix (message: `fix: allow authenticated entry sync under entries RLS`).
-- [ ] UI batch 1: Global shell & navigation (SHELL-*).
+- [x] Full gate green (rebuild 0; **39 files / 217 tests**; typecheck 0; build ✓).
+- [x] Commit RLS fix — `0204f2d` `fix: allow authenticated entry sync under entries RLS`.
+- [x] Commit tracking files — `512dd2b` `docs: add ARENA implementation checklist and session progress`.
+- [x] Reconcile diverged pushed lineage (`70d91a0`) via merge `8757152` (no content change; post-merge tree byte-identical to `512dd2b`), then **pushed** fast-forward `70d91a0..8757152` to `origin/arena/0e0155c1-dks`. No force-push.
+- [x] **UI batch 1: Global shell & navigation (SHELL-01..07)** — implemented + gate green. See §2.5.
 - [ ] UI batch 2: Visa Sheet structure (SHEET-01..16).
 - [ ] UI batch 3: Dashboard / Recycle Bin / Audit Log layouts.
 - [ ] UI batch 4: Settings & dialogs, responsive, verification cleanup.
+
+### Commit map (this session, this lineage)
+- `0204f2d` fix: allow authenticated entry sync under entries RLS
+- `512dd2b` docs: add ARENA implementation checklist and session progress
+- `8757152` merge: reconcile re-established branch with pushed lineage (no content change)
+- (remote `origin/arena/0e0155c1-dks` = `8757152`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)
 1. **Verify the RLS fix in the packaged app on Windows** (exact checks in

@@ -41,7 +41,8 @@ describe('audit log page', () => {
   it('displays friendly actions, real actors, local time, and details (S3)', () => {
     render(<AuditLogPage role="admin" entries={entries} profiles={profiles} />);
 
-    expect(screen.getByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
+    // FIXES_UI §8: the page title lives in the top bar (App level), so the
+    // panel no longer renders its own heading — assert on the table content.
     const table = within(screen.getByRole('table'));
     // Friendly action names, never raw codes.
     expect(table.getByText('Imported records')).toBeInTheDocument();

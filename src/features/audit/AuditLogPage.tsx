@@ -222,11 +222,11 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
 
   return (
     <section className="audit-log-page" aria-label="Audit log">
-      <header>
-        <p>Admin tools</p>
-        <h1>Audit log</h1>
-        <p>{orderedEntries.length} recorded {orderedEntries.length === 1 ? 'action' : 'actions'}</p>
-      </header>
+      {/* FIXES_UI §8: the page title lives in the top bar; the "Admin tools"
+          eyebrow and duplicate h1 are removed. A compact count is kept. */}
+      {orderedEntries.length > 0 ? (
+        <p className="audit-log-page__count">{orderedEntries.length} recorded {orderedEntries.length === 1 ? 'action' : 'actions'}</p>
+      ) : null}
       <div className="audit-log-filters" role="group" aria-label="Filter audit log">
         <label>
           Action

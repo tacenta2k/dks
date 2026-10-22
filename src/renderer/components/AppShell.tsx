@@ -1,6 +1,7 @@
-import { useState, type ComponentProps } from 'react';
+import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
 
 import { can } from '../../lib/permissions';
+import { formatLocalDateTime } from '../../lib/date';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
@@ -15,8 +16,6 @@ import {
   AdminAuditLogPanel,
   AdminRecycleBinPanel,
   AdminSheetActions,
-  exportCurrentRows,
-  saveArtifactWithBrowserFallback,
   type AdminActor,
 } from '../../features/admin';
 import type { ExportSaveCallback } from '../../features/import-export/export-service';
@@ -80,12 +79,6 @@ export interface AppShellProps {
   onLogout?: () => void | Promise<void>;
 }
 
-const themeLabels: Record<ThemePreference, string> = {
-  light: 'Light',
-  dark: 'Dark',
-  system: 'System',
-};
-
 const viewCopy: Record<AppView, { eyebrow: string; title: string; description: string }> = {
   dashboard: {
     eyebrow: 'Overview',
@@ -118,17 +111,138 @@ const adminViewCopy: Record<AdminView, { eyebrow: string; title: string; descrip
   },
 };
 
-function Brand() {
+const SIDEBAR_COLLAPSED_KEY = 'dks.sidebarCollapsed';
+
+function loadSidebarCollapsed(): boolean {
+  try {
+    return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+function Brand({ caption = 'Office workspace' }: { caption?: string }) {
   return (
-    <div className="brand-lockup">
+    <div className="brand-lockup" title="DKS">
       <div className="brand-mark" aria-hidden="true">
         <span>D</span>
       </div>
-      <div>
+      <div className="brand-text">
         <p className="brand-name">DKS</p>
-        <p className="brand-caption">Office workspace</p>
+        <p className="brand-caption">{caption}</p>
       </div>
     </div>
+  );
+}
+
+type NavIconKind = 'dashboard' | 'sheet' | 'settings' | 'recycle' | 'audit';
+
+/** Distinct line icon per page (FIXES_UI §4: "use distinct icons for each page"). */
+function NavIcon({ kind }: { kind: NavIconKind }) {
+  const common = {
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: 1.7,
+    strokeLinecap: 'round' as const,
+    strokeLinejoin: 'round' as const,
+    'aria-hidden': true,
+    focusable: false as const,
+  };
+  let body: ReactNode = null;
+  if (kind === 'dashboard') {
+    body = (
+      <>
+        <rect x="3.5" y="3.5" width="7" height="7" rx="1.6" />
+        <rect x="13.5" y="3.5" width="7" height="7" rx="1.6" />
+        <rect x="3.5" y="13.5" width="7" height="7" rx="1.6" />
+        <rect x="13.5" y="13.5" width="7" height="7" rx="1.6" />
+      </>
+    );
+  } else if (kind === 'sheet') {
+    body = (
+      <>
+        <rect x="3" y="4" width="18" height="16" rx="1.8" />
+        <line x1="3" y1="9.4" x2="21" y2="9.4" />
+        <line x1="3" y1="14.7" x2="21" y2="14.7" />
+        <line x1="9.5" y1="4" x2="9.5" y2="20" />
+      </>
+    );
+  } else if (kind === 'settings') {
+    body = (
+      <>
+        <line x1="4" y1="7" x2="20" y2="7" />
+        <line x1="4" y1="12" x2="20" y2="12" />
+        <line x1="4" y1="17" x2="20" y2="17" />
+        <circle cx="9" cy="7" r="2" fill="currentColor" stroke="none" />
+        <circle cx="15" cy="12" r="2" fill="currentColor" stroke="none" />
+        <circle cx="8" cy="17" r="2" fill="currentColor" stroke="none" />
+      </>
+    );
+  } else if (kind === 'recycle') {
+    body = (
+      <>
+        <path d="M4 7h16" />
+        <path d="M9.5 7V4.5h5V7" />
+        <path d="M6 7l1.1 12.5h9.8L18 7" />
+        <line x1="10.2" y1="11" x2="10.2" y2="15.5" />
+        <line x1="13.8" y1="11" x2="13.8" y2="15.5" />
+      </>
+    );
+  } else {
+    body = (
+      <>
+        <circle cx="12" cy="12" r="8" />
+        <line x1="12" y1="12" x2="12" y2="7.5" />
+        <line x1="12" y1="12" x2="15.5" y2="13.5" />
+      </>
+    );
+  }
+  return (
+    <svg className="nav-item__icon" {...common}>
+      {body}
+    </svg>
+  );
+}
+
+/** Icon-only theme toggle glyph (FIXES_UI §3.4): moon in light, sun in dark. */
+function ThemeIcon({ dark }: { dark: boolean }) {
+  if (dark) {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth={1.7}
+        strokeLinecap="round"
+        aria-hidden="true"
+        focusable="false"
+      >
+        <circle cx="12" cy="12" r="4.2" />
+        <line x1="12" y1="3" x2="12" y2="5" />
+        <line x1="12" y1="19" x2="12" y2="21" />
+        <line x1="3" y1="12" x2="5" y2="12" />
+        <line x1="19" y1="12" x2="21" y2="12" />
+        <line x1="5.6" y1="5.6" x2="7" y2="7" />
+        <line x1="17" y1="17" x2="18.4" y2="18.4" />
+        <line x1="18.4" y1="5.6" x2="17" y2="7" />
+        <line x1="7" y1="17" x2="5.6" y2="18.4" />
+      </svg>
+    );
+  }
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.7}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z" />
+    </svg>
   );
 }
 
@@ -179,10 +293,52 @@ export function AppShell({
   onNotificationSnooze,
   onLogout = () => undefined,
 }: AppShellProps) {
-  const [isThemeMenuOpen, setIsThemeMenuOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
   const [adminView, setAdminView] = useState<AdminView | null>(null);
   const [sheetRevision, setSheetRevision] = useState(0);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [avatarOpen, setAvatarOpen] = useState(false);
+  const syncRef = useRef<HTMLDivElement>(null);
+  const avatarRef = useRef<HTMLDivElement>(null);
+
+  // FIXES_UI §4: sidebar collapsed state persists after app restart.
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0');
+    } catch {
+      /* storage unavailable (private mode) — collapse state is best-effort */
+    }
+  }, [sidebarCollapsed]);
+
+  // FIXES_UI §3.2/§3.5: Escape or clicking outside closes the sync popover and
+  // the account popup.
+  useEffect(() => {
+    if (!syncOpen && !avatarOpen) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setSyncOpen(false);
+        setAvatarOpen(false);
+      }
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (syncRef.current && target && !syncRef.current.contains(target)) {
+        setSyncOpen(false);
+      }
+      if (avatarRef.current && target && !avatarRef.current.contains(target)) {
+        setAvatarOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [syncOpen, avatarOpen]);
   // Both counters drive IN-PLACE re-fetches of the visible page (no remount):
   // sheetRevision = local mutation, repositoryRevision = sync landed data.
   const pageRefreshToken = sheetRevision * 100_000 + repositoryRevision;
@@ -198,85 +354,80 @@ export function AppShell({
   const actor: AdminActor | null = profile
     ? { id: profile.id, name: profile.fullName ?? profile.email, email: profile.email }
     : null;
-  const isAdminFullPage = effectiveView === 'recycle-bin' || effectiveView === 'audit-log';
-  const healthLabel = isDemoMode
-    ? 'Offline demo'
-    : health.reachable === 'reachable'
-      ? 'Supabase healthy'
-      : health.reachable === 'unreachable'
-        ? 'Supabase unavailable'
-        : health.configured
-          ? 'Supabase checking'
-          : 'Supabase not configured';
-  const syncDetail = syncStatus.status === 'syncing'
-    ? 'Syncing local changes…'
-    : syncStatus.status === 'error'
-      ? `Sync error${syncStatus.pendingCount > 0 ? ` · ${syncStatus.pendingCount} pending` : ''}`
-      : syncStatus.pendingCount > 0
-        ? `${healthLabel} · ${syncStatus.pendingCount} pending`
-        : healthLabel;
+  // FIXES_UI §3.2: four real states from the outbox — never a decorative label.
+  // "Saved to cloud" only after confirmed acknowledgement (status healthy, no
+  // pending); "Sync error" never uses a success icon (see data-state → CSS).
+  const syncStateKey: 'cloud' | 'syncing' | 'offline' | 'error' =
+    syncStatus.status === 'error'
+      ? 'error'
+      : syncStatus.status === 'syncing'
+        ? 'syncing'
+        : syncStatus.pendingCount > 0 || syncStatus.status === 'offline'
+          ? 'offline'
+          : 'cloud';
+  const pendingSuffix = syncStatus.pendingCount > 0 ? ` · ${syncStatus.pendingCount} pending` : '';
+  const syncLabel = syncStateKey === 'error'
+    ? `Sync error${pendingSuffix}`
+    : syncStateKey === 'syncing'
+      ? `Syncing…${pendingSuffix}`
+      : syncStateKey === 'offline'
+        ? `Offline — saved locally${pendingSuffix}`
+        : 'Saved to cloud';
+  const brandCaption = profile?.role === 'admin' ? 'Admin workspace' : 'Office workspace';
 
   return (
     <div className="app-shell">
-      <aside className="sidebar" aria-label="Sidebar">
-        <Brand />
+      <aside
+        className="sidebar"
+        data-collapsed={sidebarCollapsed}
+        aria-label="Sidebar"
+      >
+        <Brand caption={brandCaption} />
         <nav className="sidebar__nav" aria-label="Primary navigation">
-          <p className="sidebar__label">Workspace</p>
           <button
             className={`nav-item${effectiveView === 'dashboard' ? ' nav-item--active' : ''}`}
             type="button"
             aria-current={effectiveView === 'dashboard' ? 'page' : 'false'}
-            aria-label="Open Dashboard"
+            aria-label="Dashboard"
+            title="Dashboard"
             onClick={() => {
               setIsSettingsOpen(false);
               setAdminView(null);
               onNavigate('dashboard');
             }}
           >
-            <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-              <span />
-            </span>
-            <span>Dashboard</span>
+            <NavIcon kind="dashboard" />
+            <span className="nav-item__label">Dashboard</span>
           </button>
           <button
             className={`nav-item${effectiveView === 'sheet' ? ' nav-item--active' : ''}`}
             type="button"
             aria-current={effectiveView === 'sheet' ? 'page' : 'false'}
-            aria-label="Open Sheet"
+            aria-label="Visa Sheet"
+            title="Visa Sheet"
             onClick={() => {
               setIsSettingsOpen(false);
               setAdminView(null);
               onNavigate('sheet');
             }}
           >
-            <span className="nav-item__icon nav-item__icon--sheet" aria-hidden="true">
-              <span />
-              <span />
-              <span />
-            </span>
-            <span>Visa sheet</span>
-           </button>
+            <NavIcon kind="sheet" />
+            <span className="nav-item__label">Visa Sheet</span>
+          </button>
           {can(role, 'adminNavigation') ? (
             <button
               className={`nav-item${effectiveView === 'settings' ? ' nav-item--active' : ''}`}
               type="button"
               aria-current={effectiveView === 'settings' ? 'page' : 'false'}
-              aria-label="Open Admin tools / Settings"
+              aria-label="Settings"
+              title="Settings"
               onClick={() => {
                 setAdminView(null);
                 setIsSettingsOpen(true);
               }}
             >
-              <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-                <span />
-              </span>
-              <span>Settings</span>
+              <NavIcon kind="settings" />
+              <span className="nav-item__label">Settings</span>
             </button>
           ) : null}
           {can(role, 'recycleBin') ? (
@@ -284,20 +435,16 @@ export function AppShell({
               className={`nav-item${effectiveView === 'recycle-bin' ? ' nav-item--active' : ''}`}
               type="button"
               aria-current={effectiveView === 'recycle-bin' ? 'page' : 'false'}
-              aria-label="Open Recycle Bin"
+              aria-label="Recycle Bin"
+              title="Recycle Bin"
               onClick={() => {
                 setIsSettingsOpen(false);
                 setAdminView('recycle-bin');
                 setSheetRevision((revision) => revision + 1);
               }}
             >
-              <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-                <span />
-              </span>
-              <span>Recycle Bin</span>
+              <NavIcon kind="recycle" />
+              <span className="nav-item__label">Recycle Bin</span>
             </button>
           ) : null}
           {can(role, 'auditLog') ? (
@@ -305,60 +452,81 @@ export function AppShell({
               className={`nav-item${effectiveView === 'audit-log' ? ' nav-item--active' : ''}`}
               type="button"
               aria-current={effectiveView === 'audit-log' ? 'page' : 'false'}
-              aria-label="Open Audit Log"
+              aria-label="Audit Log"
+              title="Audit Log"
               onClick={() => {
                 setIsSettingsOpen(false);
                 setAdminView('audit-log');
                 setSheetRevision((revision) => revision + 1);
               }}
             >
-              <span className="nav-item__icon nav-item__icon--grid" aria-hidden="true">
-                <span />
-                <span />
-                <span />
-                <span />
-              </span>
-              <span>Audit Log</span>
+              <NavIcon kind="audit" />
+              <span className="nav-item__label">Audit Log</span>
             </button>
           ) : null}
         </nav>
-        <div className="sidebar__bottom">
-          <div className="sync-status">
-            <span className="sync-status__dot" aria-hidden="true" />
-            <div>
-              <p className="sync-status__title">Workspace health</p>
-              <p className="sync-status__detail">{syncDetail}</p>
-              {(syncStatus.lastError !== null || pendingOutbox.length > 0) ? (
-                <details className="sync-status__issues">
-                  <summary className="sync-status__error">
-                    {syncStatus.lastError
-                      ?? `${pendingOutbox.length} pending change${pendingOutbox.length === 1 ? '' : 's'}`}
-                  </summary>
-                  {pendingOutbox.length > 0 ? (
-                    <ul className="sync-status__list">
-                      {pendingOutbox.map((item) => (
-                        <li key={item.id}>
-                          {item.entityType} · {item.operation} · attempted {item.attempts}×
-                          {item.lastError ? ` · ${item.lastError}` : ' · waiting for sync'}
-                        </li>
-                      ))}
-                    </ul>
-                  ) : null}
-                </details>
-              ) : null}
-            </div>
-          </div>
-          <p className="sidebar__version">STEP 2 · Role-gated workspace</p>
-        </div>
       </aside>
 
       <div className="app-shell__body">
         <header className="top-bar" role="banner" aria-label="DKS top bar">
-          <div className="top-bar__heading">
-             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.title}</p>
-            <p className="top-bar__context">{copy.eyebrow}</p>
+          <div className="top-bar__left">
+            <button
+              className="top-bar__menu"
+              type="button"
+              aria-label={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!sidebarCollapsed}
+              title={sidebarCollapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              onClick={() => setSidebarCollapsed((value) => !value)}
+            >
+              <span aria-hidden="true">☰</span>
+            </button>
+            <h1 className="top-bar__title">{copy.title}</h1>
           </div>
           <div className="top-bar__actions">
+            <div className="topbar-sync" ref={syncRef}>
+              <button
+                className="topbar-sync__button"
+                type="button"
+                data-state={syncStateKey}
+                aria-haspopup="dialog"
+                aria-expanded={syncOpen}
+                title={syncLabel}
+                onClick={() => setSyncOpen((value) => !value)}
+              >
+                <span className="sync-status__dot" data-state={syncStateKey} aria-hidden="true" />
+                <span className="sync-status__detail">{syncLabel}</span>
+              </button>
+              <div
+                className={`topbar-sync__popover${syncOpen ? ' is-open' : ''}`}
+                role="dialog"
+                aria-label="Sync details"
+              >
+                <p className="topbar-sync__line">
+                  Last sync: {syncStatus.lastSyncAt ? formatLocalDateTime(syncStatus.lastSyncAt) : 'Not yet'}
+                </p>
+                <p className="topbar-sync__line">
+                  {syncStatus.pendingCount} pending change{syncStatus.pendingCount === 1 ? '' : 's'}
+                </p>
+                {syncStatus.lastError !== null || syncStatus.pendingCount > 0 ? (
+                  <details className="sync-status__issues">
+                    <summary>
+                      {syncStatus.lastError
+                        ?? `${syncStatus.pendingCount} pending change${syncStatus.pendingCount === 1 ? '' : 's'}`}
+                    </summary>
+                    {pendingOutbox.length > 0 ? (
+                      <ul className="sync-status__list">
+                        {pendingOutbox.map((item) => (
+                          <li key={item.id}>
+                            {item.entityType} · {item.operation} · attempted {item.attempts}×
+                            {item.lastError ? ` · ${item.lastError}` : ' · waiting for sync'}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : null}
+                  </details>
+                ) : null}
+              </div>
+            </div>
             <NotificationBell
               notifications={notifications}
               onMarkRead={onNotificationMarkRead}
@@ -367,99 +535,52 @@ export function AppShell({
               onRestore={onNotificationRestore}
               onSnooze={onNotificationSnooze}
             />
-            <div className="theme-control">
+            <button
+              className="topbar-theme"
+              type="button"
+              aria-label={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              title={resolvedTheme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+              onClick={() => onThemeChange(resolvedTheme === 'dark' ? 'light' : 'dark')}
+            >
+              <ThemeIcon dark={resolvedTheme === 'dark'} />
+            </button>
+            <div className="topbar-avatar" ref={avatarRef}>
               <button
-                className="theme-button"
+                className="avatar"
                 type="button"
+                aria-label="Account"
                 aria-haspopup="menu"
-                aria-expanded={isThemeMenuOpen}
-                aria-label={`Theme: ${themePreference}`}
-                onClick={() => setIsThemeMenuOpen((isOpen) => !isOpen)}
+                aria-expanded={avatarOpen}
+                onClick={() => setAvatarOpen((value) => !value)}
               >
-                <span className="theme-button__swatch" data-theme-icon={resolvedTheme} aria-hidden="true" />
-                <span>Theme: {themeLabels[themePreference]}</span>
-                <span className="theme-button__chevron" aria-hidden="true">⌄</span>
+                {(displayEmail?.[0] ?? 'D').toUpperCase()}
               </button>
-              {isThemeMenuOpen ? (
-                <div className="theme-menu" role="menu" aria-label="Theme preference">
-                  {(Object.keys(themeLabels) as ThemePreference[]).map((preference) => (
-                    <button
-                      className="theme-menu__item"
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={themePreference === preference}
-                      key={preference}
-                      onClick={() => {
-                        onThemeChange(preference);
-                        setIsThemeMenuOpen(false);
-                      }}
-                    >
-                      <span>{themeLabels[preference]}</span>
-                      {themePreference === preference ? <span aria-hidden="true">✓</span> : null}
-                    </button>
-                  ))}
+              {avatarOpen ? (
+                <div className="topbar-avatar__popup" role="menu" aria-label="Account menu">
+                  <div className="topbar-avatar__identity">
+                    <p className="topbar-avatar__email">{displayEmail ?? 'Not signed in'}</p>
+                    <p className="topbar-avatar__role">
+                      {profile ? (profile.role === 'admin' ? 'Admin' : 'Office') : 'Preview'}
+                    </p>
+                  </div>
+                  <hr className="topbar-avatar__divider" />
+                  <button
+                    className="topbar-avatar__logout"
+                    type="button"
+                    onClick={() => {
+                      setAvatarOpen(false);
+                      onLogout();
+                    }}
+                  >
+                    Log out
+                  </button>
                 </div>
               ) : null}
-            </div>
-            {displayEmail ? (
-              <div style={{ display: 'grid', gap: 2, justifyItems: 'end' }}>
-                <span style={{ color: 'var(--color-text)', fontSize: 12, fontWeight: 700 }}>
-                  {displayEmail}
-                </span>
-                {profile ? (
-                  <span
-                    aria-label={`Role: ${profile.role}`}
-                    style={{ color: 'var(--color-text-muted)', fontSize: 10, fontWeight: 700 }}
-                  >
-                    {profile.role === 'admin' ? 'Admin' : 'Office'}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-            <button className="button" type="button" onClick={onLogout}>
-              Log out
-            </button>
-            <div className="avatar" aria-label={displayEmail ? `Signed in as ${displayEmail}` : 'DKS preview user'}>
-              {(displayEmail?.[0] ?? 'D').toUpperCase()}
             </div>
           </div>
         </header>
 
-        <main
-          className="content"
-          aria-label={isAdminFullPage ? copy.title : undefined}
-          aria-labelledby={isAdminFullPage ? undefined : 'page-title'}
-        >
-          {!isAdminFullPage ? <div className="content__intro">
-            <div>
-              <p className="eyebrow">{copy.eyebrow}</p>
-              <h1 id="page-title">{copy.title}</h1>
-              <p className="content__description">{copy.description}</p>
-            </div>
-            <div className="content__badge">
-              <span className="content__badge-dot" aria-hidden="true" />
-              <span>Offline-first</span>
-            </div>
-            {can(role, 'export') ? (
-              <button
-                className="button"
-                type="button"
-                aria-label="Export data"
-                onClick={() => {
-                  if (sheetRepository) {
-                    void exportCurrentRows(
-                      sheetRepository,
-                      role,
-                      'csv',
-                      onSaveExport ?? saveArtifactWithBrowserFallback,
-                    );
-                  }
-                }}
-              >
-                Export data
-              </button>
-            ) : null}
-          </div> : null}
+        <main className="content" aria-label={copy.title}>
 
            {effectiveView === 'dashboard' ? (
              // No revision in the key: remounting on every sync destroyed

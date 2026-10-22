@@ -50,12 +50,12 @@ describe('admin renderer integration', () => {
       <AppShell profile={adminProfile()} onNavigate={onNavigate} />,
     );
 
-    expect(screen.getByRole('button', { name: 'Open Recycle Bin' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open Audit Log' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Recycle Bin' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Audit Log' })).toBeInTheDocument();
 
     rerender(<AppShell profile={officeProfile()} onNavigate={onNavigate} />);
-    expect(screen.queryByRole('button', { name: 'Open Recycle Bin' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open Audit Log' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Recycle Bin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Audit Log' })).not.toBeInTheDocument();
   });
 
   it('exports current rows as CSV and Excel through the injectable save callback', async () => {
@@ -135,7 +135,7 @@ describe('admin renderer integration', () => {
       <AppShell activeView="sheet" profile={adminProfile()} sheetRepository={repository} />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Recycle Bin' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Restore Ada Lovelace/i }));
     await waitFor(async () => {
@@ -143,7 +143,7 @@ describe('admin renderer integration', () => {
     });
 
     await repository.softDeleteRow(row.id);
-    fireEvent.click(screen.getByRole('button', { name: 'Open Recycle Bin' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     fireEvent.click(await screen.findByRole('button', { name: /Permanently delete Ada Lovelace/i }));
     await waitFor(async () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)).toBeUndefined();
@@ -155,7 +155,7 @@ describe('admin renderer integration', () => {
     const repository = await seededRepository();
     render(<AppShell profile={adminProfile()} sheetRepository={repository} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Audit Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
     // S3: friendly action names (raw code "create" is no longer shown).
     expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();

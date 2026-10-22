@@ -60,11 +60,11 @@ export function RecycleBinPage({
 
   return (
     <section className="recycle-bin-page" aria-label="Recycle bin">
-      <header>
-        <p>Admin tools</p>
-        <h1>Recycle bin</h1>
-        <p>{deleted.length} deleted {deleted.length === 1 ? 'record' : 'records'}</p>
-      </header>
+      {/* FIXES_UI §7: the page title lives in the top bar; the "Admin tools"
+          eyebrow and duplicate h1 are removed. A compact count is kept. */}
+      {deleted.length > 0 ? (
+        <p className="recycle-bin-page__count">{deleted.length} deleted {deleted.length === 1 ? 'record' : 'records'}</p>
+      ) : null}
       {deleted.length === 0 ? (
         <p>No deleted records.</p>
       ) : (

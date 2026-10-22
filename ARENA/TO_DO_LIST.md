@@ -34,13 +34,13 @@ Locked decisions that resolve conflicts (later decisions win):
 
 | ID | Source | Requirement | Type | Status |
 |----|--------|-------------|------|--------|
-| SHELL-01 | FIXES_UI 3.1 | Compact top bar (~48–52px) on every authenticated page: [☰] page title … [Sync] [Bell] [Theme] [Avatar]. No search/filters/import/export/print/breadcrumbs/email/logout in the top bar. | UI | NOT_STARTED |
-| SHELL-02 | FIXES_UI 3.2 | Global sync status in top bar from real outbox state (Saved to cloud / Syncing… / Offline — saved locally / Sync error); pending count; click/Esc opens popover with pending count, last sync time, sanitized error. Never a decorative label; never green on error. | UI | NOT_STARTED |
-| SHELL-03 | FIXES_UI 3.3 | Notification bell icon with unread badge; floating popover (Esc/outside close); role-gated alerts (Office: expiry only; Admin: + Office-deletion alerts); no inline top-bar text. | UI | NOT_STARTED |
-| SHELL-04 | FIXES_UI 3.4 | Theme icon-only toggle (moon/sun, tooltips); one click switches; personal/per-PC; all grids/charts/dialogs follow theme. | UI | NOT_STARTED |
-| SHELL-05 | FIXES_UI 3.5 | Profile avatar popup: actual email + actual role + Log out; Esc/outside close; no pending-change discard on logout. | UI | NOT_STARTED |
-| SHELL-06 | FIXES_UI 4 | Collapsible sidebar (≈220px expanded / ≈56px collapsed) with logo + distinct icons + selected state + tooltips; toggle via ☰; state persists across restart; Office sees only Dashboard + Visa Sheet; no Workspace-health/STEP footer box. | UI | NOT_STARTED |
-| SHELL-07 | FIXES_UI 2 | Remove breadcrumbs, subtitles, eyebrow labels, developer STEP text, top-bar email, standalone Log out, "Theme: X" text control, inline notification content, "Offline-first" pill, sidebar health footer, Export Data on Dashboard/Settings. | UI | NOT_STARTED |
+| SHELL-01 | FIXES_UI 3.1 | Compact top bar (~48–52px) on every authenticated page: [☰] page title … [Sync] [Bell] [Theme] [Avatar]. No search/filters/import/export/print/breadcrumbs/email/logout in the top bar. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-02 | FIXES_UI 3.2 | Global sync status in top bar from real outbox state (Saved to cloud / Syncing… / Offline — saved locally / Sync error); pending count; click/Esc opens popover with pending count, last sync time, sanitized error. Never a decorative label; never green on error. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-03 | FIXES_UI 3.3 | Notification bell icon with unread badge; floating popover (Esc/outside close); role-gated alerts (Office: expiry only; Admin: + Office-deletion alerts); no inline top-bar text. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-04 | FIXES_UI 3.4 | Theme icon-only toggle (moon/sun, tooltips); one click switches; personal/per-PC; all grids/charts/dialogs follow theme. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-05 | FIXES_UI 3.5 | Profile avatar popup: actual email + actual role + Log out; Esc/outside close; no pending-change discard on logout. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-06 | FIXES_UI 4 | Collapsible sidebar (≈220px expanded / ≈56px collapsed) with logo + distinct icons + selected state + tooltips; toggle via ☰; state persists across restart; Office sees only Dashboard + Visa Sheet; no Workspace-health/STEP footer box. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHELL-07 | FIXES_UI 2 | Remove breadcrumbs, subtitles, eyebrow labels, developer STEP text, top-bar email, standalone Log out, "Theme: X" text control, inline notification content, "Offline-first" pill, sidebar health footer, Export Data on Dashboard/Settings. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 | SHELL-08 | HANDOFF / FIXES_UI 1 | Consistent light+dark theming; no UUIDs/raw JSON/raw ISO timestamps in normal UI; visible dates DD/MM/YYYY; visible datetimes DD/MM/YYYY HH:mm (Asia/Muscat). | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 
 ## 3. Visa Sheet

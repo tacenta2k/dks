@@ -29,7 +29,8 @@ describe('recycle bin page', () => {
       />,
     );
 
-    expect(screen.getByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
+    // FIXES_UI §7: the page title lives in the top bar (App level), so the
+    // panel no longer renders its own heading — assert on the deleted rows.
     expect(screen.getAllByText('Deleted record').length).toBeGreaterThan(0);
     expect(screen.queryByText('Active record')).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Restore Deleted record' }));
