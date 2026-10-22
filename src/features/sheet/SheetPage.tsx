@@ -28,6 +28,7 @@ import {
 import { createInMemorySheetRepository, type SheetRepository } from './repository';
 import { RenewModal } from './renew-modal';
 import { RowActions, type SheetGridRendererData } from './row-actions';
+import { buildRowContextMenuItems } from './row-context-menu';
 import type { SheetRow } from './types';
 import './sheet.css';
 
@@ -419,6 +420,18 @@ export function SheetPage({
                 }}
                 getRowId={(params) => params.data.__rowId}
                 getRowClass={(params) => rowClassForStatus(params.data?.status ?? null)}
+                getContextMenuItems={(params) => {
+                  // FIXES_UI §5.6 (SHEET-14): row right-click menu.
+                  const row = (params.node?.data as SheetGridRendererData | null | undefined)?.__sheetRow;
+                  if (!row) {
+                    return [];
+                  }
+                  return buildRowContextMenuItems(row, {
+                    onDuplicate: handleDuplicate,
+                    onDelete: handleDelete,
+                    onRenew: handleRenew,
+                  });
+                }}
                 onCellValueChanged={(event) => void handleCellValueChanged(event)}
                 domLayout="autoHeight"
                 animateRows

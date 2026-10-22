@@ -245,6 +245,18 @@ Per `docs/FIXES_UI.md` §5.1/§5.3/§5.5:
   label rename — the "7 days" button is asserted by the sheet test).
 - Gate: typecheck 0; **39 files / 218 tests passed**; build ✓.
 
+### 2.10 UI batch 6 — Visa Sheet row right-click menu (SHEET-14) — THIS TURN
+Per `docs/FIXES_UI.md` §5.6: added a row right-click context menu to the AG Grid
+sheet (Duplicate row / Delete row / Mark renewed), built by a new pure helper
+`buildRowContextMenuItems(row, callbacks)` and wired into `<AgGridReact>` via the
+Community `getContextMenuItems` option (returns `[]` for non-row targets). The
+menu mirrors the in-cell actions; Copy/Paste remain in the grid's default menu;
+permissions are enforced by the repository/service the callbacks call (same as
+the in-cell buttons). Verified by a unit test (`row-context-menu.test.ts`)
+asserting the three items and that each `action()` invokes the matching callback
+with the row. Suite grew 218 → **219**. Gate: typecheck 0; **40 files / 219 tests
+passed**; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
@@ -262,7 +274,8 @@ Per `docs/FIXES_UI.md` §5.1/§5.3/§5.5:
 - [x] **UI batch 3: Dashboard / Recycle Bin / Audit Log (DASH-01, RBIN-01/02, AUDIT-01/04)** — dashboard spacing, RB search/count + empty states, audit details side panel. See §2.7.
 - [x] **UI batch 4: Settings inner nav, login cleanup, restart persistence (SET-01, SET-12, SYNC-10)** — see §2.8.
 - [x] **UI batch 5: Visa Sheet grid structure (SHEET-01, SHEET-06, SHEET-10)** — grid height, row-number gutter + freeze, `+` add-column header. See §2.9.
-- [ ] Remaining deferred sheet items: SHEET-04 (Group by), SHEET-11 (draft row), SHEET-12 (keyboard), SHEET-13/14 (right-click menus), SHEET-16 (button removal), SHEET-03 (chip labels) — visual/dev pass or test-locked (see §2.9).
+- [x] **UI batch 6: Visa Sheet row right-click menu (SHEET-14)** — see §2.10.
+- [ ] Remaining deferred sheet items: SHEET-04 (Group by), SHEET-11 (draft row), SHEET-12 (keyboard), SHEET-13 (column right-click menu), SHEET-16 (button removal), SHEET-03 (chip labels) — visual/dev pass or test-locked (see §2.9/§2.10).
 - [ ] PKG-07 UI verification checklist (user-facing) + SYNC-09 dev-window focus (main-process) — see Notes.
 
 ### Commit map (this session, this lineage)
@@ -273,7 +286,8 @@ Per `docs/FIXES_UI.md` §5.1/§5.3/§5.5:
 - `02172d3` feat: consolidate Visa Sheet toolbar, admin tools, and empty states — UI batch 2
 - `626b18b` feat: rebuild Dashboard, Recycle Bin, and Audit Log layouts — UI batch 3
 - `2832644` feat: Settings inner nav, login cleanup, restart sync persistence — UI batch 4
-- `<tip>` feat: Visa Sheet grid structure (height, gutter, freeze, `+` header) — UI batch 5 (this commit)
+- `e63c0cc` feat: Visa Sheet grid structure (height, gutter, freeze, `+` header) — UI batch 5
+- `<tip>` feat: Visa Sheet row right-click menu (Duplicate/Delete/Mark renewed) — UI batch 6 (this commit)
 - (remote `origin/arena/0e0155c1-dks` updated on push; see `git log`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)
