@@ -1,6 +1,16 @@
 import { spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -16,6 +26,7 @@ import { describe, expect, it } from 'vitest';
  */
 
 const ROOT = resolve(__dirname, '..');
+const DEV_MODULES = resolve(ROOT, 'node_modules');
 
 /** CRLF-safe read: a Windows checkout must not change the result. */
 function readNormalised(file: string): string {
@@ -148,6 +159,11 @@ describe('packaged native modules (R7)', () => {
     expect(post).toContain('better_sqlite3.node');
     expect(post).toContain('ELECTRON_RUN_AS_NODE');
     expect(post).toContain('throw new Error');
+    // R7b: module resolution is anchored at app.asar, never at app.asar.unpacked
+    // (bindings lives inside the asar), and the child process gets a clean env.
+    expect(post).toContain("'app.asar', 'package.json'");
+    expect(post).toContain("'lib', 'app-asar-probe.cjs'");
+    expect(post).toContain('delete env.NODE_PATH');
   });
 });
 
@@ -160,7 +176,7 @@ describe('packaged native modules (R7)', () => {
  */
 describe('native module repair step (R7 follow-up)', () => {
   it('calls install-app-deps with no unsupported flags', async () => {
-    const { installAppDepsCommand } = await import('../scripts/verify-native-modules.mjs');
+    const { installAppDepsCommand } = await import('../scripts/lib/native-guard.mjs');
     const spec = installAppDepsCommand();
 
     expect(spec.available).toBe(true);
@@ -175,7 +191,7 @@ describe('native module repair step (R7 follow-up)', () => {
   });
 
   it('falls back to @electron/rebuild with flags the installed CLI documents', async () => {
-    const { electronRebuildCommand } = await import('../scripts/verify-native-modules.mjs');
+    const { electronRebuildCommand } = await import('../scripts/lib/native-guard.mjs');
     const spec = electronRebuildCommand();
 
     expect(spec.available).toBe(true);
@@ -196,7 +212,7 @@ describe('native module repair step (R7 follow-up)', () => {
   });
 
   it('truncates captured child output instead of dumping Electron internals', async () => {
-    const { lastLines } = await import('../scripts/verify-native-modules.mjs');
+    const { lastLines } = await import('../scripts/lib/native-guard.mjs');
     const noisy = Array.from({ length: 200 }, (_, index) => `line ${index}`).join('\n');
 
     const lines = lastLines(noisy);
@@ -210,7 +226,7 @@ describe('native module repair step (R7 follow-up)', () => {
 
   it('only blames the toolchain when the rebuild reported a compiler error', async () => {
     const { looksLikeToolchainError, looksLikeNetworkError } = await import(
-      '../scripts/verify-native-modules.mjs'
+      '../scripts/lib/native-guard.mjs'
     );
 
     expect(looksLikeToolchainError('gyp ERR! stack Error: Could not find any Visual Studio installation')).toBe(true);
@@ -226,7 +242,7 @@ describe('native module repair step (R7 follow-up)', () => {
   });
 
   it('summarises the real error line instead of stack frames', async () => {
-    const { summarizeFailure } = await import('../scripts/verify-native-modules.mjs');
+    const { summarizeFailure } = await import('../scripts/lib/native-guard.mjs');
     const stderr = [
       '/home/user/dks/[eval]-wrapper:6',
       'throw err;',
@@ -244,7 +260,7 @@ describe('native module repair step (R7 follow-up)', () => {
   });
 
   it('probes the package entry point, which a correct build must satisfy', async () => {
-    const { probeNativeModule } = await import('../scripts/verify-native-modules.mjs');
+    const { probeNativeModule } = await import('../scripts/lib/native-guard.mjs');
     // Requires `better-sqlite3` (not the raw .node, which is not a constructor)
     // with the current Node: this is the exact false-negative that made the
     // first guard report a healthy build as broken.
@@ -263,5 +279,145 @@ describe('native module repair step (R7 follow-up)', () => {
     // Every repair attempt is followed by a fresh probe.
     expect((source.match(/probeOrMissing\(/g) ?? []).length).toBeGreaterThanOrEqual(4);
     expect(source).toContain('maxBuffer');
+  });
+});
+
+/**
+ * R7b — packaged module resolution.
+ *
+ * The afterPack probe used to require `app.asar.unpacked/node_modules/
+ * better-sqlite3` directly. `better-sqlite3` lazily requires `bindings` from
+ * its `Database` constructor, and `bindings` is an ordinary production
+ * dependency that lives inside `app.asar`, so the probe died with
+ * `Cannot find module 'bindings'` on Windows. The probe now runs inside the
+ * packaged Electron with `createRequire(<resources>/app.asar/package.json)`.
+ *
+ * These tests build the packaged layout on disk (app.asar = the archive the
+ * Node resolver can read as a directory) and execute the real probe script.
+ */
+describe('packaged module resolution through app.asar (R7b)', () => {
+  const PROBE = resolve(ROOT, 'scripts/lib/app-asar-probe.cjs');
+
+  function copyBetterSqlite(target: string) {
+    mkdirSync(join(target, 'lib'), { recursive: true });
+    mkdirSync(join(target, 'build', 'Release'), { recursive: true });
+    copyFileSync(
+      join(DEV_MODULES, 'better-sqlite3', 'package.json'),
+      join(target, 'package.json'),
+    );
+    cpSync(join(DEV_MODULES, 'better-sqlite3', 'lib'), join(target, 'lib'), { recursive: true });
+    copyFileSync(
+      join(DEV_MODULES, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'),
+      join(target, 'build', 'Release', 'better_sqlite3.node'),
+    );
+  }
+
+  /** `resources/app.asar` + `resources/app.asar.unpacked`, as electron-builder lays it out. */
+  function createPackagedLayout() {
+    // A space in the path: Windows installs live under "Program Files", and the
+    // probe passes this path to a child process.
+    const root = mkdtempSync(join(tmpdir(), 'dks packaged app asar '));
+    const resources = join(root, 'resources');
+    const appAsar = join(resources, 'app.asar');
+    const unpacked = join(resources, 'app.asar.unpacked');
+    const asarModules = join(appAsar, 'node_modules');
+    const unpackedModules = join(unpacked, 'node_modules');
+
+    mkdirSync(asarModules, { recursive: true });
+    mkdirSync(unpackedModules, { recursive: true });
+    writeFileSync(
+      join(appAsar, 'package.json'),
+      JSON.stringify({ name: 'DKS', main: 'dist-electron/main/index.js' }),
+    );
+    // asarUnpack: the module is present in the archive and unpacked on disk.
+    copyBetterSqlite(join(asarModules, 'better-sqlite3'));
+    copyBetterSqlite(join(unpackedModules, 'better-sqlite3'));
+    // Plain production dependencies stay inside the archive only.
+    cpSync(join(DEV_MODULES, 'bindings'), join(asarModules, 'bindings'), { recursive: true });
+    cpSync(
+      join(DEV_MODULES, 'file-uri-to-path'),
+      join(asarModules, 'file-uri-to-path'),
+      { recursive: true },
+    );
+
+    return {
+      root,
+      appAsar,
+      appPackageJson: join(appAsar, 'package.json'),
+      unpackedModule: join(unpackedModules, 'better-sqlite3'),
+    };
+  }
+
+  it('loads the package through app.asar and opens a real in-memory database', () => {
+    const layout = createPackagedLayout();
+    try {
+      const result = spawnSync(process.execPath, [PROBE, layout.appPackageJson], {
+        encoding: 'utf8',
+      });
+
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain('DKS_OK=1');
+      expect(result.stdout).toContain('DKS_ABI=');
+      expect(result.stdout).toContain(
+        `DKS_PACKAGE=${join(layout.appAsar, 'node_modules', 'better-sqlite3', 'lib', 'index.js')}`,
+      );
+      expect(result.stdout).toContain(
+        `DKS_NATIVE=${join(layout.appAsar, 'node_modules', 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node')}`,
+      );
+    } finally {
+      rmSync(layout.root, { recursive: true, force: true });
+    }
+  });
+
+  it('reproduces the old failure: app.asar.unpacked cannot resolve bindings', () => {
+    const layout = createPackagedLayout();
+    try {
+      const script = 'const Database = require(process.argv[1]);'
+        + ' const db = new Database(":memory:"); db.close();';
+      const result = spawnSync(process.execPath, ['-e', script, layout.unpackedModule], {
+        encoding: 'utf8',
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain("Cannot find module 'bindings'");
+    } finally {
+      rmSync(layout.root, { recursive: true, force: true });
+    }
+  });
+
+  it('refuses a package that resolves outside app.asar (dev checkout)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dks-dev-leak-'));
+    try {
+      const appAsar = join(root, 'resources', 'app.asar');
+      mkdirSync(appAsar, { recursive: true });
+      writeFileSync(join(appAsar, 'package.json'), JSON.stringify({ name: 'DKS' }));
+      // Reachable by walking up from app.asar/package.json, but not part of it.
+      copyBetterSqlite(join(root, 'node_modules', 'better-sqlite3'));
+
+      const result = spawnSync(process.execPath, [PROBE, join(appAsar, 'package.json')], {
+        encoding: 'utf8',
+      });
+
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('resolved outside app.asar');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the importable helper free of a shebang (CRLF/Vitest hazard)', () => {
+    // Reproduced on a CRLF checkout: Vite's SSR transform mangles a `#!` first
+    // line, so `await import(...)` threw "SyntaxError: Invalid or unexpected
+    // token" for every test that imported the script. Without the shebang the
+    // same CRLF file imports cleanly. Tests import the helper, never the CLI.
+    const helper = readFileSync(resolve(ROOT, 'scripts/lib/native-guard.mjs'), 'utf8');
+    expect(helper.startsWith('#!')).toBe(false);
+
+    const cli = readFileSync(resolve(ROOT, 'scripts/verify-native-modules.mjs'), 'utf8');
+    expect(cli.startsWith('#!/usr/bin/env node')).toBe(true);
+    expect(cli).toContain("from './lib/native-guard.mjs'");
+    // The CLI must not re-implement helpers (single source of truth).
+    expect(cli).not.toContain('function installAppDepsCommand');
+    expect(cli).not.toContain('function looksLikeToolchainError');
   });
 });

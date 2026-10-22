@@ -17,9 +17,9 @@ export declare const moduleDir: string;
 export declare const binaryPath: string;
 
 export declare function lastLines(text: unknown, limit?: number): string[];
+export declare function summarizeFailure(text: unknown, limit?: number): string[];
 export declare function looksLikeToolchainError(text: unknown): boolean;
 export declare function looksLikeNetworkError(text: unknown): boolean;
-export declare function summarizeFailure(text: unknown, limit?: number): string[];
 export declare function electronExecutable(): string | null;
 export declare function electronVersion(): string | null;
 export declare function installAppDepsCommand(): CommandSpec;

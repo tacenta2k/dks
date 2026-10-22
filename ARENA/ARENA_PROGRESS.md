@@ -1436,3 +1436,111 @@ Tests:
 twice, `npm run typecheck`, `npm run build`. Results: **61 files / 389 tests** passed in both runs (381 before + 7 new
 packaging tests + 1 export regression test), `tsc` (both configs) clean, renderer
 and main builds clean.
+
+## 23. Fix — packaged resolution through app.asar, and the Windows Vitest import crash
+
+Two more build-tooling defects were reported after `af95c5f` (the pre-package
+probe itself passed: `module ABI 132 — safe to package`).
+
+### 23.1 afterPack: `Cannot find module 'bindings'` (Task A)
+
+**Root cause — probe path, not a missing dependency.** `better-sqlite3`'s
+JavaScript (`lib/database.js`) does `require('bindings')` lazily from its
+`Database` constructor. `bindings` (and `file-uri-to-path`) are ordinary
+production dependencies and live **inside `app.asar`**; only the native module
+itself is unpacked. The old probe (`af95c5f`) required
+`resources/app.asar.unpacked/node_modules/better-sqlite3` directly, so Node
+resolved `bindings` relative to that directory — where it does not exist — and
+the hook threw `Cannot find module 'bindings'`, erasing the ABI information
+with it.
+
+**Fix.** New child probe `scripts/lib/app-asar-probe.cjs`, executed by the
+**packaged Electron executable** with `ELECTRON_RUN_AS_NODE=1` (set only in
+that child's environment):
+
+- `createRequire(<resources>/app.asar/package.json)` → `requireFromApp('better-sqlite3')`,
+  i.e. the same resolution context as the running app. `bindings` is read from
+  the asar, and Electron transparently redirects the unpacked
+  `better_sqlite3.node` to `app.asar.unpacked`.
+- It writes `DKS_ELECTRON`, `DKS_ABI`, `DKS_EXEC`, `DKS_APP_ROOT`, `DKS_PACKAGE`
+  and `DKS_NATIVE` **before** loading, so a dependency error no longer erases
+  the diagnostic context.
+- It instantiates a real in-memory database, runs `select 1 as ok`, closes it,
+  and prints `DKS_OK=1`.
+- It refuses to trust a package that resolves outside `app.asar` (or through
+  `app.asar.unpacked`).
+
+`scripts/after-pack.cjs` now checks `resources/app.asar/package.json` and the
+unpacked binary exist, spawns the probe with `cwd = appOutDir` and a cleaned
+environment (`NODE_PATH`/`NODE_OPTIONS` deleted — no dev-checkout leakage),
+and validates the reported paths:
+
+- `DKS_PACKAGE` must be exactly
+  `resources/app.asar/node_modules/better-sqlite3/lib/index.js`,
+- `DKS_NATIVE` must be that package's `build/Release/better_sqlite3.node`,
+- neither may be the development checkout.
+
+No dependency was added or changed; `asar`, `asarUnpack`, the icon configuration
+and both guards stay exactly as they were. `better-sqlite3`'s production
+dependency set is shipped normally by electron-builder, so nothing was missing
+from the installer.
+
+### 23.2 Windows Vitest `SyntaxError: Invalid or unexpected token` (Task B)
+
+**Root cause — reproducible, and not about paths.** A Windows checkout has CRLF
+line endings, and the test imported `scripts/verify-native-modules.mjs`, whose
+**first line is a shebang** (`#!/usr/bin/env node`). Vite's SSR transform
+mangles a `#!` line on CRLF input, so every `await import(...)` threw
+`SyntaxError: Invalid or unexpected token` at import time (6 tests) while
+`node scripts/…` still worked — exactly the reported split.
+
+Verified locally by reproducing both states:
+
+- script converted to CRLF **with** the shebang → the same 6 tests fail with
+  `SyntaxError: Invalid or unexpected token`;
+- the same CRLF file **without** the shebang → 13/13 pass.
+
+**Fix.**
+
+- Importable helpers moved to `scripts/lib/native-guard.mjs`: pure helpers with
+  **no shebang**, no top-level execution, no `process.exit`, no deletion — so
+  importing it can never rebuild anything or abort a test run.
+  `scripts/lib/native-guard.d.mts` provides the types.
+- `scripts/verify-native-modules.mjs` is now a thin CLI (shebang kept, executed
+  by Node, never imported). Its direct-execution guard uses `pathToFileURL` on
+  `process.argv[1]` compared with `import.meta.url` (no hand-built file URLs),
+  and `projectRoot` is derived with `fileURLToPath(import.meta.url)`.
+- Tests import the helper module only.
+
+### 23.3 Tests (17 in `tests/packaging-native-modules.test.ts`, was 13)
+
+- new `packaged module resolution through app.asar (R7b)` block builds the real
+  layout on disk (`resources/app.asar` + `resources/app.asar.unpacked`, with
+  `bindings`/`file-uri-to-path` **only** inside the archive) inside a temporary
+  directory **whose path contains spaces**, then runs the actual probe:
+  - the probe loads through `app.asar`, reports `DKS_OK=1`, the exact package
+    and native paths, and opens a real in-memory database;
+  - the old approach (requiring `app.asar.unpacked/.../better-sqlite3` and
+    instantiating it) still fails here with `Cannot find module 'bindings'`,
+    locking the regression that Windows found;
+  - a package reachable only by walking up out of `app.asar` is refused
+    ("resolved outside app.asar");
+  - the imported helper has no shebang while the CLI entry keeps its own.
+- existing repair-command, truncation, classification and live ABI-probe tests
+  now import `scripts/lib/native-guard.mjs`.
+
+CRLF re-verification: all four guard scripts (`native-guard.mjs`,
+`verify-native-modules.mjs`, `after-pack.cjs`, `app-asar-probe.cjs`) were
+converted to CRLF in place and the suite still passed 17/17 (files restored).
+
+### 23.4 Environment and gate
+
+Linux sandbox, Node v22.22.3 (ABI 127), Electron installed in package.json at
+34.x (ABI 132 target); `better-sqlite3` rebuilt for the Node runtime used by
+the tests (`--nodedir=/usr/local`). `npm test`: **61 files / 393 tests
+passed**; `npm run typecheck` clean; `npm run build` clean.
+
+**Not verified here:** the packaged Windows app itself, the real
+`resources/app.asar` archive (Node can only read it as a directory), and the
+packaged Electron ABI. Those checks run on Windows via
+`npm run dist` / `npm run verify:native`.
