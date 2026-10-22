@@ -969,6 +969,96 @@ button:focus-visible {
   box-shadow: 0 11px 22px color-mix(in srgb, var(--color-primary) 31%, transparent);
 }
 
+/* FIXES_UI §12 — destructive and neutral dialog buttons. */
+.button--danger {
+  background: #c0392b;
+  box-shadow: 0 9px 18px color-mix(in srgb, #c0392b 24%, transparent);
+  color: #fff;
+}
+
+.button--danger:hover:not(:disabled) {
+  background: #a93226;
+}
+
+.button--secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.button--secondary:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+.button--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-primary-strong);
+}
+
+.button--quiet:hover:not(:disabled) {
+  background: var(--color-primary-soft);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+/* Shared confirmation dialog (SET-11): red destructive action, Cancel safe. */
+.confirm-dialog-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #0d1424 52%, transparent);
+}
+
+.confirm-dialog {
+  display: grid;
+  width: min(100%, 420px);
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: 0 24px 70px var(--color-shadow-strong);
+}
+
+.confirm-dialog__title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.confirm-dialog__body p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.confirm-dialog__hint {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.confirm-dialog__error {
+  margin: 0;
+  color: #c0392b;
+  font-size: 11px;
+}
+
+.confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
 .login-card__footnote {
   margin-top: 21px;
   color: var(--color-text-subtle);

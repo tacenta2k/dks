@@ -30,6 +30,11 @@ export interface SheetRepository {
   restoreRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
   permanentDeleteRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow | null>;
   getAuditHistory?(): Promise<SheetAuditEntry[]>;
+  /**
+   * R2-10: administrator-only. Clears the mirrored audit history and records
+   * exactly one entry describing the clear.
+   */
+  clearAuditLog?(message: string): Promise<SheetAuditEntry[]>;
   createRows?(records: readonly SheetImportRecord[], options?: SheetAuditOptions): Promise<SheetRow[]>;
   importRows?(records: readonly SheetImportRecord[], options?: SheetAuditOptions): Promise<SheetRow[]>;
   markRenewed(
@@ -345,6 +350,18 @@ export class InMemorySheetRepository implements SheetRepository {
   }
 
   async getAuditHistory(): Promise<SheetAuditEntry[]> {
+    return clone(this.auditHistory);
+  }
+
+  async clearAuditLog(message: string): Promise<SheetAuditEntry[]> {
+    this.auditHistory = [{
+      id: makeId('audit'),
+      action: 'clear_audit',
+      actorId: null,
+      actor: null,
+      timestamp: now(),
+      details: { message },
+    }];
     return clone(this.auditHistory);
   }
 

@@ -20,6 +20,13 @@ import {
   type ImportSource,
 } from '../import-export/import-service';
 import { AuditLogPage, type AuditProfile } from '../audit/AuditLogPage';
+import {
+  AUDIT_CLEAR_CONFIRMATION,
+  auditClearMessage,
+  clearRemoteAuditLog,
+  isAuditClearConfirmation,
+  type AuditClearRemoteClient,
+} from '../audit/audit-service';
 import { PrintReportModal } from '../print/PrintReportModal';
 import {
   exportReportToPdf,
@@ -27,6 +34,7 @@ import {
   type PrintReportModel,
 } from '../print/print-service';
 import { RecycleBinPage } from '../recycle-bin/RecycleBinPage';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import {
   createInMemorySheetRepository,
   type SheetRepository,
@@ -129,12 +137,6 @@ function actorOptions(actor: AdminActor | null | undefined): {
     actorId: actor?.id ?? null,
     actor: actor?.name ?? actor?.email ?? null,
   };
-}
-
-function isConfirmed(message: string): boolean {
-  return typeof window === 'undefined' || typeof window.confirm !== 'function'
-    ? true
-    : window.confirm(message);
 }
 
 /**
@@ -672,6 +674,9 @@ export function AdminRecycleBinPanel({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busyRowId, setBusyRowId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<
+    { kind: 'restore' | 'permanent-delete'; row: SheetRow } | null
+  >(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -700,54 +705,65 @@ export function AdminRecycleBinPanel({
     void refresh();
   }, [refreshToken, refresh]);
 
-  const restore = async (row: SheetRow) => {
+  /**
+   * SET-11 / R2-14 — restore and permanent delete confirm in an in-app dialog
+   * (red button for the destructive action, Cancel as the safe default, Esc
+   * closes, no double submit, failure stays visible) instead of a native
+   * window.confirm.
+   */
+  const askRestore = (row: SheetRow) => {
     if (busyRowId) {
       return;
     }
-    if (!isConfirmed(`Restore ${displayRowLabel(row, columns)} to the active sheet?`)) {
+    setError(null);
+    setPendingAction({ kind: 'restore', row });
+  };
+
+  const askPermanentDelete = (row: SheetRow) => {
+    if (busyRowId) {
       return;
     }
-    if (!repository.restoreRow) {
+    setError(null);
+    setPendingAction({ kind: 'permanent-delete', row });
+  };
+
+  const confirmPendingAction = async () => {
+    const pending = pendingAction;
+    if (!pending || busyRowId) {
+      return;
+    }
+    const label = displayRowLabel(pending.row, columns);
+    if (pending.kind === 'restore' && !repository.restoreRow) {
       setError('This repository does not support restoring rows.');
       return;
     }
-    setBusyRowId(row.id);
-    setStatus(null);
-    try {
-      await repository.restoreRow(row.id, actorOptions(actor));
-      await refresh();
-      onRepositoryChanged?.();
-      setStatus(`Restored ${displayRowLabel(row, columns)}.`);
-    } catch (caught) {
-      // The row must remain visible in the Recycle Bin until the restore has
-      // actually succeeded.
-      setError(caught instanceof Error ? caught.message : 'Unable to restore the row.');
-    } finally {
-      setBusyRowId(null);
-    }
-  };
-
-  const permanentDelete = async (row: SheetRow) => {
-    if (busyRowId) {
-      return;
-    }
-    if (!isConfirmed(`Permanently delete ${displayRowLabel(row, columns)}? This cannot be undone.`)) {
-      return;
-    }
-    if (!repository.permanentDeleteRow) {
+    if (pending.kind === 'permanent-delete' && !repository.permanentDeleteRow) {
       setError('This repository does not support permanent deletion.');
       return;
     }
-    setBusyRowId(row.id);
+    setBusyRowId(pending.row.id);
     setStatus(null);
     try {
-      await repository.permanentDeleteRow(row.id, actorOptions(actor));
+      if (pending.kind === 'restore') {
+        await repository.restoreRow!(pending.row.id, actorOptions(actor));
+        setStatus(`Restored ${label}.`);
+      } else {
+        await repository.permanentDeleteRow!(pending.row.id, actorOptions(actor));
+        setStatus(`Permanently deleted ${label}.`);
+      }
       await refresh();
       onRepositoryChanged?.();
-      setStatus(`Permanently deleted ${displayRowLabel(row, columns)}.`);
+      setPendingAction(null);
     } catch (caught) {
-      // Never hide the record when deletion failed; surface the real error.
-      setError(caught instanceof Error ? caught.message : 'Unable to permanently delete the row.');
+      // The row must remain visible (and the dialog open) until the operation
+      // has actually succeeded.
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : pending.kind === 'restore'
+            ? 'Unable to restore the row.'
+            : 'Unable to permanently delete the row.',
+      );
     } finally {
       setBusyRowId(null);
     }
@@ -765,9 +781,34 @@ export function AdminRecycleBinPanel({
         role={role}
         rows={rows}
         columns={columns}
-        onRestore={restore}
-        onPermanentDelete={permanentDelete}
+        onRestore={askRestore}
+        onPermanentDelete={askPermanentDelete}
       />
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.kind === 'restore' ? 'Restore this record?' : 'Permanently delete this record?'}
+        confirmLabel={pendingAction?.kind === 'restore' ? 'Restore' : 'Delete permanently'}
+        destructive={pendingAction?.kind !== 'restore'}
+        busy={busyRowId !== null}
+        error={error}
+        onConfirm={confirmPendingAction}
+        onCancel={() => {
+          if (busyRowId === null) {
+            setPendingAction(null);
+          }
+        }}
+      >
+        {pendingAction ? (
+          pendingAction.kind === 'restore' ? (
+            <p>{displayRowLabel(pendingAction.row, columns)} returns to the active sheet.</p>
+          ) : (
+            <p>
+              {displayRowLabel(pendingAction.row, columns)} is removed for good.
+              This cannot be undone.
+            </p>
+          )
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -776,13 +817,25 @@ export function AdminAuditLogPanel({
   repository: providedRepository,
   role,
   profiles = [],
-}: AdminToolsProps & { profiles?: readonly AuditProfile[] }) {
+  actorLabel,
+  remoteClient,
+}: AdminToolsProps & {
+  profiles?: readonly AuditProfile[];
+  /** Signed-in administrator name used in the clear-audit entry (R2-10). */
+  actorLabel?: string | null;
+  /** Supabase client used for the admin-only `clear_audit_log` RPC (R2-10). */
+  remoteClient?: AuditClearRemoteClient | null;
+}) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
     [providedRepository],
   );
   const [entries, setEntries] = useState<SheetAuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [confirmation, setConfirmation] = useState('');
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -813,10 +866,103 @@ export function AdminAuditLogPanel({
     return null;
   }
 
+  const clearAuditLog = async () => {
+    if (!isAuditClearConfirmation(confirmation) || clearing) {
+      return;
+    }
+    const message = auditClearMessage((actorLabel ?? '').trim() || 'Admin');
+    setClearing(true);
+    setError(null);
+    setStatus(null);
+    try {
+      // Remote first: if the server refuses (Office, offline), nothing is
+      // removed locally and the mirror keeps matching the server.
+      await clearRemoteAuditLog(remoteClient ?? null, message);
+      if (repository.clearAuditLog) {
+        setEntries(await repository.clearAuditLog(message));
+      } else {
+        setEntries([]);
+      }
+      setStatus(message);
+      setConfirmingClear(false);
+      setConfirmation('');
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to clear the audit log.');
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div className="admin-panel">
       {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
+      {status ? <p className="admin-inline-message" role="status">{status}</p> : null}
+      <div className="admin-panel__toolbar">
+        <button
+          className="button button--danger"
+          type="button"
+          onClick={() => {
+            setConfirmation('');
+            setConfirmingClear(true);
+          }}
+        >
+          Clear audit log
+        </button>
+      </div>
       <AuditLogPage role={role} entries={entries} profiles={profiles} />
+      {confirmingClear ? (
+        <div
+          className="admin-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !clearing) {
+              setConfirmingClear(false);
+            }
+          }}
+        >
+          <div className="admin-dialog" role="dialog" aria-modal="true" aria-label="Clear audit log">
+            <h2>Clear the audit log?</h2>
+            <p>
+              Every audit entry is permanently removed for every PC. One entry
+              recording this clear stays in the log. This cannot be undone.
+            </p>
+            <p className="admin-dialog__hint">
+              Type <strong>{AUDIT_CLEAR_CONFIRMATION}</strong> to confirm.
+            </p>
+            <input
+              aria-label="Type DELETE to confirm"
+              autoFocus
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setConfirmingClear(false);
+                }
+                if (event.key === 'Enter') {
+                  void clearAuditLog();
+                }
+              }}
+            />
+            <div className="admin-dialog__actions">
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={clearing}
+                onClick={() => setConfirmingClear(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={clearing || !isAuditClearConfirmation(confirmation)}
+                onClick={() => void clearAuditLog()}
+              >
+                {clearing ? 'Clearing…' : 'Clear audit log'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

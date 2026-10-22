@@ -27,6 +27,7 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   deleteColumn: 'dks:local:delete-column',
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
+  clearAuditLog: 'dks:local:clear-audit-log',
   listNotifications: 'dks:local:list-notifications',
   addNotification: 'dks:local:add-notification',
   updateNotification: 'dks:local:update-notification',
@@ -70,6 +71,7 @@ export interface LocalIpcStore {
   getSyncStatus: () => SyncState;
   setSyncStatus: (state: SyncStatus | (Partial<SyncState> & Pick<SyncState, 'status'>)) => SyncState;
   listAudit: (limit?: number) => readonly AuditRecord[];
+  clearAuditLog?: (input: { message: string; actor?: string | null }) => AuditRecord;
   listNotifications: (unreadOnly?: boolean) => readonly NotificationRecord[];
   addNotification?: (input: NotificationInput) => NotificationRecord;
   updateNotification?: (id: number | string, patch: NotificationPatch) => NotificationRecord | null;
@@ -631,6 +633,20 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error(`audit limit must be an integer between 1 and ${MAX_AUDIT_LIMIT}`);
       }
       return cloneSerializable(store.listAudit(limit));
+    },
+
+    [LOCAL_IPC_CHANNELS.clearAuditLog]: (payload) => {
+      const input = asRecord(payload, 'audit clear input');
+      if (input.role !== 'admin') {
+        throw new Error('Only administrators may clear the audit log');
+      }
+      const message = requiredString(input.message, 'audit clear message');
+      const clear = store.clearAuditLog;
+      if (!clear) {
+        throw new Error('Audit log clearing is unavailable in this local store');
+      }
+      const actor = typeof input.actor === 'string' && input.actor.trim() ? input.actor.trim() : null;
+      return cloneSerializable(clear({ message, actor }));
     },
 
     [LOCAL_IPC_CHANNELS.listNotifications]: (payload) => {

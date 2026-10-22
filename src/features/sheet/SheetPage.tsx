@@ -53,8 +53,14 @@ import { GroupHeaderCell } from './group-header';
 import { groupGridRows, groupableColumns, isGroupHeaderRow } from './grouping';
 import { createInMemorySheetRepository, type SheetRepository } from './repository';
 import { RenewModal } from './renew-modal';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import { RowActions, type SheetGridRendererData } from './row-actions';
 import { buildRowContextMenuItems } from './row-context-menu';
+import {
+  OVERFLOW_QUICK_FILTER_IDS,
+  PRIMARY_QUICK_FILTER_IDS,
+  useCollapsedQuickFilters,
+} from './toolbar-layout';
 import type { SheetRow } from './types';
 import './sheet.css';
 
@@ -134,12 +140,23 @@ export function SheetPage({
   const [groupByColumnId, setGroupByColumnId] = useState('');
   const [wizardOpen, setWizardOpen] = useState(false);
   const [renewRow, setRenewRow] = useState<SheetRow | null>(null);
+  // SET-11: row / column deletion confirms in-app instead of window.confirm.
+  const [pendingDelete, setPendingDelete] = useState<
+    | { kind: 'row'; row: SheetRow }
+    | { kind: 'column'; column: ColumnDefinition; populated: number }
+    | null
+  >(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [columnMenu, setColumnMenu] = useState<{ column: ColumnDefinition; x: number; y: number } | null>(null);
   const [renameColumn, setRenameColumn] = useState<ColumnDefinition | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
   // AG Grid needs real layout measurements; jsdom uses the deterministic table below.
   const isTestEnvironment = import.meta.env.MODE === 'test';
+  // FIXES_UI §5.2 "Smaller windows": the last two chips move into a menu.
+  const collapsedFilters = useCollapsedQuickFilters();
+  const moreFiltersRef = useRef<HTMLDivElement>(null);
 
   // `quiet` refreshes replace the data without unmounting the page: the
   // loading overlay used to destroy open editors, dialogs and focused inputs
@@ -234,22 +251,33 @@ export function SheetPage({
     }
   }, [repository, refresh, activeColumns]);
 
-  const handleDelete = useCallback(async (row: SheetRow) => {
-    const confirmed = typeof window === 'undefined'
-      ? true
-      : window.confirm(`Move ${displayLabel(row, activeColumns)} to the recycle bin?`);
-    if (!confirmed) {
+  const handleDelete = useCallback((row: SheetRow) => {
+    setError(null);
+    setPendingDelete({ kind: 'row', row });
+  }, []);
+
+  const confirmDelete = useCallback(async () => {
+    const pending = pendingDelete;
+    if (!pending || deleteBusy) {
       return;
     }
-
+    setDeleteBusy(true);
     try {
-      await repository.softDeleteRow(row.id);
+      if (pending.kind === 'row') {
+        await repository.softDeleteRow(pending.row.id);
+        setStatusMessage(`Moved ${displayLabel(pending.row, activeColumns)} to the recycle bin.`);
+      } else {
+        await repository.softDeleteColumn(pending.column.id, role ?? '');
+        setStatusMessage(`Removed ${pending.column.name}.`);
+      }
       await refresh({ quiet: true });
-      setStatusMessage(`Moved ${displayLabel(row, activeColumns)} to the recycle bin.`);
+      setPendingDelete(null);
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to delete the row.');
+      setError(caught instanceof Error ? caught.message : 'Unable to delete.');
+    } finally {
+      setDeleteBusy(false);
     }
-  }, [repository, refresh, activeColumns]);
+  }, [pendingDelete, deleteBusy, repository, role, refresh, activeColumns]);
 
   const handleRenew = useCallback((row: SheetRow) => {
     setRenewRow(row);
@@ -345,19 +373,12 @@ export function SheetPage({
         : 'Only an admin can delete a column that contains data.');
       return;
     }
-    const confirmMessage = `Delete column "${column.name}"?`;
-    const confirmed = typeof window === 'undefined' ? true : window.confirm(confirmMessage);
-    if (!confirmed) {
-      return;
-    }
-    try {
-      await repository.softDeleteColumn(column.id, role ?? '');
-      await refresh({ quiet: true });
-      setStatusMessage(`Removed ${column.name}.`);
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to remove the column.');
-    }
-  }, [repository, refresh, role, rows]);
+    // SET-11: the dialog states how many records still hold a value in this
+    // column, so an admin deleting populated data sees the count first.
+    const populated = rows.filter((row) => isMeaningfulDraftValue(dataValue(row, column))).length;
+    setError(null);
+    setPendingDelete({ kind: 'column', column, populated });
+  }, [role, rows]);
 
   const handleSetPrimary = useCallback(async (column: ColumnDefinition) => {
     try {
@@ -414,6 +435,28 @@ export function SheetPage({
   }, [columnMenu, role, primaryExpiry?.id, openRename, handleDuplicateColumn, handleDeleteColumn, handleSetPrimary]);
 
   // Close the column menu on Escape / outside click.
+  useEffect(() => {
+    if (!moreFiltersOpen) {
+      return undefined;
+    }
+    const onPointerDown = (event: MouseEvent) => {
+      if (moreFiltersRef.current && !moreFiltersRef.current.contains(event.target as Node)) {
+        setMoreFiltersOpen(false);
+      }
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setMoreFiltersOpen(false);
+      }
+    };
+    window.addEventListener('mousedown', onPointerDown);
+    window.addEventListener('keydown', onKeyDown);
+    return () => {
+      window.removeEventListener('mousedown', onPointerDown);
+      window.removeEventListener('keydown', onKeyDown);
+    };
+  }, [moreFiltersOpen]);
+
   useEffect(() => {
     if (!columnMenu) {
       return undefined;
@@ -531,18 +574,59 @@ export function SheetPage({
                 </select>
               </label>
               <div className="sheet-quick-filters" role="group" aria-label="Quick filters">
-                {QUICK_FILTERS.filter((filter) => filter.id !== 'all').map((filter) => (
-                  <button
-                    key={filter.id}
-                    className={`sheet-filter-chip${quickFilter === filter.id ? ' sheet-filter-chip--active' : ''}`}
-                    type="button"
-                    aria-pressed={quickFilter === filter.id}
-                    title={filter.label === 'Today' ? 'Days Left = 0' : `Days Left 0–${filter.id}`}
-                    onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
-                  >
-                    {filter.label}
-                  </button>
-                ))}
+                {QUICK_FILTERS
+                  .filter((filter) => filter.id !== 'all')
+                  .filter((filter) => (
+                    collapsedFilters
+                      ? (PRIMARY_QUICK_FILTER_IDS as readonly string[]).includes(filter.id)
+                      : true
+                  ))
+                  .map((filter) => (
+                    <button
+                      key={filter.id}
+                      className={`sheet-filter-chip${quickFilter === filter.id ? ' sheet-filter-chip--active' : ''}`}
+                      type="button"
+                      aria-pressed={quickFilter === filter.id}
+                      title={filter.label === 'Today' ? 'Days Left = 0' : `Days Left 0–${filter.id}`}
+                      onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
+                    >
+                      {filter.label}
+                    </button>
+                  ))}
+                {collapsedFilters ? (
+                  <div className="sheet-more-filters" ref={moreFiltersRef}>
+                    <button
+                      className={`sheet-filter-chip sheet-more-filters__button${(OVERFLOW_QUICK_FILTER_IDS as readonly string[]).includes(quickFilter) ? ' sheet-filter-chip--active' : ''}`}
+                      type="button"
+                      aria-haspopup="menu"
+                      aria-expanded={moreFiltersOpen}
+                      onClick={() => setMoreFiltersOpen((open) => !open)}
+                    >
+                      More filters <span aria-hidden="true">▾</span>
+                    </button>
+                    {moreFiltersOpen ? (
+                      <div className="sheet-more-filters__menu" role="menu" aria-label="More filters">
+                        {QUICK_FILTERS
+                          .filter((filter) => (OVERFLOW_QUICK_FILTER_IDS as readonly string[]).includes(filter.id))
+                          .map((filter) => (
+                            <button
+                              key={filter.id}
+                              className="sheet-more-filters__item"
+                              type="button"
+                              role="menuitemcheckbox"
+                              aria-checked={quickFilter === filter.id}
+                              onClick={() => {
+                                setQuickFilter(quickFilter === filter.id ? 'all' : filter.id);
+                                setMoreFiltersOpen(false);
+                              }}
+                            >
+                              {filter.label}
+                            </button>
+                          ))}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
               </div>
               {groupable.length > 0 ? (
                 <label className="sheet-group-by">
@@ -764,6 +848,39 @@ export function SheetPage({
         </section>
       )}
 
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        title={
+          pendingDelete?.kind === 'column'
+            ? `Delete column "${pendingDelete.column.name}"?`
+            : 'Move this record to the Recycle Bin?'
+        }
+        confirmLabel={pendingDelete?.kind === 'column' ? 'Delete column' : 'Move to Recycle Bin'}
+        destructive
+        busy={deleteBusy}
+        error={error}
+        onConfirm={confirmDelete}
+        onCancel={() => {
+          if (!deleteBusy) {
+            setPendingDelete(null);
+          }
+        }}
+      >
+        {pendingDelete?.kind === 'column' ? (
+          <p>
+            The column is removed from the sheet. Existing values in this column
+            are not lost in the local database, but they stop being shown.
+            {pendingDelete.populated > 0
+              ? ` ${pendingDelete.populated} record${pendingDelete.populated === 1 ? '' : 's'} currently hold a value in it.`
+              : ' It is currently empty.'}
+          </p>
+        ) : pendingDelete?.kind === 'row' ? (
+          <p>
+            {displayLabel(pendingDelete.row, activeColumns)} can be restored from
+            the Recycle Bin by an administrator.
+          </p>
+        ) : null}
+      </ConfirmDialog>
       {wizardOpen ? (
         <ColumnWizard
           existingColumns={columns}

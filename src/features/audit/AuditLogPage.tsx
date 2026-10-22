@@ -34,6 +34,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   delete_column: 'Deleted column',
   record_conflict: 'Recorded conflict',
   merge_conflict: 'Merged conflict',
+  clear_audit: 'Cleared the audit log',
 };
 
 /** Friendly action name (S3) — raw codes only for actions we have no name for. */

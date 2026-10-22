@@ -730,6 +730,7 @@ export function App({
       onSettingsChange={persistWorkspaceSettings}
       settingsError={settingsLoadError}
       auditProfiles={auditProfiles}
+      auditRemoteClient={authService.authClient as unknown as { rpc?: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> } | null}
       repositoryRevision={repositoryRevision}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}

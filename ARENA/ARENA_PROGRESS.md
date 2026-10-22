@@ -562,3 +562,84 @@ says otherwise; nothing is marked CONFIRMED here.
 **Batch B+C gate:** 51 test files / 276 tests passed; typecheck clean; build ✓.
 (R2-12 re-verified after R2-01: the outbox now drains and the pill only reads
 "Saved to cloud" with zero pending items.)
+
+## 11. Batch D — About, audit clear, leftovers (R2-06, R2-10, R2-13..15)
+
+### 11.1 R2-06 — About card
+
+- Settings → About & updates now shows `DKS`, `Version <real version>`,
+  `Made by Tacenta` and a GitHub icon button.
+- The version comes from the running app (`app.getVersion()` through the
+  preload bridge), then the version baked into the bundle from `package.json`
+  at build time (`__DKS_VERSION__` define in `vite.config.ts` /
+  `vitest.config.ts`), then the explicit prop. No "Unavailable" placeholder.
+- The GitHub link opens `https://github.com/tacenta2k` in the system browser:
+  renderer → `window.dks.openExternal` → `ipcMain` → `shell.openExternal`.
+  The main process only accepts `https:` URLs whose host is allowlisted
+  (`github.com`), so the renderer can never ask the OS to open an arbitrary
+  URL. A browser/tab fallback keeps the control usable outside Electron.
+- `Check for updates` and its states are unchanged.
+
+### 11.2 R2-10 — Clear audit log (admin only)
+
+- The Audit Log panel shows a single `Clear audit log` button (Admin only;
+  Office never renders the panel at all).
+- It opens a dialog that requires typing `DELETE`, explains that every entry
+  is removed for every PC and that one entry recording the clear stays.
+- Order of operations matters: the remote `clear_audit_log()` RPC runs first,
+  so a failure (offline, Office caller, RPC missing because the SQL has not
+  been run yet) leaves the local mirror untouched and the error visible.
+- On success the local mirror is cleared and exactly one entry is written:
+  `Audit log cleared by Admin on DD/MM/YYYY HH:mm`, with action
+  `clear_audit` → "Cleared the audit log".
+- Server side: `public.clear_audit_log(p_message text)` is `security definer`,
+  raises `42501` unless `auth.uid()` is an administrator, deletes every row and
+  inserts the single trace entry. There is deliberately **no** DELETE policy
+  on `public.audit_log`, so a direct API call cannot empty it. Shipped in both
+  `ARENA/sql/fix-entries-rls.sql` (section 7) and `supabase/schema.sql`.
+- Local mirror: new `clear-audit-log` IPC channel (admin role re-checked in the
+  main process + preload validation), `clearAuditLog()` on the SQLite store,
+  the Electron repository, the in-memory repository and the repository
+  interface.
+- Tests: `tests/audit-clear.test.tsx` (9) — message format, DELETE
+  confirmation, RPC failure handling, SQL shipped in both files (definer,
+  admin check, grant to authenticated only, no DELETE policy), local store
+  leaves exactly one entry, remote-before-local ordering, failure keeps the
+  mirror, Office never sees the control.
+
+### 11.3 R2-13 — `npm run dev` shows the window (SYNC-09)
+
+- Root cause: `shouldStartHidden()` also returned true whenever Windows
+  reported `openAtLogin` (the user's preference, which DKS sets on first run)
+  and autostart was configured `openAsHidden: true` — so a normal launch or a
+  dev launch came up tray-only with no visible window.
+- Now only an explicit `--hidden` / `--autostart` / `--startup` flag may start
+  hidden; autostart opens the window normally (minimise-to-tray stays a
+  deliberate user action).
+- Extracted to `electron/main/startup.ts` and unit-tested in
+  `tests/startup.test.ts`.
+
+### 11.4 R2-14 — in-app confirmation dialogs (SET-11)
+
+- New shared `src/features/ui/ConfirmDialog.tsx`: red destructive button,
+  Cancel as the safe default, Esc and backdrop close, no duplicate submit while
+  the action runs, failure message stays visible, optional typed confirmation.
+- Wired into the Recycle Bin (restore + permanent delete, replacing
+  `window.confirm`) and the Visa Sheet (row → Recycle Bin, column delete).
+- The column dialog states how many records currently hold a value, which is
+  the count SET-11 asks for before an admin deletes populated data.
+- Tests: `tests/confirm-dialog.test.tsx` (6); `tests/admin-features.test.tsx`
+  and `tests/row-actions.test.tsx` updated from `window.confirm` to the dialog.
+
+### 11.5 R2-15 — responsive toolbar (`More filters ▾`)
+
+- FIXES_UI §5.2 "Smaller windows": the last two date chips (≤60d, ≤90d) move
+  into a `More filters ▾` menu below 1080px; search is the first control to
+  shrink. Nothing is duplicated in the DOM (hidden-but-focusable copies would
+  be an accessibility bug).
+- `src/features/sheet/toolbar-layout.ts` holds the pure threshold helpers;
+  tests cover wide and narrow windows (`tests/toolbar-responsive.test.tsx`).
+- `tests/setup.ts` now reports a 1440px window (jsdom's 1024px default is
+  narrower than DKS ever runs).
+
+**Batch D gate:** 55 test files / 298 tests passed; typecheck clean; build ✓.

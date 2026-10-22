@@ -994,6 +994,49 @@ create policy audit_log_insert_authenticated
 on public.audit_log for insert to authenticated
 with check (actor = auth.uid() or actor is null);
 
+-- R2-10: clearing the audit log is an administrator-only operation.  There is
+-- deliberately NO delete policy on public.audit_log; the only path is this
+-- SECURITY DEFINER function, which re-checks the role server-side and leaves
+-- exactly one entry describing the clear.
+drop policy if exists audit_log_delete_admin on public.audit_log;
+drop policy if exists audit_log_delete_authenticated on public.audit_log;
+
+create or replace function public.clear_audit_log(p_message text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_message text;
+begin
+  if auth.uid() is null or not public.is_admin() then
+    raise exception 'Only administrators may clear the audit log'
+      using errcode = '42501';
+  end if;
+
+  v_message := coalesce(
+    nullif(btrim(p_message), ''),
+    'Audit log cleared by Admin on '
+      || to_char(now() at time zone 'UTC', 'DD/MM/YYYY HH24:MI')
+  );
+
+  delete from public.audit_log;
+
+  insert into public.audit_log (actor, entry_id, action, snapshot, details)
+  values (
+    auth.uid(),
+    null,
+    'clear_audit',
+    '{}'::jsonb,
+    jsonb_build_object('message', v_message)
+  );
+end;
+$$;
+
+revoke all on function public.clear_audit_log(text) from public;
+grant execute on function public.clear_audit_log(text) to authenticated;
+
 drop policy if exists admin_notifications_select_admin on public.admin_notifications;
 create policy admin_notifications_select_admin
 on public.admin_notifications for select to authenticated

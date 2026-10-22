@@ -455,6 +455,30 @@ export class ElectronSheetRepository implements SheetRepository {
     );
   }
 
+  async clearAuditLog(message: string, options: SheetAuditOptions = {}): Promise<SheetAuditEntry[]> {
+    await this.use(
+      'clearAuditLog',
+      async (local) => {
+        if (!local.clearAuditLog) {
+          throw new Error('Audit log clearing is unavailable in this local store');
+        }
+        await local.clearAuditLog({
+          message,
+          role: String(this.role ?? 'admin'),
+          actor: options.actorId ?? options.actor ?? null,
+        });
+        return undefined;
+      },
+      async () => {
+        if (this.fallback.clearAuditLog) {
+          await this.fallback.clearAuditLog(message);
+        }
+        return undefined;
+      },
+    );
+    return this.getAuditHistory();
+  }
+
   async createRows(
     records: readonly SheetImportRecord[],
     options: SheetAuditOptions = {},

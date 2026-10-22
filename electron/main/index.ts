@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  shell,
 } from 'electron';
 import type { IpcMainEvent } from 'electron';
 import * as path from 'node:path';
@@ -23,6 +24,7 @@ import {
   type UpdaterScheduler,
 } from './updater';
 import { createTray, destroyTray, type TrayActions } from './tray';
+import { shouldStartHidden } from './startup';
 import type { Tray } from 'electron';
 import { createSqliteStore, type SqliteStore } from './sqlite';
 import {
@@ -66,6 +68,22 @@ export const MINIMIZE_TO_TRAY_CHANNEL = 'dks:minimize-to-tray' as const;
 export const QUIT_CHANNEL = 'dks:quit' as const;
 export const LOGOUT_REQUESTED_CHANNEL = 'dks:logout-requested' as const;
 export const NAVIGATION_REQUESTED_CHANNEL = 'dks:navigation-requested' as const;
+export const OPEN_EXTERNAL_CHANNEL = 'dks:open-external' as const;
+
+/** Only these hosts may be opened in the system browser from the renderer. */
+const ALLOWED_EXTERNAL_HOSTS = new Set(['github.com', 'www.github.com']);
+
+export function isAllowedExternalUrl(url: unknown): url is string {
+  if (typeof url !== 'string') {
+    return false;
+  }
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === 'https:' && ALLOWED_EXTERNAL_HOSTS.has(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
 
 export type DksNavigationTarget = 'dashboard' | 'sheet';
 
@@ -159,43 +177,17 @@ function loadRenderer(window: BrowserWindow, options: CreateMainWindowOptions): 
   }
 }
 
-export function shouldStartHidden(argv: readonly string[] = process.argv): boolean {
-  if (argv.some((argument) => ['--hidden', '--autostart', '--startup'].includes(argument))) {
-    return true;
-  }
-
-  try {
-    const loginSettings = app.getLoginItemSettings();
-    if (loginSettings.wasOpenedAtLogin === true || loginSettings.wasOpenedAsHidden === true) {
-      return true;
-    }
-
-    // Electron supplies the `wasOpened*` flags on supported platforms. The
-    // fallback keeps lightweight mocks and older Electron builds useful.
-    return (
-      typeof loginSettings.wasOpenedAtLogin !== 'boolean'
-      && typeof loginSettings.wasOpenedAsHidden !== 'boolean'
-      && loginSettings.openAtLogin === true
-    );
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Configure the platform login item without making startup depend on it.
- * Linux and locked-down desktop policies can reject this call; in that case
- * DKS simply continues without auto-launch.
- */
-export function configureAutoLaunch(enabled = true): AutoLaunchStatus {
+function configureAutoLaunch(enabled = true): AutoLaunchStatus {
   try {
     if (typeof app.setLoginItemSettings !== 'function') {
       return { supported: false, enabled: false };
     }
 
+    // SYNC-09: autostart opens the window; a hidden/tray-only startup made the
+    // app look like it never launched.
     app.setLoginItemSettings({
       openAtLogin: enabled,
-      openAsHidden: enabled,
+      openAsHidden: false,
     });
 
     return { supported: true, enabled };
@@ -212,7 +204,7 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
   // `startHidden` (tray autostart / --hidden) must keep the window invisible;
   // a normal development or desktop launch must show and focus it.  The show
   // flag is therefore the negation of the hidden request.
-  const startHidden = options.startHidden ?? shouldStartHidden();
+  const startHidden = options.startHidden ?? shouldStartHidden(process.argv);
   log.info(`[dks] createMainWindow (hidden=${String(startHidden)})`);
 
   const window = new BrowserWindow({
@@ -395,6 +387,19 @@ function registerIpcHandlers(): void {
   ipcMain.handle(UPDATER_RESTART_CHANNEL, async () => (
     updaterService?.restartToUpdate() ?? Promise.resolve(false)
   ));
+  ipcMain.handle(OPEN_EXTERNAL_CHANNEL, async (_event, url: unknown) => {
+    if (!isAllowedExternalUrl(url)) {
+      log.warn('[dks] blocked openExternal request', url);
+      return false;
+    }
+    try {
+      await shell.openExternal(url);
+      return true;
+    } catch (error) {
+      log.warn('[dks] openExternal failed', error);
+      return false;
+    }
+  });
 }
 
 function createDksTray(): Tray | null {
@@ -448,7 +453,7 @@ export async function startMainProcess(): Promise<boolean> {
     return false;
   }
 
-  const startHidden = shouldStartHidden();
+  const startHidden = shouldStartHidden(process.argv);
   configureAutoLaunch(true);
   log.info(`[dks] starting main process (version=${getAppVersion()}, hidden=${String(startHidden)}, packaged=${String(app.isPackaged)})`);
 

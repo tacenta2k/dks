@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
+import { Github } from 'lucide-react';
 
 import {
   DEFAULT_STATUS_COLORS,
@@ -10,6 +11,11 @@ import {
 } from '../../lib/date';
 import { getPrimaryExpiryColumn, type ColumnDefinition } from '../../lib/columns';
 import { can } from '../../lib/permissions';
+import {
+  TACENTA_GITHUB_URL,
+  openExternalUrl,
+  resolveAppVersion,
+} from '../../lib/app-info';
 import type { ThemePreference } from '../../lib/types';
 import type { Role } from '../auth/auth-types';
 import type { SheetRepository } from '../sheet/repository';
@@ -204,9 +210,7 @@ function resolveSettings(
 }
 
 function defaultVersion(): string {
-  return typeof window !== 'undefined' && window.dks?.appVersion
-    ? window.dks.appVersion
-    : 'Unavailable';
+  return resolveAppVersion();
 }
 
 export function SettingsPage({
@@ -571,10 +575,27 @@ export function SettingsPage({
                 </div>
               </div>
               <div className="settings-maintenance__grid">
-                <div className="settings-maintenance__card">
-                  <div>
-                    <strong>Application update</strong>
-                    <p aria-label={`Version ${resolvedVersion}`}>Version {resolvedVersion}</p>
+                <div className="settings-maintenance__card settings-about">
+                  <div className="settings-about__identity">
+                    <strong className="settings-about__name">DKS</strong>
+                    <p className="settings-about__version" aria-label={`Version ${resolvedVersion}`}>
+                      Version {resolvedVersion}
+                    </p>
+                    <p className="settings-muted settings-about__author">
+                      Made by Tacenta
+                      <a
+                        className="settings-about__link"
+                        href={TACENTA_GITHUB_URL}
+                        aria-label="Tacenta on GitHub"
+                        title="Tacenta on GitHub"
+                        onClick={(event) => {
+                          event.preventDefault();
+                          void openExternalUrl(TACENTA_GITHUB_URL);
+                        }}
+                      >
+                        <Github aria-hidden="true" size={16} />
+                      </a>
+                    </p>
                     <p className="settings-muted">Updates are checked without changing local records.</p>
                   </div>
                   <button className="button" type="button" onClick={() => invokeAction(updateHandler, 'Update check requested.', 'Update check could not be started.')}>Check for updates</button>

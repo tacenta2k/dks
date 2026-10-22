@@ -147,6 +147,9 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Restore Ada Lovelace/i }));
+    // SET-11: an in-app confirmation dialog (native window.confirm is gone).
+    const restoreDialog = await screen.findByRole('dialog', { name: 'Restore this record?' });
+    fireEvent.click(within(restoreDialog).getByRole('button', { name: 'Restore' }));
     await waitFor(async () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)?.deleted).toBe(false);
     });
@@ -154,10 +157,11 @@ describe('admin renderer integration', () => {
     await repository.softDeleteRow(row.id);
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     fireEvent.click(await screen.findByRole('button', { name: /Permanently delete Ada Lovelace/i }));
+    const deleteDialog = await screen.findByRole('dialog', { name: 'Permanently delete this record?' });
+    fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete permanently' }));
     await waitFor(async () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)).toBeUndefined();
     });
-    expect(window.confirm).toHaveBeenCalled();
   }, 15_000);
 
   it('lists repository audit history for administrators', async () => {

@@ -201,6 +201,7 @@ export interface DksLocalApi {
     options?: Record<string, unknown>;
   }) => Promise<DksLocalRow[]>;
   listAudit: (input?: { limit?: number }) => Promise<DksLocalAuditRecord[]>;
+  clearAuditLog: (input: { message: string; role: string; actor?: string | null }) => Promise<DksLocalAuditRecord>;
   listNotifications: (input?: { unreadOnly?: boolean }) => Promise<DksLocalNotificationRecord[]>;
   addNotification: (input: DksLocalNotificationInput) => Promise<DksLocalNotificationRecord>;
   updateNotification: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
@@ -231,6 +232,7 @@ export interface DksPreloadApi {
     restartToUpdate: () => Promise<boolean>;
     onStatus: (listener: (state: UpdateState) => void) => () => void;
   };
+  readonly openExternal: (url: string) => Promise<boolean>;
   readonly minimizeToTray: () => void;
   readonly quit: () => void;
   readonly onLogoutRequested: (listener: () => void) => () => void;
@@ -242,6 +244,7 @@ export interface DksPreloadApi {
 const APP_VERSION_CHANNEL = 'dks:app-version';
 const MINIMIZE_TO_TRAY_CHANNEL = 'dks:minimize-to-tray';
 const QUIT_CHANNEL = 'dks:quit';
+const OPEN_EXTERNAL_CHANNEL = 'dks:open-external';
 const LOGOUT_REQUESTED_CHANNEL = 'dks:logout-requested';
 const NAVIGATION_REQUESTED_CHANNEL = 'dks:navigation-requested';
 const NOTIFICATION_SHOW_CHANNEL = 'dks:notifications:show';
@@ -262,6 +265,7 @@ const LOCAL_CHANNELS = {
   deleteColumn: 'dks:local:delete-column',
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
+  clearAuditLog: 'dks:local:clear-audit-log',
   listNotifications: 'dks:local:list-notifications',
   addNotification: 'dks:local:add-notification',
   updateNotification: 'dks:local:update-notification',
@@ -554,6 +558,15 @@ const localApi: DksLocalApi = Object.freeze({
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => invokeLocal<DksLocalColumn | null>(LOCAL_CHANNELS.deleteColumn, input, validateDeleteColumn),
   importRecords: (input: { records: readonly DksLocalImportRecord[]; options?: Record<string, unknown> }) => invokeLocal<DksLocalRow[]>(LOCAL_CHANNELS.importRecords, input, validateImport),
   listAudit: (input: { limit?: number } = {}) => invokeLocal<DksLocalAuditRecord[]>(LOCAL_CHANNELS.listAudit, input, validateListAudit),
+  clearAuditLog: (input: { message: string; role: string; actor?: string | null }) => invokeLocal<DksLocalAuditRecord>(LOCAL_CHANNELS.clearAuditLog, input, (payload) => {
+    const record = payload as Record<string, unknown>;
+    if (!record || typeof record.message !== 'string') {
+      throw new Error('Audit clear message must be a string');
+    }
+    if (typeof record.role !== 'string') {
+      throw new Error('Audit clear role must be a string');
+    }
+  }),
   listNotifications: (input: { unreadOnly?: boolean } = {}) => invokeLocal<DksLocalNotificationRecord[]>(LOCAL_CHANNELS.listNotifications, input, validateListNotifications),
   addNotification: (input: DksLocalNotificationInput) => invokeLocal<DksLocalNotificationRecord>(LOCAL_CHANNELS.addNotification, input, validateAddNotification),
   updateNotification: (input: DksLocalNotificationUpdate) => invokeLocal<DksLocalNotificationRecord | null>(LOCAL_CHANNELS.updateNotification, input, validateUpdateNotification),
@@ -738,6 +751,13 @@ const dksApi: DksPreloadApi = Object.freeze({
   local: localApi,
   notifications: notificationApi,
   updater: updaterApi,
+  openExternal: async (url: string): Promise<boolean> => {
+    try {
+      return (await ipcRenderer.invoke(OPEN_EXTERNAL_CHANNEL, url)) === true;
+    } catch {
+      return false;
+    }
+  },
   minimizeToTray: () => {
     try {
       ipcRenderer.send(MINIMIZE_TO_TRAY_CHANNEL);

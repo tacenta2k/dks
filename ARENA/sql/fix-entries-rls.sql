@@ -1,5 +1,5 @@
 -- ============================================================================
--- DKS — entries row-level security fix (R2-01)
+-- DKS — entries row-level security fix (R2-01) + audit-log clear (R2-10)
 -- ============================================================================
 --
 -- RUN THIS FILE IN THE SUPABASE SQL EDITOR (Dashboard → SQL Editor → Run).
@@ -171,6 +171,54 @@ create policy entries_delete_admin
 on public.entries for delete to authenticated
 using (public.is_admin());
 
+-- ---------------------------------------------------------------------------
+-- 7. AUDIT LOG — administrator-only clear (R2-10)
+-- ---------------------------------------------------------------------------
+-- The Audit Log page has a "Clear audit log" action.  It must never be a
+-- client-side DELETE: there is no DELETE policy on public.audit_log for
+-- anyone, so an Office account cannot empty the log even by calling the HTTP
+-- API directly.  The only path is this SECURITY DEFINER function, which
+-- re-checks the caller's role server-side.
+create or replace function public.clear_audit_log(p_message text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_message text;
+begin
+  if auth.uid() is null or not public.is_admin() then
+    raise exception 'Only administrators may clear the audit log'
+      using errcode = '42501';
+  end if;
+
+  v_message := coalesce(
+    nullif(btrim(p_message), ''),
+    'Audit log cleared by Admin on '
+      || to_char(now() at time zone 'UTC', 'DD/MM/YYYY HH24:MI')
+  );
+
+  delete from public.audit_log;
+
+  insert into public.audit_log (actor, entry_id, action, snapshot, details)
+  values (
+    auth.uid(),
+    null,
+    'clear_audit',
+    '{}'::jsonb,
+    jsonb_build_object('message', v_message)
+  );
+end;
+$$;
+
+revoke all on function public.clear_audit_log(text) from public;
+grant execute on function public.clear_audit_log(text) to authenticated;
+
+-- Belt and braces: no direct DELETE policy may exist on the audit log.
+drop policy if exists audit_log_delete_admin on public.audit_log;
+drop policy if exists audit_log_delete_authenticated on public.audit_log;
+
 commit;
 
 -- ---------------------------------------------------------------------------
@@ -186,3 +234,7 @@ commit;
 --   entries_insert_authenticated  INSERT  (auth.uid() is not null and ...)
 --   entries_update_authenticated  UPDATE  (is_admin() or (is_office() and not deleted))
 --   entries_delete_admin          DELETE  (is_admin())
+--
+-- Audit log: `select * from pg_policies where tablename = 'audit_log';`
+-- must show SELECT + INSERT only (no DELETE, no UPDATE).  Clearing goes
+-- through public.clear_audit_log(text).

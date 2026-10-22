@@ -823,3 +823,65 @@
   font-size: 11px;
   line-height: 1.35;
 }
+
+/* FIXES_UI §5.2 "Smaller windows": search shrinks, then the last quick filters
+   move into this menu so the toolbar stays one row. */
+.sheet-more-filters {
+  position: relative;
+  display: inline-flex;
+}
+
+.sheet-more-filters__button {
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.sheet-more-filters__menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 14px 28px var(--color-shadow);
+}
+
+.sheet-more-filters__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.sheet-more-filters__item:hover,
+.sheet-more-filters__item:focus-visible {
+  background: var(--color-primary-soft);
+}
+
+.sheet-more-filters__item[aria-checked='true'] {
+  color: var(--color-primary-strong);
+  font-weight: 700;
+}
+
+@media (max-width: 1080px) {
+  /* Search gives up width before anything else does. */
+  .sheet-toolbar__filters {
+    flex-wrap: nowrap;
+  }
+
+  .sheet-search input {
+    width: clamp(120px, 18vw, 220px);
+  }
+}

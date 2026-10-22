@@ -1342,6 +1342,29 @@ export class SqliteStore {
     }));
   }
 
+  /**
+   * R2-10: administrator-only clear of the local audit mirror.  The whole log
+   * is removed (for every account on this PC) and exactly one entry is written
+   * so the clear itself stays visible.
+   */
+  public clearAuditLog(input: { message: string; actor?: string | null }): AuditRecord {
+    this.ensureOpen();
+    const timestamp = this.now();
+    const clear = this.database.transaction(() => {
+      this.database.prepare('DELETE FROM audit_log').run();
+    });
+    clear();
+    return this.recordAudit({
+      actor: input.actor ?? null,
+      entityType: 'audit_log',
+      entityId: null,
+      action: 'clear_audit',
+      before: null,
+      after: { message: input.message },
+      createdAt: timestamp,
+    });
+  }
+
   public addNotification(input: NotificationInput): NotificationRecord {
     this.ensureOpen();
     const timestamp = input.createdAt ?? this.now();

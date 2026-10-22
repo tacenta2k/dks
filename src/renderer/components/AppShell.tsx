@@ -28,6 +28,7 @@ import {
   type PartialSettings,
 } from '../../features/settings/SettingsPage';
 import type { AuditProfile } from '../../features/audit/AuditLogPage';
+import type { AuditClearRemoteClient } from '../../features/audit/audit-service';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -68,6 +69,8 @@ export interface AppShellProps {
   resendNote?: string;
   settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
   auditProfiles?: readonly AuditProfile[];
+  /** Supabase client for the admin-only clear-audit RPC (R2-10). */
+  auditRemoteClient?: AuditClearRemoteClient | null;
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
@@ -283,6 +286,7 @@ export function AppShell({
   resendNote,
   settingsError,
   auditProfiles = [],
+  auditRemoteClient = null,
   onSaveExport,
   onSavePdf,
   onPrint,
@@ -617,7 +621,14 @@ export function AppShell({
                 refreshToken={pageRefreshToken}
               />
            ) : effectiveView === 'audit-log' ? (
-             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} profiles={auditProfiles} />
+             <AdminAuditLogPanel
+               key={`audit-log-${sheetRevision}`}
+               repository={sheetRepository}
+               role={role}
+               profiles={auditProfiles}
+               actorLabel={actor?.name ?? null}
+               remoteClient={auditRemoteClient ?? null}
+             />
            ) : (
              <SettingsPage
                role={role}
