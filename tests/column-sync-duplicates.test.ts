@@ -383,3 +383,60 @@ describe('column reconciliation SQL', () => {
     expect(sql).not.toContain('drop index if exists app_columns_name_key');
   });
 });
+
+describe('fix-column-sync.sql — preflight and schema compatibility (R3 batch G)', () => {
+  const sqlPath = resolve(process.cwd(), 'ARENA/sql/fix-column-sync.sql');
+  const sql = readFileSync(sqlPath, 'utf8');
+  const schema = readFileSync(resolve(process.cwd(), 'supabase/schema.sql'), 'utf8');
+
+  it('documents the exact fields the client and function need', () => {
+    for (const column of [
+      'name', 'type', 'options', 'position', 'visible',
+      'is_primary_expiry', 'is_passport', 'deleted', 'deleted_at', 'updated_at',
+    ]) {
+      expect(sql).toContain(`('${column}'`);
+    }
+    expect(sql).toContain("table_name = 'app_columns'");
+    expect(sql).toContain('information_schema.columns');
+    expect(sql).toContain('SECTION 0 — PREFLIGHT');
+  });
+
+  it('adds only the missing app_columns fields, additively', () => {
+    for (const column of [
+      'options jsonb not null default',
+      'visible boolean not null default true',
+      'is_primary_expiry boolean not null default false',
+      'is_passport boolean not null default false',
+      'updated_at timestamptz not null default now()',
+      'deleted boolean not null default false',
+      'deleted_at timestamptz',
+    ]) {
+      expect(sql).toContain(`alter table public.app_columns add column if not exists ${column}`);
+    }
+    // Additive only: never weaken the unique constraint or rewrite data.
+    expect(sql).not.toMatch(/drop constraint/i);
+    expect(sql).not.toMatch(/drop column/i);
+    expect(sql).not.toMatch(/rename column/i);
+    expect(sql).not.toMatch(/delete from public\.app_columns/i);
+    expect(sql).not.toMatch(/update public\.app_columns/i);
+  });
+
+  it('reads app_columns through jsonb so an absent optional field cannot fail a call', () => {
+    expect(sql).toContain('v_row jsonb;');
+    expect(sql).toContain('select to_jsonb(c)');
+    expect(sql).toContain("coalesce((to_jsonb(c) ->> 'deleted')::boolean, false)");
+    expect(sql).not.toContain('v_row public.app_columns;');
+    // Mirrored in the shipped schema for fresh installs.
+    expect(schema).toContain('select to_jsonb(c)');
+    expect(schema).not.toContain('v_row public.app_columns;');
+  });
+
+  it('never grants the resolver to anon and keeps it read-only', () => {
+    const statements = sql.replace(/--[^\n]*/g, '');
+    expect(statements).not.toMatch(/grant[^;]*to anon/i);
+    expect(statements).not.toMatch(/grant[^;]*to public/i);
+    expect(statements).toContain('grant execute on function public.resolve_duplicate_column(text) to authenticated');
+    expect(statements).not.toMatch(/delete from public\.app_columns/i);
+    expect(statements).not.toMatch(/insert into public\.app_columns/i);
+  });
+});

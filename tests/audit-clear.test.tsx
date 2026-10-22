@@ -240,3 +240,28 @@ describe('Clear audit log control', () => {
     expect(screen.queryByRole('button', { name: 'Clear audit log' })).not.toBeInTheDocument();
   });
 });
+
+describe('audit clear — Oman time and scoped delete (R3 batch G)', () => {
+  it('stamps the message in Asia/Muscat regardless of the PC timezone', () => {
+    // 05:05 UTC = 09:05 in Oman (UTC+4, no daylight saving).
+    expect(auditClearMessage('Admin', new Date('2026-03-04T05:05:00.000Z')))
+      .toBe('Audit log cleared by Admin on 04/03/2026 09:05');
+    // Crossing local midnight in Oman must roll the date, not show 24:30.
+    expect(auditClearMessage('Admin', new Date('2026-03-04T20:30:00.000Z')))
+      .toBe('Audit log cleared by Admin on 05/03/2026 00:30');
+    // The stored wording is unchanged: "<label> on DD/MM/YYYY HH:mm".
+    expect(auditClearMessage('', new Date('2026-12-31T21:00:00.000Z')))
+      .toBe('Audit log cleared by Admin on 01/01/2027 01:00');
+  });
+
+  it('ships a scoped delete and Oman time in the admin RPC', () => {
+    const sql = readSql(AUDIT_CLEAR_SQL_FILE);
+    expect(sql).toMatch(/delete from public\.audit_log\s+where id is not null;/);
+    expect(sql).not.toMatch(/delete from public\.audit_log\s*;/);
+    expect(sql).toContain("to_char(now() at time zone 'Asia/Muscat', 'DD/MM/YYYY HH24:MI')");
+    expect(sql).toContain("'Audit log cleared by Admin on '");
+    // Still admin-only and still never a client-side table delete.
+    expect(sql).toContain("raise exception 'Only administrators may clear the audit log'");
+    expect(readSql('supabase/schema.sql')).toMatch(/delete from public\.audit_log\s+where id is not null;/);
+  });
+});

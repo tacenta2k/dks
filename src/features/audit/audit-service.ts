@@ -1,4 +1,4 @@
-import { formatLocalDateTime } from '../../lib/date';
+import { DKS_BUSINESS_TIME_ZONE, formatBusinessDateTime } from '../../lib/date';
 
 /**
  * R2-10 / R3 batch C — clearing the audit log is an administrator-only
@@ -37,8 +37,15 @@ export const AUDIT_CLEAR_CONFIRMATION = 'DELETE';
 /** The one migration that installs the RPC. */
 export const AUDIT_CLEAR_SQL_FILE = 'ARENA/sql/fix-entries-rls.sql';
 
+/**
+ * The message stored on both sides of a clear. R3 batch G: the timestamp is
+ * Oman local time (Asia/Muscat), matching the SQL default in
+ * `clear_audit_log()` exactly, so a clear made from this PC and one made
+ * through the RPC alone read the same:
+ *   Audit log cleared by Admin on DD/MM/YYYY HH:mm
+ */
 export function auditClearMessage(actorLabel: string, when: Date = new Date()): string {
-  return `Audit log cleared by ${actorLabel || 'Admin'} on ${formatLocalDateTime(when.toISOString())}`;
+  return `Audit log cleared by ${actorLabel || 'Admin'} on ${formatBusinessDateTime(when, DKS_BUSINESS_TIME_ZONE)}`;
 }
 
 export function isAuditClearConfirmation(value: string): boolean {

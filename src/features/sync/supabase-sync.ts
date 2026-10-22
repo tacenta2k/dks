@@ -17,21 +17,26 @@ export interface SupabaseQueryResult {
 
 export interface SupabaseTableQuery {
   select: (columns: string) => Promise<SupabaseQueryResult>;
-  upsert: (
+  /**
+   * Idempotent write used ONLY for key/value tables (settings) where no
+   * INSERT/UPDATE policy distinguishes the two operations. Entries and columns
+   * are never written through it — see `writeRow`.
+   */
+  upsert?: (
     values: readonly Record<string, unknown>[],
     options?: { onConflict?: string },
   ) => Promise<SupabaseQueryResult>;
   /**
-   * Optional real INSERT.  Using a plain insert (instead of an upsert) for new
-   * rows keeps the INSERT policy check on the intended path.
+   * A real INSERT. Required for new entries/columns: the INSERT policy must be
+   * evaluated for an actual insert and nothing else.
    */
   insert?: (values: readonly Record<string, unknown>[]) => Promise<SupabaseQueryResult>;
   /**
-   * Optional real UPDATE.  Using a plain update (instead of `upsert`) for rows
-   * that already exist avoids re-running the INSERT policy's WITH CHECK on the
-   * UPDATE branch — that is what produced the Office "new row violates
-   * row-level security policy for table entries" error for edits and soft
-   * deletes of rows created by another account.
+   * A real UPDATE. Required for rows that already exist: an upsert would make
+   * PostgreSQL re-run the INSERT policy's WITH CHECK on the UPDATE branch,
+   * which is what produced the Office "new row violates row-level security
+   * policy for table entries" error for edits and soft deletes of rows created
+   * by another account.
    */
   update?: (values: Record<string, unknown>) => {
     eq: (column: string, value: string) => Promise<SupabaseQueryResult>;
@@ -456,7 +461,11 @@ async function upsertRow(
   table: string,
   value: Record<string, unknown>,
 ): Promise<void> {
-  const result = await client.from(table).upsert([value], { onConflict: 'id' });
+  const query = client.from(table);
+  if (typeof query.upsert !== 'function') {
+    throw new Error(`Unable to write ${table}: this client has no upsert path`);
+  }
+  const result = await query.upsert([value], { onConflict: 'id' });
   if (result.error) {
     throw new Error(result.error.message || `Unable to write ${table}`);
   }
@@ -466,8 +475,13 @@ async function upsertRow(
  * Write one row with the operation that matches its state:
  *   'insert' — the remote has never seen this row (INSERT policy applies);
  *   'update' — the remote already has it (UPDATE policies apply).
- * Test doubles / older clients that do not expose the specialised methods keep
- * working through the idempotent upsert fallback.
+ *
+ * There is deliberately NO `INSERT … ON CONFLICT DO UPDATE` fallback. An
+ * upsert makes PostgreSQL evaluate the INSERT policy for rows that already
+ * exist, so authorisation would depend on which half of the statement the
+ * planner chose — the exact loophole that produced Office's "new row violates
+ * row-level security policy for table entries". A client that cannot express a
+ * plain INSERT or UPDATE is refused instead of silently widening the path.
  */
 async function writeRow(
   client: SupabaseDataClient,
@@ -478,7 +492,12 @@ async function writeRow(
   const query = client.from(table);
   const id = value.id;
 
-  if (mode === 'update' && typeof query.update === 'function') {
+  if (mode === 'update') {
+    if (typeof query.update !== 'function') {
+      throw new Error(
+        `Refusing to write ${table} without an explicit UPDATE: an upsert would re-run the INSERT policy`,
+      );
+    }
     const result = await query.update(value).eq('id', String(id ?? ''));
     if (result.error) {
       throw new Error(result.error.message || `Unable to write ${table}`);
@@ -486,15 +505,15 @@ async function writeRow(
     return;
   }
 
-  if (mode === 'insert' && typeof query.insert === 'function') {
-    const result = await query.insert([value]);
-    if (result.error) {
-      throw new Error(result.error.message || `Unable to write ${table}`);
-    }
-    return;
+  if (typeof query.insert !== 'function') {
+    throw new Error(
+      `Refusing to write ${table} without an explicit INSERT: an upsert would bypass the INSERT policy`,
+    );
   }
-
-  await upsertRow(client, table, value);
+  const result = await query.insert([value]);
+  if (result.error) {
+    throw new Error(result.error.message || `Unable to write ${table}`);
+  }
 }
 
 /**

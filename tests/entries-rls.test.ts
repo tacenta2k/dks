@@ -607,3 +607,91 @@ describe('entries RLS — sync client writes', () => {
     }
   });
 });
+
+describe('entries RLS — audit clear, policy guard and attribution (R3 batch G)', () => {
+  const sql = readFileSync(migrationPath, 'utf8');
+  const schema = readFileSync(schemaPath, 'utf8');
+
+  it('clears the audit log with a scoped delete, never an unfiltered one', () => {
+    // The REST error "DELETE requires a WHERE clause" is what an unfiltered
+    // DELETE produces; the function must always carry a predicate.
+    expect(sql).toContain('delete from public.audit_log');
+    expect(sql).toMatch(/delete from public\.audit_log\s+where id is not null;/);
+    expect(schema).toMatch(/delete from public\.audit_log\s+where id is not null;/);
+    // No bare "delete from public.audit_log;" (semicolon straight after the name).
+    expect(sql).not.toMatch(/delete from public\.audit_log\s*;/);
+    expect(schema).not.toMatch(/delete from public\.audit_log\s*;/);
+    // `id` is the identity primary key, so the predicate removes every row.
+    expect(sql).toContain('id is not null');
+  });
+
+  it('stamps the clear message in Oman local time and keeps the wording', () => {
+    for (const source of [sql, schema]) {
+      expect(source).toContain("to_char(now() at time zone 'Asia/Muscat', 'DD/MM/YYYY HH24:MI')");
+      expect(source).not.toContain("now() at time zone 'UTC'");
+      expect(source).toContain("'Audit log cleared by Admin on '");
+    }
+  });
+
+  it('guards against an unexpected permissive policy before recreating policies', () => {
+    // PostgreSQL ORs permissive policies, so a forgotten broad policy would
+    // silently keep working. The migration must refuse to run in that case.
+    expect(sql).toContain('do $$');
+    expect(sql).toContain('from pg_policies p');
+    expect(sql).toContain("p.permissive = 'PERMISSIVE'");
+    expect(sql).toContain('unexpected permissive policies');
+    expect(sql).toContain('row level security is disabled');
+
+    // The guard runs before any policy is created.
+    const guardIndex = sql.indexOf('unexpected permissive policies');
+    const firstPolicy = sql.indexOf('create policy ');
+    expect(guardIndex).toBeGreaterThan(-1);
+    expect(guardIndex).toBeLessThan(firstPolicy);
+    expect(sql.indexOf('begin;')).toBeLessThan(guardIndex);
+  });
+
+  it('allowlists exactly the ten expected policies for the three tables', () => {
+    const expected = [
+      "('entries',     'entries_select_authenticated',     'SELECT')",
+      "('entries',     'entries_insert_authenticated',     'INSERT')",
+      "('entries',     'entries_update_authenticated',     'UPDATE')",
+      "('entries',     'entries_delete_admin',             'DELETE')",
+      "('audit_log',   'audit_log_select_admin',           'SELECT')",
+      "('audit_log',   'audit_log_insert_authenticated',   'INSERT')",
+      "('app_columns', 'app_columns_select_authenticated', 'SELECT')",
+      "('app_columns', 'app_columns_insert_authenticated', 'INSERT')",
+      "('app_columns', 'app_columns_update_authenticated', 'UPDATE')",
+      "('app_columns', 'app_columns_delete_admin',         'DELETE')",
+    ];
+    for (const row of expected) {
+      expect(sql).toContain(row);
+    }
+    // The two legacy audit-log delete policies are dropped in the same
+    // transaction, so the guard must tolerate them instead of deadlocking.
+    expect(sql).toContain("('audit_log',   'audit_log_delete_admin',           'DELETE')");
+    expect(sql).toContain("('audit_log',   'audit_log_delete_authenticated',   'DELETE')");
+    expect(sql).toContain('drop policy if exists audit_log_delete_admin');
+    expect(sql).toContain('drop policy if exists audit_log_delete_authenticated');
+  });
+
+  it('ships a read-only preflight and a verification section', () => {
+    expect(sql).toContain('SECTION 0 — PREFLIGHT');
+    expect(sql).toContain('SECTION 2 — VERIFICATION');
+    // The preflight must be commented out so a careless "Run all" changes nothing.
+    const preflight = sql.slice(sql.indexOf('SECTION 0'), sql.indexOf('SECTION 1'));
+    const statements = preflight.split('\n').filter((line) => /^(select|with|alter|drop|create)\b/i.test(line.trim()));
+    expect(statements).toEqual([]);
+  });
+
+  it('stamps updated_by from the session and mirrors it into the schema', () => {
+    for (const source of [sql, schema]) {
+      expect(source).toContain('create or replace function public.entries_stamp_updated_by');
+      expect(source).toContain('new.updated_by := auth.uid()');
+      expect(source).toContain('create trigger entries_stamp_updated_by');
+      expect(source).toContain('before update on public.entries');
+    }
+    // created_at is frozen with created_by so a client cannot rewrite history.
+    expect(sql).toContain('new.created_at := old.created_at');
+    expect(schema).toContain('new.created_at := old.created_at');
+  });
+});

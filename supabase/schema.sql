@@ -148,6 +148,26 @@ set search_path = public
 as $$
 begin
   new.created_by := old.created_by;
+  new.created_at := old.created_at;
+  return new;
+end;
+$$;
+
+-- R3 batch G: attribution cannot be forged. auth.uid() is the caller's
+-- authenticated account (also inside SECURITY DEFINER functions), so Office
+-- cannot write updated_by = the admin's id and an admin restore is attributed
+-- to the admin. When there is no JWT (SQL editor, service role) the value the
+-- caller supplied is left untouched.
+create or replace function public.entries_stamp_updated_by()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is not null then
+    new.updated_by := auth.uid();
+  end if;
   return new;
 end;
 $$;
@@ -737,6 +757,11 @@ create trigger entries_keep_created_by
 before update on public.entries
 for each row execute function public.entries_keep_created_by();
 
+drop trigger if exists entries_stamp_updated_by on public.entries;
+create trigger entries_stamp_updated_by
+before update on public.entries
+for each row execute function public.entries_stamp_updated_by();
+
 drop trigger if exists entries_guard_office_restore on public.entries;
 create trigger entries_guard_office_restore
 before update on public.entries
@@ -1000,7 +1025,7 @@ security definer
 set search_path = public
 as $$
 declare
-  v_row public.app_columns;
+  v_row jsonb;
 begin
   if auth.uid() is null then
     raise exception 'Sign in before resolving columns'
@@ -1016,28 +1041,31 @@ begin
     return null;
   end if;
 
-  select *
+  -- Read the row as jsonb so an optional/absent app_columns field cannot make
+  -- the function fail at call time; prefer the live row, then the newest.
+  select to_jsonb(c)
     into v_row
-    from public.app_columns
-   where lower(btrim(name)) = lower(btrim(p_name))
-   order by deleted asc, updated_at desc
+    from public.app_columns c
+   where lower(btrim(c.name)) = lower(btrim(p_name))
+   order by coalesce((to_jsonb(c) ->> 'deleted')::boolean, false) asc,
+            coalesce((to_jsonb(c) ->> 'updated_at')::timestamptz, '-infinity'::timestamptz) desc
    limit 1;
 
-  if not found then
+  if v_row is null then
     return null;
   end if;
 
   return jsonb_build_object(
-    'id', v_row.id,
-    'name', v_row.name,
-    'type', v_row.type,
-    'options', coalesce(v_row.options, '{}'::jsonb),
-    'position', v_row.position,
-    'deleted', v_row.deleted,
-    'deleted_at', v_row.deleted_at,
-    'is_primary_expiry', v_row.is_primary_expiry,
-    'is_passport', v_row.is_passport,
-    'updated_at', v_row.updated_at
+    'id', v_row -> 'id',
+    'name', v_row ->> 'name',
+    'type', coalesce(v_row ->> 'type', 'text'),
+    'options', coalesce(v_row -> 'options', '{}'::jsonb),
+    'position', coalesce((v_row ->> 'position')::integer, 0),
+    'deleted', coalesce((v_row ->> 'deleted')::boolean, false),
+    'deleted_at', v_row -> 'deleted_at',
+    'is_primary_expiry', coalesce((v_row ->> 'is_primary_expiry')::boolean, false),
+    'is_passport', coalesce((v_row ->> 'is_passport')::boolean, false),
+    'updated_at', v_row -> 'updated_at'
   );
 end;
 $$;
@@ -1074,10 +1102,14 @@ begin
   v_message := coalesce(
     nullif(btrim(p_message), ''),
     'Audit log cleared by Admin on '
-      || to_char(now() at time zone 'UTC', 'DD/MM/YYYY HH24:MI')
+      || to_char(now() at time zone 'Asia/Muscat', 'DD/MM/YYYY HH24:MI')
   );
 
-  delete from public.audit_log;
+  -- Scoped on purpose: an unfiltered DELETE is rejected by REST layers with
+  -- "DELETE requires a WHERE clause" and hides intent. `id` is the identity
+  -- primary key, so every row is still removed.
+  delete from public.audit_log
+   where id is not null;
 
   insert into public.audit_log (actor, entry_id, action, snapshot, details)
   values (

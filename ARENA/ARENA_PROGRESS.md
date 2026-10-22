@@ -947,3 +947,112 @@ Windows build and a visual pass on real hardware. Nothing implementable is left
 open in the tracking list.
 
 Gate: 58 files / 329 tests, `tsc` (both configs) clean, `build:electron` clean.
+
+## 18. Round 3 — Batch G: SQL review fixes (audit clear, policy guard, schema preflight)
+
+The user reviewed both SQL files before running them. Five findings, all fixed;
+nothing was executed against Supabase by me.
+
+### 18.1 `clear_audit_log()` — scoped delete and Oman time
+
+- `delete from public.audit_log;` → `delete from public.audit_log where id is
+  not null;`. `id` is the identity primary key, so every row is still removed;
+  the statement is now safe-delete compatible and can never produce the
+  REST-layer `DELETE requires a WHERE clause` error. The local mirror already
+  used the same scoped form (`electron/main/sqlite.ts`).
+- The stored message timestamp is Oman local time:
+  `to_char(now() at time zone 'Asia/Muscat', 'DD/MM/YYYY HH24:MI')`. The wording
+  is unchanged: `Audit log cleared by Admin on DD/MM/YYYY HH:mm`.
+- The client stamps the same timezone (`formatBusinessDateTime()` in
+  `src/lib/date.ts`, used by `auditClearMessage()`), so a clear made from a PC
+  in any timezone and one made by calling the RPC directly read identically.
+- Mirrored into `supabase/schema.sql`.
+
+### 18.2 Policy safety — preflight, guard and verification
+
+PostgreSQL ORs **permissive** policies together, so an old broad policy that
+this file does not know by name would keep widening access after every expected
+policy was recreated. `ARENA/sql/fix-entries-rls.sql` now has:
+
+- **SECTION 0 (preflight, read-only, commented out)** — a `full join` of
+  `pg_policies` against the expected list, with a verdict column
+  (`ok` / `MISSING` / `WRONG COMMAND` / `UNEXPECTED permissive policy`), an RLS
+  enabled check, and a check that no DELETE/UPDATE policy exists on `audit_log`.
+- **SECTION 1 guard** — a `DO` block *inside the transaction, before any policy
+  is created*, that raises and aborts the whole migration when an unexpected
+  permissive policy exists on `entries`, `audit_log` or `app_columns`, or when
+  RLS is disabled on any of them. Restrictive policies only narrow access and
+  are therefore allowed. The two legacy `audit_log_delete_*` policies are
+  tolerated because the same transaction drops them (a DELETE policy on the
+  audit log is otherwise treated as unexpected).
+- **SECTION 2 (verification, read-only)** — the full expected policy list with
+  commands, the "no DELETE/UPDATE on audit_log" check, and an optional
+  destructive check of the clear function.
+
+Expected active policies (the only ones allowed on these tables):
+
+| table | policy | command | who |
+|---|---|---|---|
+| entries | `entries_select_authenticated` | SELECT | authenticated; `not deleted or is_admin()` |
+| entries | `entries_insert_authenticated` | INSERT | authenticated; `created_by = auth.uid()`, not pre-deleted |
+| entries | `entries_update_authenticated` | UPDATE | authenticated; Admin any row, Office live rows only |
+| entries | `entries_delete_admin` | DELETE | `is_admin()` |
+| audit_log | `audit_log_select_admin` | SELECT | `is_admin()` |
+| audit_log | `audit_log_insert_authenticated` | INSERT | `actor = auth.uid() or actor is null` |
+| app_columns | `app_columns_select_authenticated` | SELECT | authenticated |
+| app_columns | `app_columns_insert_authenticated` | INSERT | authenticated |
+| app_columns | `app_columns_update_authenticated` | UPDATE | authenticated |
+| app_columns | `app_columns_delete_admin` | DELETE | `is_admin()` |
+
+No UPDATE and no DELETE policy may exist on `audit_log`. RLS is never disabled,
+`anon` is never granted anything, and Admin-only paths are unchanged.
+
+### 18.3 `app_columns` schema compatibility
+
+`fix-column-sync.sql` referenced `deleted`, `deleted_at`, `updated_at`,
+`is_primary_expiry`, `is_passport`, `options` (plus `position`, `visible`). The
+shipped `supabase/schema.sql` has all of them, but a project created from an
+older DKS schema might not. The file now:
+
+- **SECTION 0.1** checks each required field against `information_schema.columns`
+  and marks it `present` / `MISSING — SECTION 1 adds it`;
+- **SECTION 1** adds only the missing ones with
+  `alter table public.app_columns add column if not exists …` (additive,
+  defaults matching the schema; no drops, no renames, no data rewritten);
+- `resolve_duplicate_column()` now reads the row via `to_jsonb(c)` and
+  `coalesce`s every optional field, so an absent optional column cannot make a
+  call fail at runtime. Mirrored into `supabase/schema.sql`.
+
+### 18.4 No `INSERT … ON CONFLICT` upsert loophole
+
+- `writeRow()` in `src/features/sync/supabase-sync.ts` no longer falls back to
+  `upsert` for entries or columns. `mode: 'update'` requires a real UPDATE and
+  `mode: 'insert'` a real INSERT; otherwise the write is refused with an
+  explanation and the outbox item stays pending with its reason (nothing is
+  lost). `upsert` is now optional in the client interface and used only for the
+  `settings` key/value table.
+- Attribution is enforced server-side as well: the existing
+  `entries_keep_created_by` trigger now also freezes `created_at`, and a new
+  `entries_stamp_updated_by` trigger sets `updated_by := auth.uid()` on every
+  UPDATE (including inside SECURITY DEFINER restores), so Office cannot
+  attribute an edit to the admin and an admin restore is attributed to the
+  admin.
+- Behaviour preserved: Office edits/soft-deletes live rows (including
+  Admin-created ones), Office cannot edit or restore a deleted row, and restore
+  / hard delete stay admin-only (`restore_entry()`, `permanently_delete_entry()`,
+  `entries_delete_admin`).
+
+### 18.5 Tests
+
+`tests/entries-rls.test.ts` 16 → 22, `tests/column-sync-duplicates.test.ts` 9 →
+13, `tests/audit-clear.test.tsx` 12 → 14, `tests/supabase-sync.test.ts` 20 → 22.
+`tests/persistence-quit-reopen.test.ts` and the sync doubles were updated to
+model a real client with INSERT/UPDATE (they previously only implemented
+`upsert`, which is exactly the path that no longer exists).
+
+Preflight note: `npm rebuild better-sqlite3` needs the local Node headers in
+this sandbox (`--nodedir=/usr/local`) because nodejs.org is unreachable; the
+rebuild succeeded and the module loads.
+
+Gate: 58 files / 343 tests, `tsc` (both configs) clean, `build:electron` clean.
+All three SQL files parse (pglast); they were not executed anywhere.
