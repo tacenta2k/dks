@@ -196,6 +196,7 @@ export interface DksLocalApi {
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
+  rekeyColumn: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {
     records: readonly DksLocalImportRecord[];
     options?: Record<string, unknown>;
@@ -263,6 +264,7 @@ const LOCAL_CHANNELS = {
   addColumn: 'dks:local:add-column',
   updateColumn: 'dks:local:update-column',
   deleteColumn: 'dks:local:delete-column',
+  rekeyColumn: 'dks:local:rekey-column',
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
   clearAuditLog: 'dks:local:clear-audit-log',
@@ -556,6 +558,15 @@ const localApi: DksLocalApi = Object.freeze({
   addColumn: (input: DksLocalColumnInput) => invokeLocal<DksLocalColumn>(LOCAL_CHANNELS.addColumn, input, validateAddColumn),
   updateColumn: (input: DksLocalUpdateColumnInput) => invokeLocal<DksLocalColumn | null>(LOCAL_CHANNELS.updateColumn, input, validateUpdateColumn),
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => invokeLocal<DksLocalColumn | null>(LOCAL_CHANNELS.deleteColumn, input, validateDeleteColumn),
+  rekeyColumn: (input: { oldId: string; newId: string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.rekeyColumn, input, (payload) => {
+    const record = payload as Record<string, unknown>;
+    if (typeof record?.oldId !== 'string' || !record.oldId.trim()) {
+      throw new Error('old column id must be a non-empty string');
+    }
+    if (typeof record?.newId !== 'string' || !record.newId.trim()) {
+      throw new Error('new column id must be a non-empty string');
+    }
+  }),
   importRecords: (input: { records: readonly DksLocalImportRecord[]; options?: Record<string, unknown> }) => invokeLocal<DksLocalRow[]>(LOCAL_CHANNELS.importRecords, input, validateImport),
   listAudit: (input: { limit?: number } = {}) => invokeLocal<DksLocalAuditRecord[]>(LOCAL_CHANNELS.listAudit, input, validateListAudit),
   clearAuditLog: (input: { message: string; role: string; actor?: string | null }) => invokeLocal<DksLocalAuditRecord>(LOCAL_CHANNELS.clearAuditLog, input, (payload) => {

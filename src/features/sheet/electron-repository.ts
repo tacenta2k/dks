@@ -324,6 +324,28 @@ export class ElectronSheetRepository implements SheetRepository {
     );
   }
 
+  /**
+   * R3 batch B — adopt the server's column id after a duplicate-name
+   * reconciliation. The local store rewrites the entry JSON keys, so every
+   * value stays attached to the same (now server-identified) column.
+   */
+  async rekeyColumn(oldId: string, newId: string): Promise<void> {
+    await this.use(
+      'rekeyColumn',
+      async (local) => {
+        if (!local.rekeyColumn) {
+          throw new Error('Column reconciliation is unavailable in this local store');
+        }
+        const result = await local.rekeyColumn({ oldId, newId });
+        if (result?.ok !== true) {
+          throw new Error('The local column could not be reconciled with the server id');
+        }
+        return undefined;
+      },
+      async () => undefined,
+    );
+  }
+
   async createRow(data: Record<string, unknown> = {}, category: string | null = null): Promise<SheetRow> {
     return this.use(
       'createRow',

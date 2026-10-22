@@ -199,6 +199,7 @@ export interface DksLocalApi {
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
+  rekeyColumn?: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {
     records: readonly DksLocalImportRecord[];
     options?: DksLocalAuditOptions;

@@ -25,6 +25,7 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   addColumn: 'dks:local:add-column',
   updateColumn: 'dks:local:update-column',
   deleteColumn: 'dks:local:delete-column',
+  rekeyColumn: 'dks:local:rekey-column',
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
   clearAuditLog: 'dks:local:clear-audit-log',
@@ -68,6 +69,7 @@ export interface LocalIpcStore {
   createColumn?: (input: ColumnInput & { role?: string }) => unknown;
   updateColumn?: (input: ColumnInput & { role?: string }) => unknown;
   deleteColumn: (id: string, role: string, idempotencyKey?: string) => unknown | null;
+  rekeyColumn?: (oldId: string, newId: string) => boolean;
   getSyncStatus: () => SyncState;
   setSyncStatus: (state: SyncStatus | (Partial<SyncState> & Pick<SyncState, 'status'>)) => SyncState;
   listAudit: (limit?: number) => readonly AuditRecord[];
@@ -624,6 +626,17 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
       return created
         .map((row) => rowFromUnknown(row, 'imported row'))
         .filter((row): row is Record<string, unknown> => row !== null);
+    },
+
+    [LOCAL_IPC_CHANNELS.rekeyColumn]: (payload) => {
+      const input = asRecord(payload, 'column rekey input');
+      const oldId = requiredString(input.oldId, 'old column id');
+      const newId = requiredString(input.newId, 'new column id');
+      const rekey = store.rekeyColumn;
+      if (!rekey) {
+        throw new Error('Column reconciliation is unavailable in this local store');
+      }
+      return { ok: rekey(oldId, newId) === true };
     },
 
     [LOCAL_IPC_CHANNELS.listAudit]: (payload) => {

@@ -476,6 +476,11 @@ export function App({
         await local.markOutboxFailed?.({ id, message });
       },
       retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
+      // R3 batch B: adopt the server's column id after a duplicate-name
+      // reconciliation so the column stops failing on every sync.
+      rekeyColumn: async (oldId, newId) => {
+        await local.rekeyColumn?.({ oldId, newId });
+      },
     };
     const syncClient = client as unknown as SupabaseDataClient;
 

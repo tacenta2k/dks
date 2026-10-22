@@ -989,6 +989,62 @@ create policy audit_log_select_admin
 on public.audit_log for select to authenticated
 using (public.is_admin());
 
+-- R3 batch B: app_columns.name is unique across the table (deleted columns
+-- keep their name), and Office cannot SELECT a deleted row. The client asks
+-- this read-only function which row owns a name before pushing a new column,
+-- so a duplicate name is reconciled instead of failing the sync forever.
+create or replace function public.resolve_duplicate_column(p_name text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.app_columns;
+begin
+  if auth.uid() is null then
+    raise exception 'Sign in before resolving columns'
+      using errcode = '42501';
+  end if;
+
+  if not (public.is_admin() or public.is_office()) then
+    raise exception 'Only DKS accounts may resolve columns'
+      using errcode = '42501';
+  end if;
+
+  if p_name is null or btrim(p_name) = '' then
+    return null;
+  end if;
+
+  select *
+    into v_row
+    from public.app_columns
+   where lower(btrim(name)) = lower(btrim(p_name))
+   order by deleted asc, updated_at desc
+   limit 1;
+
+  if not found then
+    return null;
+  end if;
+
+  return jsonb_build_object(
+    'id', v_row.id,
+    'name', v_row.name,
+    'type', v_row.type,
+    'options', coalesce(v_row.options, '{}'::jsonb),
+    'position', v_row.position,
+    'deleted', v_row.deleted,
+    'deleted_at', v_row.deleted_at,
+    'is_primary_expiry', v_row.is_primary_expiry,
+    'is_passport', v_row.is_passport,
+    'updated_at', v_row.updated_at
+  );
+end;
+$$;
+
+revoke all on function public.resolve_duplicate_column(text) from public;
+grant execute on function public.resolve_duplicate_column(text) to authenticated;
+
 drop policy if exists audit_log_insert_authenticated on public.audit_log;
 create policy audit_log_insert_authenticated
 on public.audit_log for insert to authenticated

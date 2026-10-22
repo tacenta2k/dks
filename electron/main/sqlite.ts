@@ -854,6 +854,81 @@ export class SqliteStore {
   }
 
   /** Apply an already-authoritative remote column without creating a sync echo. */
+  /**
+   * R3 batch B — adopt the server's id for a column that already existed under
+   * another id (two machines created the same column name independently, or a
+   * soft-deleted remote column still owns the unique name).
+   *
+   * This is deliberately narrow and transactional:
+   *   - the local column keeps every value (name/type/options/position/…);
+   *   - entry JSON is rewritten so `data[oldId]` becomes `data[newId]` — no
+   *     value is dropped, and the name-keyed fallback keeps working;
+   *   - queued outbox rows for the old column id are re-pointed so the pending
+   *     change is not orphaned;
+   *   - nothing is deleted unless the old row was replaced by the new id.
+   * If a column with `newId` already exists locally the call is a no-op.
+   */
+  public rekeyColumn(oldId: string, newId: string): boolean {
+    this.ensureOpen();
+    const sourceId = oldId.trim();
+    const targetId = newId.trim();
+    if (!sourceId || !targetId || sourceId === targetId) {
+      return false;
+    }
+    const source = this.getColumn(sourceId);
+    if (!source || this.getColumn(targetId)) {
+      return false;
+    }
+
+    const rewrite = this.database.transaction(() => {
+      this.database.prepare('DELETE FROM columns WHERE id = ?').run(sourceId);
+      this.database.prepare(`
+        INSERT INTO columns (
+          id, name, type, options, position, visible, is_primary_expiry,
+          is_passport, deleted, deleted_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        targetId,
+        source.name,
+        source.type,
+        encode(source.options, {}),
+        Number(source.position ?? 0),
+        source.visible === false ? 0 : 1,
+        bool(source.isPrimaryExpiry ?? source.is_primary_expiry) ? 1 : 0,
+        bool(source.isPassport ?? source.is_passport) ? 1 : 0,
+        bool(source.deleted) ? 1 : 0,
+        source.deleted_at ?? null,
+        String(source.created_at ?? this.now()),
+        String(source.updated_at ?? this.now()),
+      );
+
+      // Entry JSON: move the value to the adopted id and drop the stale key.
+      const rows = this.database.prepare('SELECT id, data FROM entries').all() as {
+        id: string;
+        data: string;
+      }[];
+      const update = this.database.prepare('UPDATE entries SET data = ? WHERE id = ?');
+      for (const row of rows) {
+        const data = decode(row.data, {}) as Record<string, unknown>;
+        if (!data || typeof data !== 'object' || !(sourceId in data)) {
+          continue;
+        }
+        const next: Record<string, unknown> = { ...data };
+        if (!(targetId in next)) {
+          next[targetId] = data[sourceId];
+        }
+        delete next[sourceId];
+        update.run(encode(next), row.id);
+      }
+
+      this.database.prepare(
+        "UPDATE outbox SET entity_id = ? WHERE entity_type = 'column' AND entity_id = ?",
+      ).run(targetId, sourceId);
+    });
+    rewrite();
+    return true;
+  }
+
   public applyRemoteColumn(input: RemoteColumnInput): LocalColumn {
     this.ensureOpen();
     if (!input.id?.trim() || !input.name?.trim()) {

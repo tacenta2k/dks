@@ -689,3 +689,56 @@ USER-MUST-RUN: `ARENA/sql/fix-entries-rls.sql` (see the Batch C note for its
 audit-log section). Until that file is run on the project, the *server* still
 has the old policy and Office will keep seeing the RLS error — the client fix
 cannot override a database policy.
+
+## 13. Round 3 — Batch B: duplicate `app_columns` name during Office sync
+
+Root cause (confirmed in code): `public.app_columns.name` is UNIQUE across the
+whole table and soft-deleted columns keep their name. The SELECT policy hides
+`deleted = true` rows from Office, so an Office client could not see the row
+that already owned "Visa Expiry" and tried to INSERT a second one →
+`duplicate key value violates unique constraint "app_columns_name_key"`.
+Admin never saw it because Admin can SELECT the deleted row and reconcile by
+name.
+
+What changed:
+
+- **Pull before push.** Remote column definitions are applied to the local
+  cache *before* any new local column is written, so a column that already
+  exists on the server is adopted instead of inserted again.
+- **Duplicate-name recovery** (`reconcileDuplicateColumnName` in
+  `src/features/sync/supabase-sync.ts`): an insert that fails with
+  `app_columns_name_key` asks the server which row owns the name through the
+  new read-only `resolve_duplicate_column(p_name)` RPC.
+  - *Identical type + options* → the local column adopts the server id
+    (`rekeyColumn`), which rewrites `entries.data[oldId] → [newId]` inside a
+    transaction and re-points queued outbox rows; the server row is UPDATEd and
+    the queued operation is acknowledged. No column, value or entry is lost.
+  - *Different type or options* → both versions are preserved. The conflict is
+    recorded for an administrator and the item keeps a readable reason ("…
+    exists on the server with a different type or options … an administrator
+    must rename or delete one of them").
+  - *RPC missing* (migration not run) → the item carries the exact instruction:
+    run `ARENA/sql/fix-column-sync.sql`.
+  - The raw `duplicate key …` text is never left as the user-facing reason.
+- **Local duplicate names** (a case-only rename etc.) are detected before
+  pushing: only the first is synced, the duplicate is recorded as a conflict
+  with a clear message, and nothing is deleted or renamed.
+- New local capability: `rekeyColumn(oldId, newId)` in the SQLite store, the
+  `dks:local:rekey-column` IPC channel (validated in preload + main),
+  `DksLocalApi.rekeyColumn`, the Electron repository and the renderer sync
+  adapter.
+- Removed a dead `localColumnById.has(name)` check (the map is keyed by id, so
+  it could never match) and normalised names with trim + lowercase on both
+  sides of the comparison.
+
+USER-MUST-RUN: **`ARENA/sql/fix-column-sync.sql`** (also mirrored in
+`supabase/schema.sql`). Idempotent, read-only function, `security definer`,
+`search_path` fixed, granted to `authenticated` only (never `anon`), and the
+unique constraint is **not** dropped.
+
+Tests: `tests/column-sync-duplicates.test.ts` (9) — identical duplicate replay
+adopts the id and rewrites entry keys, conflicting definitions keep both
+versions with a readable reason, missing RPC names the SQL file, lookup failure
+is reported, shared columns are pulled before pushing, local same-name columns
+are flagged, and both SQL files are asserted to ship the scoped read-only
+resolver with the constraint intact.
