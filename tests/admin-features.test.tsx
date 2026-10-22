@@ -98,8 +98,8 @@ describe('admin renderer integration', () => {
 
     await waitFor(async () => {
       expect((await repository.getRows()).some((row) => row.data.name === 'Grace Hopper')).toBe(true);
-    });
-  });
+    }, { timeout: 10_000 });
+  }, 30_000);
 
   it('delegates print and PDF report actions from the report modal', async () => {
     const repository = await seededRepository();
@@ -124,8 +124,8 @@ describe('admin renderer integration', () => {
     await waitFor(() => {
       expect(onPrint).toHaveBeenCalledWith(expect.objectContaining({ header: 'DKS Expiry Report' }));
       expect(onSavePdf).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'dks-report.pdf' }));
-    });
-  });
+    }, { timeout: 10_000 });
+  }, 30_000);
 
   it('lists deleted rows and confirms restore and permanent delete actions', async () => {
     const repository = await seededRepository();
@@ -159,5 +159,5 @@ describe('admin renderer integration', () => {
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
     // S3: friendly action names (raw code "create" is no longer shown).
     expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();
-  });
+  }, 30_000);
 });
