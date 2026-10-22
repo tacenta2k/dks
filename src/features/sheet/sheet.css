@@ -66,8 +66,7 @@
 }
 
 .sheet-empty-state__actions,
-.sheet-toolbar__primary,
-.sheet-toolbar__admin,
+.sheet-toolbar__actions,
 .sheet-modal__actions {
   display: flex;
   flex-wrap: wrap;
@@ -89,8 +88,26 @@
   box-shadow: 0 14px 34px var(--color-shadow);
 }
 
-.sheet-toolbar,
-.sheet-filter-bar,
+.sheet-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.sheet-toolbar__filters {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.sheet-toolbar__actions {
+  justify-content: flex-end;
+}
+
 .sheet-column-manager__header {
   display: flex;
   align-items: center;
@@ -98,8 +115,8 @@
   gap: 12px;
 }
 
-.sheet-toolbar__admin {
-  justify-content: flex-end;
+.sheet-status {
+  min-width: 150px;
 }
 
 .button--quiet {
@@ -111,17 +128,7 @@
   font-size: 11px;
 }
 
-.sheet-filter-bar {
-  align-items: flex-end;
-  justify-content: flex-start;
-  flex-wrap: wrap;
-  padding: 12px;
-  border: 1px solid var(--color-border);
-  border-radius: 11px;
-  background: var(--color-surface-muted);
-}
-
-.sheet-filter-bar label,
+.sheet-toolbar__filters label,
 .sheet-form label {
   display: grid;
   min-width: 150px;
@@ -131,13 +138,13 @@
   font-weight: 700;
 }
 
-.sheet-filter-bar input,
-.sheet-filter-bar select,
+.sheet-toolbar__filters input,
+.sheet-toolbar__filters select,
 .sheet-form input,
 .sheet-form select,
 .sheet-form textarea {
-  min-height: 36px;
-  padding: 7px 9px;
+  min-height: 34px;
+  padding: 6px 9px;
   border: 1px solid var(--color-border-strong);
   border-radius: 8px;
   background: var(--color-surface);
@@ -263,11 +270,46 @@
 
 .sheet-grid {
   width: 100%;
-  height: 420px;
-  min-height: 300px;
+  height: calc(100vh - 214px);
+  min-height: 320px;
   overflow: hidden;
   border: 1px solid var(--color-border);
   border-radius: 10px;
+}
+
+/* FIXES_UI §5.5 (SHEET-10): the compact `+` add-column header button. */
+.sheet-add-column-header {
+  width: 100%;
+  height: 100%;
+  min-width: 40px;
+  min-height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--color-primary-strong);
+  cursor: pointer;
+  font-size: 18px;
+  font-weight: 700;
+  line-height: 1;
+}
+.sheet-add-column-header:hover {
+  background: var(--color-primary-soft);
+}
+
+/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. */
+.sheet-row-number-cell {
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  text-align: center;
+}
+
+/* FIXES_UI §5.3 (SHEET-08): denser rows for a dense office data-entry screen. */
+.sheet-grid.ag-theme-quartz {
+  --ag-row-height: 26px;
+}
+.sheet-grid .ag-cell {
+  padding-top: 1px;
+  padding-bottom: 1px;
 }
 
 .sheet-grid__empty {
@@ -334,7 +376,11 @@
 }
 
 .sheet-row--expired .ag-cell {
-  background: color-mix(in srgb, #dc2626 7%, transparent);
+  background: color-mix(in srgb, #7f1d1d 9%, transparent);
+}
+
+.sheet-row--today .ag-cell {
+  background: color-mix(in srgb, #dc2626 10%, transparent);
 }
 
 .sheet-row--urgent .ag-cell {
@@ -355,6 +401,22 @@
 
 .sheet-cell--error {
   box-shadow: inset 3px 0 0 #dc2626;
+}
+
+.dks-date-editor {
+  width: 100%;
+  height: 100%;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: none;
+  background: var(--color-surface);
+  color: inherit;
+  font: inherit;
+}
+
+.dks-date-editor:focus {
+  outline: 2px solid var(--color-primary);
+  outline-offset: -2px;
 }
 
 .sheet-modal-backdrop {
@@ -446,14 +508,12 @@
 }
 
 @media (max-width: 780px) {
-  .sheet-toolbar,
-  .sheet-filter-bar {
+  .sheet-toolbar {
     align-items: stretch;
     flex-direction: column;
   }
 
-  .sheet-toolbar__primary,
-  .sheet-toolbar__admin {
+  .sheet-toolbar__actions {
     justify-content: flex-start;
   }
 

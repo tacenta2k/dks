@@ -3,7 +3,7 @@ import {
   type ColumnDefinition,
   type GridRowLike,
 } from './columns';
-import { isValidIsoDate } from './date';
+import { isValidIsoDate, normalizeUserDateToIso } from './date';
 
 export type DiagnosticSeverity = 'none' | 'warning' | 'error';
 
@@ -39,24 +39,21 @@ function isEmpty(value: unknown): boolean {
   );
 }
 
-/** Normalise the two accepted Oman passport representations for comparisons. */
-export function normalizeOmanPassport(value: unknown): string {
+/**
+ * Normalise passport-like values for duplicate comparisons only.
+ *
+ * Passport numbers are plain text (F1): customers come from India, Pakistan,
+ * Bangladesh, Oman and elsewhere, so no country-specific format is enforced.
+ * Case and spacing differences are treated as the same value for the advisory
+ * duplicate warning; the stored text itself is never rewritten.
+ */
+export function normalizePassportValue(value: unknown): string {
   return typeof value === 'string'
     ? value.replace(/\s+/g, '').toUpperCase()
     : '';
 }
 
-/** Oman passport: one letter + seven digits, or eight digits; spaces ignored. */
-export function isValidOmanPassport(value: unknown): boolean {
-  const normalized = normalizeOmanPassport(value);
-  return /^[A-Z]\d{7}$/.test(normalized) || /^\d{8}$/.test(normalized);
-}
-
-export const validateOmanPassport = isValidOmanPassport;
-export const validatePassport = isValidOmanPassport;
-export const isValidPassport = isValidOmanPassport;
-export const normalizePassport = normalizeOmanPassport;
-export const normaliseOmanPassport = normalizeOmanPassport;
+export const normalizePassport = normalizePassportValue;
 
 function isFiniteNumber(value: unknown): boolean {
   if (typeof value === 'number') {
@@ -106,12 +103,17 @@ function isCheckbox(value: unknown): boolean {
 }
 
 function duplicateSet(values: Iterable<string> | undefined): Set<string> {
-  return new Set(Array.from(values ?? [], (value) => normalizeOmanPassport(value)));
+  return new Set(Array.from(values ?? [], (value) => normalizePassportValue(value)));
 }
 
 /**
  * Return visual diagnostics for a cell.  This helper never throws and keeps
  * duplicate passport values as warnings so office users can still save a row.
+ *
+ * F1: passport values are plain text — no country-specific format check may
+ * block saving.  Phone/email/number format issues stay visual-only warnings
+ * where documented, and real type errors (dropdown/checkbox/number) only mark
+ * the cell without throwing.
  */
 export function validateCell(
   value: unknown,
@@ -127,14 +129,12 @@ export function validateCell(
     || /passport/i.test(column.name);
 
   if (passportColumn) {
-    if (!isValidOmanPassport(value)) {
-      return error('Enter an Oman passport (one letter + 7 digits or 8 digits)', 'passport');
-    }
-
+    // Plain text: never a format error. The only advisory diagnostic is a
+    // non-blocking duplicate warning.
     const duplicates = options.duplicatePassportValues ?? options.duplicateValues;
     if (
       options.duplicatePassport === true
-      || duplicateSet(duplicates).has(normalizeOmanPassport(value))
+      || duplicateSet(duplicates).has(normalizePassportValue(value))
     ) {
       return warning('Duplicate passport value', 'duplicate-passport');
     }
@@ -144,9 +144,9 @@ export function validateCell(
 
   switch (column.type) {
     case 'phone':
-      return isPhone(value) ? ok() : error('Enter a valid phone number', 'phone');
+      return isPhone(value) ? ok() : warning('Enter a valid phone number', 'phone');
     case 'email':
-      return isEmail(value) ? ok() : error('Enter a valid email address', 'email');
+      return isEmail(value) ? ok() : warning('Enter a valid email address', 'email');
     case 'number':
       return isFiniteNumber(value) ? ok() : error('Enter a number', 'number');
     case 'price':
@@ -155,7 +155,22 @@ export function validateCell(
         : error('Enter a price with up to 3 decimals', 'price');
     case 'date_start':
     case 'date_expiry':
-      return isValidIsoDate(value) ? ok() : error('Enter a valid ISO date (YYYY-MM-DD)', 'date');
+      // Stored values are ISO; what-you-type/paste may be DD/MM/YYYY. An
+      // impossible calendar date (31/02/2026) keeps its text and shows a
+      // warning — it is never silently converted to a different date.
+      if (isValidIsoDate(value)) {
+        return ok();
+      }
+      if (typeof value === 'string') {
+        const normalized = normalizeUserDateToIso(value);
+        if (normalized.impossible) {
+          return warning('Impossible date — check the day and month', 'date');
+        }
+        if (normalized.iso) {
+          return ok();
+        }
+      }
+      return error('Enter a date as DD/MM/YYYY', 'date');
     case 'dropdown':
       return dropdownValues(column.options).some((option) => option === String(value))
         ? ok()
@@ -182,7 +197,8 @@ function rowData(row: GridRowLike | Record<string, unknown>): Record<string, unk
 
 /**
  * Return normalized passport values that occur in more than one active row.
- * Invalid and empty values are ignored; duplicate detection is advisory only.
+ * Empty values are ignored; duplicate detection is advisory only and compares
+ * plain text (no country-specific format requirement).
  */
 export function findDuplicatePassportValues(
   rows: readonly (GridRowLike | Record<string, unknown>)[],
@@ -200,11 +216,14 @@ export function findDuplicatePassportValues(
 
     const data = rowData(row);
     const raw = columnNames.map((name) => data[name]).find((value) => !isEmpty(value));
-    if (isEmpty(raw) || !isValidOmanPassport(raw)) {
+    if (isEmpty(raw)) {
       continue;
     }
 
-    const normalized = normalizeOmanPassport(raw);
+    const normalized = normalizePassportValue(raw);
+    if (!normalized) {
+      continue;
+    }
     counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
   }
 

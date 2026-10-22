@@ -360,10 +360,27 @@ function rowName(row: AlertRow, label: AlertEvaluationOptions['rowLabel']): stri
   if (typeof supplied === 'string' && supplied.trim()) {
     return supplied.trim();
   }
+  // S1: human label from the row's own values — never a raw row UUID and
+  // never a date value (dates are not names).
+  const data = row.data ?? {};
+  const isDateShaped = (value: string) => (
+    /^\d{4}-\d{2}-\d{2}/.test(value.trim()) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(value.trim())
+  );
+  const preferredKeys = Object.keys(data).filter((key) => /name/i.test(key));
+  const otherKeys = Object.keys(data).filter((key) => !preferredKeys.includes(key));
+  for (const key of [...preferredKeys, ...otherKeys]) {
+    const value = data[key];
+    if (typeof value === 'string' && value.trim() && !isDateShaped(value)) {
+      return value.trim();
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      return String(value);
+    }
+  }
   if (typeof row.category === 'string' && row.category.trim()) {
     return row.category.trim();
   }
-  return row.id;
+  return 'Unnamed record';
 }
 
 function dayText(daysLeft: number): string {

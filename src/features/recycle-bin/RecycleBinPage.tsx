@@ -1,5 +1,7 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
+import { formatLocalDateTime } from '../../lib/date';
+import { rowDisplayLabel } from '../../lib/labels';
 import { can } from '../../lib/permissions';
 import type { ColumnDefinition } from '../../lib/columns';
 import type { Role } from '../auth/auth-types';
@@ -13,10 +15,19 @@ export interface RecycleBinPageProps {
   onPermanentDelete?: (row: SheetRow) => void | Promise<void>;
 }
 
+/** Human label (S2): never a raw row id like `row-7ce65046-…`. */
 function rowLabel(row: SheetRow, columns: readonly ColumnDefinition[]): string {
-  const preferred = columns.find((column) => /name|passport/i.test(column.name) || column.id === 'name');
-  const value = preferred ? row.data[preferred.id] ?? row.data[preferred.name] : null;
-  return value === null || value === undefined || String(value).trim() === '' ? row.id : String(value);
+  return rowDisplayLabel(row, columns);
+}
+
+function deletedAtText(row: SheetRow): string {
+  const raw = row.deletedAt ?? row.deleted_at ?? row.updatedAt ?? row.updated_at;
+  return raw ? formatLocalDateTime(raw) : '—';
+}
+
+function deletedByText(row: SheetRow): string | null {
+  const raw = row.deletedBy ?? row.deleted_by ?? row.updatedBy ?? row.updated_by;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
 }
 
 function displayValue(row: SheetRow, column: ColumnDefinition): string {
@@ -38,6 +49,27 @@ export function RecycleBinPage({
 }: RecycleBinPageProps) {
   const deleted = useMemo(() => deletedRows(rows), [rows]);
   const activeColumns = columns.filter((column) => column.deleted !== true);
+  const [search, setSearch] = useState('');
+
+  // FIXES_UI §7/§8 (RBIN-02): one compact search/count toolbar. The count is
+  // the number of visible (filtered) items, with truthful retention wording —
+  // automatic purge is not active in this build, so items are kept until the
+  // administrator permanently deletes them.
+  const searchTerms = search.trim().toLowerCase();
+  const visible = useMemo(() => {
+    if (!searchTerms) {
+      return deleted;
+    }
+    return deleted.filter((row) => {
+      if (rowLabel(row, activeColumns).toLowerCase().includes(searchTerms)) {
+        return true;
+      }
+      return activeColumns.some((column) => {
+        const value = displayValue(row, column);
+        return value !== '—' && value.toLowerCase().includes(searchTerms);
+      });
+    });
+  }, [activeColumns, deleted, searchTerms]);
 
   if (!can(role, 'recycleBin')) {
     return (
@@ -49,13 +81,27 @@ export function RecycleBinPage({
 
   return (
     <section className="recycle-bin-page" aria-label="Recycle bin">
-      <header>
-        <p>Admin tools</p>
-        <h1>Recycle bin</h1>
-        <p>{deleted.length} deleted {deleted.length === 1 ? 'record' : 'records'}</p>
-      </header>
+      {/* FIXES_UI §7: the page title lives in the top bar; the "Admin tools"
+          eyebrow and duplicate h1 are removed. A compact search/count toolbar. */}
+      {deleted.length > 0 ? (
+        <div className="recycle-bin-toolbar" role="group" aria-label="Recycle bin search and count">
+          <input
+            className="recycle-bin-toolbar__search"
+            aria-label="Search deleted records"
+            type="search"
+            value={search}
+            placeholder="Search deleted records…"
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <span className="recycle-bin-page__count">
+            {visible.length} {visible.length === 1 ? 'item' : 'items'} · kept until permanently deleted
+          </span>
+        </div>
+      ) : null}
       {deleted.length === 0 ? (
-        <p>No deleted records.</p>
+        <p className="recycle-bin-page__empty">Recycle Bin is empty</p>
+      ) : visible.length === 0 ? (
+        <p className="recycle-bin-page__empty">No deleted records match this search</p>
       ) : (
         <table>
           <thead>
@@ -63,6 +109,7 @@ export function RecycleBinPage({
               <th scope="col">Record</th>
               {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
               <th scope="col">Deleted at</th>
+              <th scope="col">Deleted by</th>
               <th scope="col">Actions</th>
             </tr>
           </thead>
@@ -74,8 +121,11 @@ export function RecycleBinPage({
                   <th scope="row">{label}</th>
                   {activeColumns.map((column) => <td key={column.id}>{displayValue(row, column)}</td>)}
                   <td>
-                    {row.updatedAt ?? row.updated_at ?? '—'}
+                    <time dateTime={row.deletedAt ?? row.deleted_at ?? row.updatedAt ?? row.updated_at}>
+                      {deletedAtText(row)}
+                    </time>
                   </td>
+                  <td>{deletedByText(row) ?? '—'}</td>
                   <td>
                     {can(role, 'restore') ? (
                       <button type="button" onClick={() => void onRestore?.(row)}>

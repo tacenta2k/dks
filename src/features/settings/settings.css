@@ -1,7 +1,52 @@
 .settings-page {
   display: grid;
-  gap: 18px;
-  margin-top: 38px;
+  gap: 16px;
+  margin-top: 4px;
+}
+
+/* FIXES_UI §9.1: inner navigation (left) + selected section content (right). */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 200px minmax(0, 1fr);
+  gap: 20px;
+  align-items: start;
+}
+
+.settings-nav {
+  position: sticky;
+  top: 70px;
+  display: grid;
+  gap: 5px;
+}
+
+.settings-nav__item {
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 650;
+  text-align: left;
+}
+
+.settings-nav__item:hover {
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+.settings-nav__item--active {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+  color: var(--color-primary-strong);
+}
+
+.settings-content {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
 }
 
 .settings-page--denied {
@@ -21,7 +66,6 @@
   color: var(--color-text-muted);
 }
 
-.settings-page__header,
 .settings-section__heading,
 .settings-maintenance__card,
 .settings-notification-row,
@@ -30,10 +74,6 @@
   align-items: flex-start;
   justify-content: space-between;
   gap: 18px;
-}
-
-.settings-page__header {
-  align-items: center;
 }
 
 .settings-eyebrow {
@@ -52,18 +92,11 @@
 }
 
 .settings-page h2 {
-  font-size: 25px;
+  font-size: 18px;
 }
 
 .settings-page h3 {
-  font-size: 17px;
-}
-
-.settings-page__description {
-  max-width: 600px;
-  margin: 6px 0 0;
-  color: var(--color-text-muted);
-  font-size: 13px;
+  font-size: 15px;
 }
 
 .settings-alert {
@@ -95,6 +128,17 @@
   gap: 14px;
 }
 
+.settings-field-grid--three {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.settings-summary-options {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 100%;
+}
+
 .settings-field-grid--four {
   grid-template-columns: repeat(4, minmax(0, 1fr));
 }
@@ -115,6 +159,7 @@
 .settings-field input,
 .settings-field select {
   width: 100%;
+  max-width: 320px;
   min-height: 38px;
   padding: 8px 10px;
   border: 1px solid var(--color-border-strong);
@@ -284,6 +329,20 @@
 }
 
 @media (max-width: 900px) {
+  .settings-layout {
+    grid-template-columns: 1fr;
+    gap: 14px;
+  }
+
+  .settings-nav {
+    position: static;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .settings-field-grid--three {
+    grid-template-columns: 1fr;
+  }
+
   .settings-field-grid--four,
   .settings-maintenance__grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -295,7 +354,10 @@
 }
 
 @media (max-width: 560px) {
-  .settings-page__header,
+  .settings-nav {
+    grid-template-columns: 1fr;
+  }
+
   .settings-section__heading,
   .settings-maintenance__card {
     display: grid;

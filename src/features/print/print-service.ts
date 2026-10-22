@@ -2,7 +2,7 @@ import { jsPDF } from 'jspdf';
 import autoTable from 'jspdf-autotable';
 
 import { getPrimaryExpiryColumn, type ColumnDefinition } from '../../lib/columns';
-import { calculateDaysLeft, isValidIsoDate } from '../../lib/date';
+import { calculateDaysLeft, formatDisplayDate, isValidIsoDate } from '../../lib/date';
 import { can } from '../../lib/permissions';
 import type { Role } from '../auth/auth-types';
 import type { SheetRow } from '../sheet/types';
@@ -239,6 +239,16 @@ function printableValue(value: unknown): string {
   return String(value);
 }
 
+function printableCellValue(value: unknown, column: Pick<ReportColumn, 'type'>): string {
+  if (column.type === 'date_start' || column.type === 'date_expiry') {
+    if (value === null || value === undefined || value === '') {
+      return '—';
+    }
+    return formatDisplayDate(String(value));
+  }
+  return printableValue(value);
+}
+
 /**
  * Build the report's filtered, explicitly-selected, Days Left-ascending
  * representation.  No printing or file access occurs here.
@@ -330,12 +340,15 @@ export function exportReportToPdf(model: PrintReportModel, options: PdfExportOpt
   document.setFontSize(16);
   document.text(model.header, 14, 18);
   document.setFontSize(9);
-  document.text(`${model.filterSummary} · Generated ${model.generatedAt}`, 14, 25);
+  const generatedDate = model.generatedAt.slice(0, 10);
+  document.text(`${model.filterSummary} · Generated ${formatDisplayDate(generatedDate)}`, 14, 25);
   autoTable(document, {
     startY: 31,
     head: [model.columns.map((column) => column.name)],
     body: model.rows.map((row) => model.columns.map((column) => (
-      column.generated ? printableValue(row.daysLeft) : printableValue(row.values[column.id])
+      column.generated
+        ? printableValue(row.daysLeft)
+        : printableCellValue(row.values[column.id], column)
     ))),
     styles: { fontSize: 8 },
   });

@@ -1,14 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import { createInMemorySheetRepository, type SheetRepository } from '../src/features/sheet/repository';
+import { seedFixtureColumns } from './fixtures/sheet-columns';
 
 describe('admin repository extensions', () => {
   it('keeps the existing SheetRepository contract assignable for legacy adapters', () => {
     const legacy: SheetRepository = {
       getColumns: async () => [],
       getRows: async () => [],
-      getTemplates: async () => [],
-      loadTemplate: async () => ({ columns: [], rows: [] }),
       addColumn: async (input) => ({ ...input, id: input.id ?? 'column', position: 0 }),
       updateColumn: async (id, patch) => ({ id, name: 'Column', type: 'text', position: 0, ...patch }),
       softDeleteColumn: async () => null,
@@ -25,7 +24,7 @@ describe('admin repository extensions', () => {
 
   it('restores and permanently deletes rows while retaining an audit history', async () => {
     const repository = createInMemorySheetRepository();
-    await repository.loadTemplate('visa');
+    await seedFixtureColumns(repository);
     const row = await repository.createRow({ name: 'Ada' });
 
     await repository.softDeleteRow(row.id);
@@ -42,7 +41,7 @@ describe('admin repository extensions', () => {
 
   it('creates all imported records through one repository helper and audits the import', async () => {
     const repository = createInMemorySheetRepository();
-    await repository.loadTemplate('visa');
+    await seedFixtureColumns(repository);
 
     const created = await repository.importRows([
       { data: { name: 'Grace Hopper' } },

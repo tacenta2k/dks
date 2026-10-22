@@ -12,7 +12,10 @@ import {
   type ColumnDefinition,
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
+import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
 import { findDuplicatePassportValues, validateCell } from '../../lib/validation';
+import { DateCellEditor } from './date-editor';
+import { AddColumnHeader } from './add-column-header';
 import { RowActionsCell, type RowActionsContext, type SheetGridRendererData } from './row-actions';
 import type { SheetRow } from './types';
 
@@ -21,6 +24,8 @@ export interface BuildGridRowsOptions {
 }
 
 export interface GridColumnCallbacks extends RowActionsContext {
+  /** FIXES_UI §5.5 (SHEET-10): opens Column Setup from the `+` header. */
+  onAddColumn?: () => void;
 }
 
 export interface BuiltGridRows {
@@ -136,11 +141,55 @@ export function buildGridColumns(
         definition.cellEditor = 'agSelectCellEditor';
         definition.cellEditorParams = { values: [...dropdownValues(column.options)] };
       }
+      if (column.type === 'date_start' || column.type === 'date_expiry') {
+        // Dates display and type as DD/MM/YYYY while storage stays YYYY-MM-DD.
+        definition.cellEditor = DateCellEditor;
+        definition.valueFormatter = (params) => {
+          const value = params.value;
+          if (value === null || value === undefined || value === '') {
+            return '';
+          }
+          return formatDisplayDate(String(value));
+        };
+        definition.valueParser = (params) => {
+          const value = params.newValue;
+          if (value === null || value === undefined || value === '') {
+            return value;
+          }
+          // Impossible dates keep the typed text (warned by diagnostics);
+          // never silently change it to empty or another date.
+          return toStorableDateValue(value) ?? String(value);
+        };
+      }
       if (column.type === 'number' || column.type === 'price') {
         definition.type = 'numericColumn';
       }
       return definition;
     });
+
+  // FIXES_UI §5.3 (SHEET-06): freeze the first data column so it stays visible
+  // while scrolling horizontally across many columns.
+  if (userColumns.length > 0) {
+    userColumns[0] = { ...userColumns[0], pinned: 'left' };
+  }
+
+  // FIXES_UI §5.3 (SHEET-06): row-number gutter pinned left. AG Grid v32 has no
+  // `rowNumbers` colDef property, so the number is derived from the node index.
+  const rowNumberColumn: ColDef<SheetGridRendererData> = {
+    colId: '__rowNumber',
+    headerName: '',
+    pinned: 'left',
+    lockPosition: true,
+    suppressMovable: true,
+    valueGetter: (params: ValueGetterParams<SheetGridRendererData>) => (params.node?.rowIndex ?? 0) + 1,
+    sortable: false,
+    filter: false,
+    editable: false,
+    width: 40,
+    minWidth: 40,
+    maxWidth: 40,
+    cellClass: 'sheet-row-number-cell',
+  };
 
   const actionsColumn: ColDef<SheetGridRendererData> = {
     colId: '__actions',
@@ -154,6 +203,25 @@ export function buildGridColumns(
     width: 245,
     minWidth: 245,
     cellRenderer: RowActionsCell,
+  };
+
+  // FIXES_UI §5.5 (SHEET-10): the `+` add-column header, pinned before Days
+  // Left. Opens Column Setup; blank body; no sort/filter/drag/menu.
+  const addColumnColumn: ColDef<SheetGridRendererData> = {
+    colId: '__addColumn',
+    headerName: '',
+    headerComponent: AddColumnHeader,
+    headerComponentParams: { onAddColumn: callbacks.onAddColumn },
+    pinned: 'right',
+    lockPosition: 'right',
+    suppressMovable: true,
+    suppressHeaderMenuButton: true,
+    sortable: false,
+    filter: false,
+    editable: false,
+    width: 46,
+    minWidth: 46,
+    maxWidth: 46,
   };
 
   const daysLeftColumn: ColDef<SheetGridRendererData> = {
@@ -186,13 +254,15 @@ export function buildGridColumns(
     valueFormatter: (params) => params.value === null || params.value === undefined ? '—' : String(params.value),
   };
 
-  return [actionsColumn, ...userColumns, daysLeftColumn];
+  return [rowNumberColumn, actionsColumn, ...userColumns, addColumnColumn, daysLeftColumn];
 }
 
 export function rowClassForStatus(status: string | null): string {
   switch (status) {
     case 'Expired':
       return 'sheet-row--expired';
+    case 'Expires today':
+      return 'sheet-row--today';
     case 'Urgent':
       return 'sheet-row--urgent';
     case 'Expiring Soon':

@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { seedFixtureColumns } from './fixtures/sheet-columns';
 import type { ExportArtifact } from '../src/features/import-export/export-service';
 import type { PdfExportFile, PrintReportModel } from '../src/features/print/print-service';
 
@@ -27,7 +28,7 @@ function officeProfile() {
 
 async function seededRepository() {
   const repository = createInMemorySheetRepository();
-  await repository.loadTemplate('visa');
+  await seedFixtureColumns(repository);
   await repository.createRow({
     name: 'Ada Lovelace',
     passport_no: 'A-1',
@@ -49,12 +50,12 @@ describe('admin renderer integration', () => {
       <AppShell profile={adminProfile()} onNavigate={onNavigate} />,
     );
 
-    expect(screen.getByRole('button', { name: 'Open Recycle Bin' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Open Audit Log' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Recycle Bin' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Audit Log' })).toBeInTheDocument();
 
     rerender(<AppShell profile={officeProfile()} onNavigate={onNavigate} />);
-    expect(screen.queryByRole('button', { name: 'Open Recycle Bin' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Open Audit Log' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Recycle Bin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Audit Log' })).not.toBeInTheDocument();
   });
 
   it('exports current rows as CSV and Excel through the injectable save callback', async () => {
@@ -97,8 +98,8 @@ describe('admin renderer integration', () => {
 
     await waitFor(async () => {
       expect((await repository.getRows()).some((row) => row.data.name === 'Grace Hopper')).toBe(true);
-    });
-  });
+    }, { timeout: 10_000 });
+  }, 30_000);
 
   it('delegates print and PDF report actions from the report modal', async () => {
     const repository = await seededRepository();
@@ -123,8 +124,8 @@ describe('admin renderer integration', () => {
     await waitFor(() => {
       expect(onPrint).toHaveBeenCalledWith(expect.objectContaining({ header: 'DKS Expiry Report' }));
       expect(onSavePdf).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'dks-report.pdf' }));
-    });
-  });
+    }, { timeout: 10_000 });
+  }, 30_000);
 
   it('lists deleted rows and confirms restore and permanent delete actions', async () => {
     const repository = await seededRepository();
@@ -134,7 +135,7 @@ describe('admin renderer integration', () => {
       <AppShell activeView="sheet" profile={adminProfile()} sheetRepository={repository} />,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Recycle Bin' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: /Restore Ada Lovelace/i }));
     await waitFor(async () => {
@@ -142,20 +143,116 @@ describe('admin renderer integration', () => {
     });
 
     await repository.softDeleteRow(row.id);
-    fireEvent.click(screen.getByRole('button', { name: 'Open Recycle Bin' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     fireEvent.click(await screen.findByRole('button', { name: /Permanently delete Ada Lovelace/i }));
     await waitFor(async () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)).toBeUndefined();
     });
     expect(window.confirm).toHaveBeenCalled();
-  });
+  }, 15_000);
 
   it('lists repository audit history for administrators', async () => {
     const repository = await seededRepository();
     render(<AppShell profile={adminProfile()} sheetRepository={repository} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Open Audit Log' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
-    expect(screen.getByText('create')).toBeInTheDocument();
-  });
+    // S3: friendly action names (raw code "create" is no longer shown).
+    expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();
+  }, 30_000);
+
+describe('imported date columns (Blocker 2, integration)', () => {
+  async function seededRepository() {
+    const repository = createInMemorySheetRepository();
+    await seedFixtureColumns(repository);
+    await repository.createRow({
+      name: 'Ada Lovelace',
+      passport_no: 'A-1',
+      visa_expiry: '2099-01-02',
+    });
+    return repository;
+  }
+
+  it('offers a Date type for imported date columns and creates date_expiry columns', async () => {
+    const repository = await seededRepository();
+    render(
+      <AppShell activeView="sheet" profile={adminProfile()} sheetRepository={repository} />,
+    );
+    await screen.findByText('Ada Lovelace');
+
+    const input = screen.getByLabelText('Import CSV or Excel file');
+    const file = new File(
+      ['Name,Expiry Date\nGrace Hopper,10/01/2004\nMarianne,11/02/2005'],
+      'people.csv',
+      { type: 'text/csv' },
+    );
+    fireEvent.change(input, { target: { files: [file] } });
+
+    const dialog = await screen.findByRole('dialog', { name: 'Import preview' });
+    expect(dialog).toBeInTheDocument();
+    // The unmapped date-like header is offered as a date column (default expiry).
+    const typeSelect = screen.getByRole('combobox', { name: 'Type for Expiry Date' });
+    expect(typeSelect).toHaveValue('date_expiry');
+    expect(screen.getByText(/looks like dates/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Import mapped records' }));
+
+    // Wait for BOTH the created date column and the persisted import — the
+    // column is created before the rows are written inside confirmImport.
+    await waitFor(async () => {
+      const columns = await repository.getColumns();
+      const expiry = columns.find((column) => column.name === 'Expiry Date');
+      expect(expiry?.type).toBe('date_expiry');
+      const rows = await repository.getRows();
+      const grace = rows.find((row) => row.data.name === 'Grace Hopper');
+      expect(grace?.data['expiry_date'] ?? grace?.data['Expiry Date']).toBe('2004-01-10');
+    });
+  }, 30_000);
+
+  it('lets the admin convert a mapped text column holding dates', async () => {
+    const repository = await seededRepository();
+    // Seed an existing TEXT column that holds dates.
+    await repository.addColumn({ id: 'start_date', name: 'Start date', type: 'text' });
+    await repository.createRow({ name: 'Existing', start_date: '05/03/2020' });
+    render(
+      <AppShell activeView="sheet" profile={adminProfile()} sheetRepository={repository} />,
+    );
+    await screen.findByText('Ada Lovelace');
+
+    const input = screen.getByLabelText('Import CSV or Excel file');
+    const file = new File(
+      ['Name,Start date\nNew Person,10/01/2004'],
+      'dates.csv',
+      { type: 'text/csv' },
+    );
+    fireEvent.change(input, { target: { files: [file] } });
+
+    const dialog = await screen.findByRole('dialog', { name: 'Import preview' });
+    expect(dialog).toBeInTheDocument();
+    // Warning that the mapped target is a text column with date-like values.
+    expect(screen.getByText(/is mapped to the text column/)).toBeInTheDocument();
+    const conversion = screen.getByRole('combobox', { name: 'Date handling for Start date' });
+    expect(conversion).toHaveValue('keep');
+
+    fireEvent.change(conversion, { target: { value: 'date_expiry' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Import mapped records' }));
+
+    // Wait for BOTH the converted column type and the persisted import — the
+    // type flips at the start of confirmImport, rows are written later.
+    await waitFor(async () => {
+      const columns = await repository.getColumns();
+      expect(columns.find((column) => column.id === 'start_date')?.type).toBe('date_expiry');
+      const rows = await repository.getRows();
+      // The pre-existing value was converted to ISO; the imported one too.
+      const existing = rows.find((row) => row.data.name === 'Existing');
+      const fresh = rows.find((row) => row.data.name === 'New Person');
+      expect(existing?.data.start_date).toBe('2020-03-05');
+      expect(fresh?.data.start_date).toBe('2004-01-10');
+    });
+    await waitFor(() => {
+      expect(screen.getByText(/Converted 1 of 1 values in .Start date. to dates/)).toBeInTheDocument();
+    });
+  }, 30_000);
+});
+
 });

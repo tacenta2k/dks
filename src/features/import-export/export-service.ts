@@ -1,8 +1,14 @@
 import * as XLSX from 'xlsx';
 
+import {
+  DAYS_LEFT_COLUMN_ID,
+  DAYS_LEFT_COLUMN_NAME,
+  getPrimaryExpiryColumn,
+  type ColumnDefinition,
+} from '../../lib/columns';
+import { calculateDaysLeft, formatDisplayDate, isValidIsoDate } from '../../lib/date';
 import { can } from '../../lib/permissions';
 import type { Role } from '../auth/auth-types';
-import type { ColumnDefinition } from '../../lib/columns';
 import type { SheetRow } from '../sheet/types';
 
 export interface ExportRequest {
@@ -14,6 +20,8 @@ export interface ExportRequest {
   selectedColumnIds?: readonly string[];
   fileName?: string;
   sheetName?: string;
+  /** Local calendar date used to compute the exported Days Left column. */
+  today?: string | Date;
 }
 
 export interface CsvExportArtifact {
@@ -47,20 +55,56 @@ export function assertExportAccess(role: Role | string | null | undefined): void
 }
 
 function selectedColumns(request: ExportRequest): ColumnDefinition[] {
-  const activeColumns = request.columns.filter((column) => column.deleted !== true);
-  if (!request.selectedColumnIds) {
-    return activeColumns.map((column) => ({ ...column }));
-  }
+  // Only visible user columns are exported; deleted/hidden columns and the
+  // `+` action column never appear in files. Days Left is appended below.
+  const activeColumns = request.columns.filter((column) => (
+    column.deleted !== true && column.visible !== false
+  ));
+  const chosen = !request.selectedColumnIds
+    ? activeColumns.map((column) => ({ ...column }))
+    : (() => {
+      const byId = new Map(activeColumns.map((column) => [column.id, column]));
+      return request.selectedColumnIds
+        .map((id) => byId.get(id))
+        .filter((column): column is ColumnDefinition => Boolean(column))
+        .map((column) => ({ ...column }));
+    })();
 
-  const byId = new Map(activeColumns.map((column) => [column.id, column]));
-  return request.selectedColumnIds
-    .map((id) => byId.get(id))
-    .filter((column): column is ColumnDefinition => Boolean(column))
-    .map((column) => ({ ...column }));
+  const daysLeftColumn: ColumnDefinition = {
+    id: DAYS_LEFT_COLUMN_ID,
+    name: DAYS_LEFT_COLUMN_NAME,
+    type: 'number',
+    position: chosen.length,
+    visible: true,
+  };
+  return [...chosen, daysLeftColumn];
 }
 
 function cellValue(row: SheetRow, column: ColumnDefinition): unknown {
   return row.data[column.id] ?? row.data[column.name] ?? '';
+}
+
+function isDateColumn(column: ColumnDefinition): boolean {
+  return column.type === 'date_start' || column.type === 'date_expiry';
+}
+
+/**
+ * Render one cell for a file export. Dates appear as DD/MM/YYYY (F2); the
+ * generated Days Left column carries the numeric day count computed from the
+ * primary expiry column.
+ */
+function exportCell(row: SheetRow, column: ColumnDefinition, request: ExportRequest): unknown {
+  if (column.id === DAYS_LEFT_COLUMN_ID) {
+    const primary = getPrimaryExpiryColumn(request.columns.filter((candidate) => candidate.deleted !== true));
+    const raw = primary ? cellValue(row, primary) : null;
+    const iso = typeof raw === 'string' && isValidIsoDate(raw.trim()) ? raw.trim() : null;
+    return iso ? calculateDaysLeft(iso, request.today) : '';
+  }
+  const value = cellValue(row, column);
+  if (isDateColumn(column) && typeof value === 'string' && value.trim()) {
+    return formatDisplayDate(value.trim()) || value;
+  }
+  return value;
 }
 
 function cellText(value: unknown): string {
@@ -110,7 +154,7 @@ export function createCsvExport(
   const columns = selectedColumns(request);
   const lines = [
     columns.map((column) => csvCell(column.name)).join(','),
-    ...request.rows.map((row) => columns.map((column) => csvCell(cellValue(row, column))).join(',')),
+    ...request.rows.map((row) => columns.map((column) => csvCell(exportCell(row, column, request))).join(',')),
   ];
 
   return {
@@ -141,7 +185,7 @@ export function createXlsxExport(
   const columns = selectedColumns(request);
   const values = [
     columns.map((column) => column.name),
-    ...request.rows.map((row) => columns.map((column) => cellValue(row, column))),
+    ...request.rows.map((row) => columns.map((column) => exportCell(row, column, request))),
   ];
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet(values);

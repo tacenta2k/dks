@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bar,
   BarChart,
@@ -28,6 +28,9 @@ export interface DashboardPageProps {
   thresholds?: StatusThresholds;
   colors?: Partial<StatusColors> | Record<string, string>;
   onFilter?: (filter: DashboardFilterId) => void;
+  /** Bumped after local mutations / successful syncs; the page re-fetches in
+   *  place so remounts cannot steal focus from user inputs. */
+  refreshToken?: number;
 }
 
 function emptySummary(): DashboardSummary {
@@ -55,6 +58,7 @@ export function DashboardPage({
   thresholds,
   colors,
   onFilter,
+  refreshToken = 0,
 }: DashboardPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -64,8 +68,10 @@ export function DashboardPage({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    if (!options?.quiet) {
+      setLoading(true);
+    }
     try {
       const [columns, rows] = await Promise.all([repository.getColumns(), repository.getRows()]);
       setSummary(getDashboardSummary(rows, columns, { today, thresholds, colors }));
@@ -73,13 +79,24 @@ export function DashboardPage({
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load the dashboard.');
     } finally {
-      setLoading(false);
+      if (!options?.quiet) {
+        setLoading(false);
+      }
     }
   }, [colors, repository, thresholds, today]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const lastRefreshToken = useRef(refreshToken);
+  useEffect(() => {
+    if (lastRefreshToken.current === refreshToken) {
+      return;
+    }
+    lastRefreshToken.current = refreshToken;
+    void refresh({ quiet: true });
+  }, [refreshToken, refresh]);
 
   if (loading) {
     return <div className="dashboard-page dashboard-page--loading" aria-live="polite">Loading dashboard…</div>;

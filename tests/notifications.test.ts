@@ -2,6 +2,44 @@ import { describe, expect, it, vi } from 'vitest';
 import { fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 
+// The main-process notification/tray modules import 'electron'. Mock the
+// module so this suite runs without downloading the Electron binary (offline
+// CI and sandboxed environments) while still exercising the real logic.
+vi.mock('electron', () => {
+  class Notification {
+    title: string;
+
+    body: string;
+
+    constructor(options: { title?: string; body?: string }) {
+      this.title = options.title ?? '';
+      this.body = options.body ?? '';
+    }
+
+    static isSupported(): boolean {
+      return true;
+    }
+
+    show(): void {}
+
+    close(): void {}
+  }
+  return {
+    Notification,
+    Menu: { buildFromTemplate: () => ({ popup: () => undefined }), setApplicationMenu: () => undefined },
+    nativeImage: { createFromPath: () => ({ isEmpty: () => true }) },
+    Tray: class Tray {
+      setToolTip(): void {}
+
+      setContextMenu(): void {}
+
+      on(): void {}
+
+      destroy(): void {}
+    },
+  };
+});
+
 import {
   DEFAULT_ALERT_DAYS,
   createInAppNotificationStore,
@@ -42,6 +80,7 @@ function row(id: string, expiry: string, passportExpiry = '2026-01-01'): AlertRo
   return {
     id,
     data: {
+      name: 'Ravi Kumar',
       visa_expiry: expiry,
       passport_expiry: passportExpiry,
     },
@@ -251,7 +290,9 @@ describe('notification alert evaluator', () => {
     render(createElement(NotificationBell, { notifications: [record], onSnooze }));
     expect(screen.getByRole('button', { name: 'Notifications (1 unread)' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Notifications (1 unread)' }));
-    expect(screen.getByText('r1 expires in 30 days.')).toBeTruthy();
+    // S1: the body carries the human row label, never the raw row id.
+    expect(screen.getByText('Ravi Kumar expires in 30 days.')).toBeTruthy();
+    expect(screen.queryByText(/r1 expires/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Snooze custom' })).toBeTruthy();
   });
 });

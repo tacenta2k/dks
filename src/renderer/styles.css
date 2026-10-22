@@ -85,20 +85,64 @@ button:focus-visible {
 
 .sidebar {
   display: flex;
-  width: 254px;
+  width: 220px;
   min-height: 100vh;
-  flex: 0 0 254px;
+  flex: 0 0 220px;
   flex-direction: column;
-  padding: 28px 18px 22px;
+  padding: 20px 14px 18px;
   border-right: 1px solid var(--color-border);
   background: var(--color-surface);
+  transition:
+    width 160ms ease,
+    flex-basis 160ms ease,
+    padding 160ms ease;
+}
+
+/* FIXES_UI §4: collapsed mode is ~56px — logo and icons only, tooltip via title. */
+.sidebar[data-collapsed='true'] {
+  width: 56px;
+  flex: 0 0 56px;
+  padding: 20px 10px 18px;
+}
+
+.sidebar[data-collapsed='true'] .brand-text,
+.sidebar[data-collapsed='true'] .nav-item__label {
+  display: none;
+}
+
+.sidebar[data-collapsed='true'] .brand-lockup {
+  justify-content: center;
+  padding: 0;
+}
+
+.sidebar[data-collapsed='true'] .sidebar__nav {
+  margin-top: 18px;
+}
+
+.sidebar[data-collapsed='true'] .nav-item {
+  justify-content: center;
+  padding: 12px 0;
+}
+
+.brand-text {
+  min-width: 0;
+}
+
+.brand-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .brand-lockup {
   display: flex;
   align-items: center;
   gap: 11px;
-  padding: 0 12px;
+  padding: 0 8px;
+}
+
+.sidebar[data-collapsed='true'] .brand-lockup {
+  gap: 0;
 }
 
 .brand-mark {
@@ -143,16 +187,7 @@ button:focus-visible {
 }
 
 .sidebar__nav {
-  margin-top: 54px;
-}
-
-.sidebar__label {
-  padding: 0 12px 10px;
-  color: var(--color-text-subtle);
-  font-size: 10px;
-  font-weight: 750;
-  letter-spacing: 0.13em;
-  text-transform: uppercase;
+  margin-top: 22px;
 }
 
 .nav-item {
@@ -191,92 +226,74 @@ button:focus-visible {
 }
 
 .nav-item__icon {
-  display: grid;
+  display: block;
   width: 19px;
   height: 19px;
   flex: 0 0 auto;
-}
-
-.nav-item__icon--grid {
-  grid-template-columns: repeat(2, 7px);
-  grid-template-rows: repeat(2, 7px);
-  gap: 3px;
-}
-
-.nav-item__icon--grid span {
-  border: 1.5px solid currentColor;
-  border-radius: 2px;
-}
-
-.nav-item__icon--sheet {
-  position: relative;
-  display: flex;
-  height: 18px;
-  flex-direction: column;
-  justify-content: space-around;
-  padding: 2px 1px;
-}
-
-.nav-item__icon--sheet::before {
-  position: absolute;
-  inset: 0 0 0 0;
-  border: 1.5px solid currentColor;
-  border-radius: 3px;
-  content: '';
-}
-
-.nav-item__icon--sheet span {
-  z-index: 1;
-  width: 100%;
-  border-top: 1.5px solid currentColor;
-}
-
-.sidebar__bottom {
-  margin-top: auto;
-  padding: 0 9px;
-}
-
-.sync-status {
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  padding: 13px;
-  border: 1px solid var(--color-border);
-  border-radius: 12px;
-  background: var(--color-surface-muted);
+  color: currentColor;
 }
 
 .sync-status__dot,
-.content__badge-dot,
 .placeholder-callout__dot {
   display: block;
   width: 7px;
   height: 7px;
   flex: 0 0 auto;
-  margin-top: 5px;
   border-radius: 50%;
   background: var(--color-success);
   box-shadow: 0 0 0 4px var(--color-success-soft);
 }
 
-.sync-status__title {
-  color: var(--color-text);
-  font-size: 12px;
-  font-weight: 700;
+/* FIXES_UI §3.2: the dot colour follows the real sync state; "Sync error"
+   never uses the green success colour. */
+.sync-status__dot[data-state='cloud'] {
+  background: var(--color-success);
+  box-shadow: 0 0 0 4px var(--color-success-soft);
+}
+
+.sync-status__dot[data-state='syncing'] {
+  background: #f0a13a;
+  box-shadow: 0 0 0 4px rgba(240, 161, 58, 0.22);
+}
+
+.sync-status__dot[data-state='offline'] {
+  background: var(--color-text-subtle);
+  box-shadow: 0 0 0 4px var(--color-surface-muted);
+}
+
+.sync-status__dot[data-state='error'] {
+  background: #e5484d;
+  box-shadow: 0 0 0 4px rgba(229, 72, 77, 0.22);
 }
 
 .sync-status__detail {
-  margin-top: 2px;
-  color: var(--color-text-muted);
-  font-size: 11px;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 650;
 }
 
-.sidebar__version {
-  padding-top: 17px;
-  color: var(--color-text-subtle);
-  font-size: 10px;
-  letter-spacing: 0.04em;
-  text-align: center;
+/* Blocker 3: expandable pending-change details under the sync status. */
+.sync-status__issues {
+  margin-top: 6px;
+}
+
+.sync-status__issues summary {
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.sync-status__list {
+  margin: 6px 0 0;
+  padding-left: 14px;
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.sync-status__list li {
+  overflow-wrap: anywhere;
 }
 
 .app-shell__body {
@@ -286,132 +303,175 @@ button:focus-visible {
 
 .top-bar {
   display: flex;
-  min-height: 83px;
+  height: 50px;
   align-items: center;
   justify-content: space-between;
-  gap: 20px;
-  padding: 18px clamp(24px, 4vw, 58px);
+  gap: 16px;
+  padding: 0 clamp(16px, 3vw, 34px);
   border-bottom: 1px solid var(--color-border);
-  background: color-mix(in srgb, var(--color-surface) 88%, transparent);
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  position: sticky;
+  top: 0;
+  z-index: 30;
 }
 
-.breadcrumb {
-  color: var(--color-text);
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.breadcrumb span {
-  padding: 0 5px;
-  color: var(--color-text-subtle);
-  font-weight: 400;
-}
-
-.top-bar__context {
-  margin-top: 3px;
-  color: var(--color-text-muted);
-  font-size: 11px;
-}
-
-.top-bar__actions {
+.top-bar__left {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
+  min-width: 0;
 }
 
-.theme-control {
-  position: relative;
-}
-
-.theme-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+.top-bar__menu {
+  display: grid;
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  place-items: center;
   border: 1px solid transparent;
-  border-radius: 9px;
+  border-radius: 8px;
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
+  font-size: 16px;
+  line-height: 1;
   transition:
     border-color 160ms ease,
     background 160ms ease,
     color 160ms ease;
 }
 
-.theme-button:hover,
-.theme-button[aria-expanded='true'] {
+.top-bar__menu:hover {
   border-color: var(--color-border);
   background: var(--color-surface-muted);
   color: var(--color-text);
 }
 
-.theme-button__swatch {
-  display: block;
-  width: 15px;
-  height: 15px;
-  border: 1px solid var(--color-border-strong);
-  border-radius: 50%;
+.top-bar__title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 15px;
+  font-weight: 750;
+  letter-spacing: -0.01em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-bar__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* FIXES_UI §3.2: global sync status control with a compact popover. */
+.topbar-sync {
+  position: relative;
+}
+
+.topbar-sync__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 220px;
+  padding: 6px 10px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.topbar-sync__button:hover,
+.topbar-sync__button[aria-expanded='true'] {
+  border-color: var(--color-border);
   background: var(--color-surface);
 }
 
-.theme-button__swatch[data-theme-icon='dark'] {
-  background: #20283b;
-  box-shadow: inset 4px 0 0 #6877ee;
+.topbar-sync__button .sync-status__dot {
+  margin-top: 0;
 }
 
-.theme-button__swatch[data-theme-icon='light'] {
-  background: #fff;
-  box-shadow: inset 0 0 0 3px #f0c76b;
+.topbar-sync__button .sync-status__detail {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.theme-button__chevron {
-  padding-left: 1px;
-  color: var(--color-text-subtle);
-  font-size: 14px;
-  line-height: 1;
-}
-
-.theme-menu {
+/* Popover stays mounted (real pending details are always queryable); it is
+   revealed on click / keyboard and hidden otherwise. */
+.topbar-sync__popover {
   position: absolute;
-  z-index: 10;
+  z-index: 40;
   top: calc(100% + 8px);
   right: 0;
-  width: 148px;
-  padding: 5px;
+  width: 300px;
+  max-width: calc(100vw - 32px);
+  padding: 12px;
   border: 1px solid var(--color-border);
-  border-radius: 11px;
+  border-radius: 12px;
   background: var(--color-surface-raised);
-  box-shadow: 0 12px 30px var(--color-shadow-strong);
+  box-shadow: 0 16px 34px var(--color-shadow-strong);
+  opacity: 0;
+  pointer-events: none;
 }
 
-.theme-menu__item {
-  display: flex;
-  width: 100%;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 9px;
-  border: 0;
-  border-radius: 7px;
+.topbar-sync__popover.is-open {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.topbar-sync__line {
+  margin: 0 0 4px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.topbar-sync__popover .sync-status__issues {
+  margin-top: 4px;
+}
+
+.topbar-theme {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
   background: transparent;
   color: var(--color-text-muted);
   cursor: pointer;
-  font-size: 12px;
-  text-align: left;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
 }
 
-.theme-menu__item:hover,
-.theme-menu__item[aria-checked='true'] {
-  background: var(--color-primary-soft);
-  color: var(--color-primary-strong);
+.topbar-theme:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+.topbar-theme svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* FIXES_UI §3.5: only the avatar is visible; the account menu pops up. */
+.topbar-avatar {
+  position: relative;
 }
 
 .avatar {
   display: grid;
   width: 33px;
   height: 33px;
+  padding: 0;
   place-items: center;
   border: 2px solid var(--color-surface);
   border-radius: 50%;
@@ -420,19 +480,291 @@ button:focus-visible {
   color: #fff;
   font-size: 12px;
   font-weight: 800;
+  cursor: pointer;
+}
+
+.topbar-avatar__popup {
+  position: absolute;
+  z-index: 40;
+  top: calc(100% + 8px);
+  right: 0;
+  width: 240px;
+  max-width: calc(100vw - 32px);
+  padding: 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 16px 34px var(--color-shadow-strong);
+}
+
+.topbar-avatar__email {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.topbar-avatar__role {
+  margin: 2px 0 0;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.topbar-avatar__divider {
+  margin: 10px 0;
+  border: 0;
+  border-top: 1px solid var(--color-border);
+}
+
+.topbar-avatar__logout {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-danger, #e5484d);
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.topbar-avatar__logout:hover {
+  background: var(--color-surface-muted);
 }
 
 .content {
-  width: min(100%, 1140px);
+  width: min(100%, 1280px);
   margin: 0 auto;
-  padding: clamp(42px, 7vw, 88px) clamp(24px, 5vw, 72px);
+  padding: 20px clamp(18px, 3.5vw, 44px) 32px;
 }
 
-.content__intro {
+/* FIXES_UI §7/§8: compact page count — the page title lives in the top bar. */
+.recycle-bin-page__count,
+.audit-log-page__count {
+  margin: 0 0 12px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+/* FIXES_UI §7/§8 (RBIN-01 / AUDIT-01): full-width tables, compact toolbars,
+   and sticky headers on the admin pages. The page title lives in the top bar. */
+.recycle-bin-page,
+.audit-log-page {
+  display: grid;
+  gap: 12px;
+}
+
+.recycle-bin-page table,
+.audit-log-page table {
+  width: 100%;
+  border-collapse: collapse;
+  border: 1px solid var(--color-border);
+  font-size: 12px;
+}
+
+.recycle-bin-page th,
+.recycle-bin-page td,
+.audit-log-page th,
+.audit-log-page td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+}
+
+.recycle-bin-page thead th,
+.audit-log-page thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.recycle-bin-page tbody tr:last-child td,
+.audit-log-page tbody tr:last-child td {
+  border-bottom: 0;
+}
+
+.recycle-bin-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+}
+
+.recycle-bin-toolbar .recycle-bin-page__count {
+  margin: 0;
+  margin-left: auto;
+}
+
+.recycle-bin-toolbar__search {
+  flex: 1 1 240px;
+  min-height: 36px;
+  padding: 7px 11px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 13px;
+}
+
+.recycle-bin-page__empty {
+  margin: 4px 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.audit-log-filters {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.audit-log-filters label {
+  display: grid;
+  gap: 4px;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.audit-log-filters select,
+.audit-log-filters input {
+  min-height: 36px;
+  padding: 6px 9px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.audit-log-view {
+  padding: 4px 10px;
+  margin-right: 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-primary-strong);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 700;
+  vertical-align: middle;
+}
+
+.audit-log-view:hover {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
+/* FIXES_UI §8 (AUDIT-04): details side panel. */
+.audit-log-details {
+  position: fixed;
+  top: 66px;
+  right: 16px;
+  bottom: 16px;
+  z-index: 40;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  width: min(380px, 92vw);
+  padding: 16px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+  box-shadow: 0 18px 42px var(--color-shadow);
+}
+
+.audit-log-details__header {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
-  gap: 24px;
+  gap: 12px;
+}
+
+.audit-log-details__action {
+  margin: 0 0 2px;
+  color: var(--color-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.audit-log-details__meta {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.audit-log-details__close {
+  padding: 5px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.audit-log-details__fields {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.audit-log-details__fields li {
+  display: grid;
+  grid-template-columns: minmax(80px, 42%) 1fr;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--color-border);
+  font-size: 12px;
+}
+
+.audit-log-details__field {
+  color: var(--color-text-muted);
+  font-weight: 700;
+}
+
+.audit-log-details__value {
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+.audit-log-details__raw {
+  border-top: 1px solid var(--color-border);
+  padding-top: 10px;
+}
+
+.audit-log-details__raw summary {
+  cursor: pointer;
+  color: var(--color-primary-strong);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.audit-log-details__raw pre {
+  margin: 8px 0 0;
+  padding: 10px;
+  border-radius: 8px;
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  font-size: 11px;
+  overflow: auto;
+  overflow-wrap: anywhere;
 }
 
 .eyebrow {
@@ -441,43 +773,6 @@ button:focus-visible {
   font-weight: 800;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-}
-
-.content h1 {
-  margin: 7px 0 8px;
-  color: var(--color-text);
-  font-size: clamp(28px, 4vw, 42px);
-  font-weight: 750;
-  letter-spacing: -0.045em;
-  line-height: 1.1;
-}
-
-.content__description {
-  max-width: 550px;
-  margin: 0;
-  color: var(--color-text-muted);
-  font-size: 14px;
-}
-
-.content__badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  margin-top: 5px;
-  padding: 8px 11px;
-  border: 1px solid var(--color-border);
-  border-radius: 999px;
-  color: var(--color-text-muted);
-  font-size: 11px;
-  font-weight: 650;
-  white-space: nowrap;
-}
-
-.content__badge-dot {
-  width: 6px;
-  height: 6px;
-  margin-top: 0;
-  box-shadow: 0 0 0 3px var(--color-success-soft);
 }
 
 .placeholder-panel {

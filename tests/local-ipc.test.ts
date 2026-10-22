@@ -286,3 +286,238 @@ describe('offline local IPC bridge', () => {
     expect(registered.size).toBe(0);
   });
 });
+
+/**
+ * Regression coverage for the Recycle Bin permanent-delete crash:
+ * `Error invoking remote method 'dks:local:permanent-delete-row':
+ * TypeError: Cannot read properties of undefined (reading 'ensureOpen')`.
+ *
+ * Root cause: the IPC helper extracted `store.permanentDeleteEntry` into a
+ * bare `remove` reference and invoked it detached, so `this` was `undefined`
+ * inside `ensureOpen()`. Fixed at the store layer (every SqliteStore method is
+ * bound to its instance in the constructor) and at the call site
+ * (`remove.call(store, ...)`).
+ *
+ * These tests exercise the REAL chain the packaged app executes:
+ * real SqliteStore -> registerLocalIpcHandlers -> ipcMain handler -> the
+ * exact payload shape sent by electron-repository through the preload
+ * bridge. No fake stores: a passing test against a stub proved nothing about
+ * the real binding.
+ */
+describe('recycle bin permanent delete regression (B2)', () => {
+  function registerWithMockIpcMain(store: LocalIpcStore) {
+    const registered = new Map<string, (event: unknown, payload: unknown) => unknown>();
+    const ipcMain = {
+      handle: (channel: string, listener: (event: unknown, payload: unknown) => unknown) => {
+        registered.set(channel, listener);
+      },
+      removeHandler: (channel: string) => {
+        registered.delete(channel);
+      },
+    };
+    const unregister = registerLocalIpcHandlers({ ipcMain: ipcMain as never, store });
+    return { registered, unregister };
+  }
+
+  it('deletes through the real ipcMain registration and real SqliteStore', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-03T00:00:00.000Z' });
+    try {
+      store.createEntry({
+        id: '11111111-2222-4333-8444-555555555555',
+        data: { name: 'Test Person' },
+        category: 'Employee',
+      });
+      store.softDeleteEntry?.('11111111-2222-4333-8444-555555555555', 'soft-del-1', 'admin-1');
+
+      const { registered, unregister } = registerWithMockIpcMain(store);
+      try {
+        const handler = registered.get('dks:local:permanent-delete-row');
+        expect(handler).toBeTypeOf('function');
+
+        // Exact payload shape sent by electron-repository via window.dks.local.
+        const removed = await handler!({}, {
+          id: '11111111-2222-4333-8444-555555555555',
+          role: 'admin',
+          idempotencyKey: 'entry:permanent-delete:regression-1',
+          updatedBy: 'admin-1',
+          actorId: '846536af-f3c6-47c1-8559-d13442c1490a',
+          actor: 'Admin User',
+        });
+
+        expect(removed).toEqual(expect.objectContaining({
+          id: '11111111-2222-4333-8444-555555555555',
+        }));
+        expect(store.getEntry('11111111-2222-4333-8444-555555555555')).toBeNull();
+        expect(store.listOutbox('all').some((item) => (
+          item.operation === 'permanent_delete'
+          && item.idempotencyKey === 'entry:permanent-delete:regression-1'
+        ))).toBe(true);
+        expect(store.listAudit().some((entry) => (
+          entry.action === 'permanent_delete' && entry.entityId === '11111111-2222-4333-8444-555555555555'
+        ))).toBe(true);
+      } finally {
+        unregister();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps every store method bound even when called through a detached reference', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      store.createEntry({
+        id: '22222222-3333-4444-5555-666666666666',
+        data: { name: 'Detached call' },
+        category: 'Employee',
+      });
+      store.softDeleteEntry?.('22222222-3333-4444-5555-666666666666');
+
+      // The exact pre-fix crash path: a bare method reference invoked with
+      // `this === undefined`, which used to throw inside `this.ensureOpen()`.
+      const detached = store.permanentDeleteEntry;
+      expect(() => {
+        detached('22222222-3333-4444-5555-666666666666', 'entry:permanent-delete:detached-1', 'admin-1');
+      }).not.toThrow(/ensureOpen/);
+      expect(store.getEntry('22222222-3333-4444-5555-666666666666')).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('rejects permanent delete without an explicit admin role and keeps the row', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      store.createEntry({
+        id: '33333333-4444-5555-6666-777777777777',
+        data: { name: 'Protected' },
+        category: 'Employee',
+      });
+      const { registered, unregister } = registerWithMockIpcMain(store);
+      try {
+        const handler = registered.get('dks:local:permanent-delete-row')!;
+        expect(() => handler({}, { id: '33333333-4444-5555-6666-777777777777' }))
+          .toThrow(/role/i);
+        expect(() => handler({}, { id: '33333333-4444-5555-6666-777777777777', role: 'office' }))
+          .toThrow(/administrator/i);
+        expect(store.getEntry('33333333-4444-5555-6666-777777777777')).not.toBeNull();
+      } finally {
+        unregister();
+      }
+    } finally {
+      store.close();
+    }
+  });
+
+  it('returns null without side effects when the row is already gone', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      const handlers = createLocalIpcHandlers({ store });
+      const removed = await handlers[LOCAL_IPC_CHANNELS.permanentDeleteRow]({
+        id: '44444444-5555-6666-7777-888888888888',
+        role: 'admin',
+      });
+      expect(removed).toBeNull();
+      expect(store.listOutbox('all').filter((item) => item.operation === 'permanent_delete')).toHaveLength(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the store binding for notification persistence methods', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      const handlers = createLocalIpcHandlers({ store });
+      const created = await handlers[LOCAL_IPC_CHANNELS.addNotification]({
+        type: 'expiry',
+        message: 'Visa expires in 7 days',
+        payload: { id: 'expiry:row-1' },
+      }) as Record<string, unknown>;
+      expect(created.id).toBeDefined();
+
+      const updated = await handlers[LOCAL_IPC_CHANNELS.updateNotification]({
+        id: created.id,
+        read: true,
+      }) as Record<string, unknown>;
+      expect(updated.read).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('permanently deletes through the real SqliteStore without the ensureOpen crash', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-03T00:00:00.000Z' });
+    try {
+      store.createEntry({
+        id: '11111111-2222-4333-8444-555555555555',
+        data: { name: 'Test record' },
+        category: 'Employee',
+      });
+      const handlers = createLocalIpcHandlers({ store, now: () => '2026-01-03T00:00:00.000Z' });
+
+      const removed = await handlers[LOCAL_IPC_CHANNELS.permanentDeleteRow]({
+        id: '11111111-2222-4333-8444-555555555555',
+        role: 'admin',
+        idempotencyKey: 'entry:permanent-delete:regression-1',
+        updatedBy: 'admin-1',
+      });
+
+      expect(removed).toEqual(expect.objectContaining({
+        id: '11111111-2222-4333-8444-555555555555',
+      }));
+      expect(store.getEntry('11111111-2222-4333-8444-555555555555')).toBeNull();
+      // The permanent delete must be queued for cloud sync and audited.
+      expect(store.listOutbox('all').some((item) => (
+        item.operation === 'permanent_delete'
+        && item.idempotencyKey === 'entry:permanent-delete:regression-1'
+      ))).toBe(true);
+      expect(store.listAudit().some((entry) => entry.action === 'permanent_delete')).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('exposes outbox metadata and per-item sync bookkeeping without payloads', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-03T00:00:00.000Z' });
+    try {
+      store.createEntry({
+        id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        data: { name: 'Queued row' },
+        category: 'Employee',
+      });
+      const handlers = createLocalIpcHandlers({ store, now: () => '2026-01-03T00:00:00.000Z' });
+
+      const pending = await handlers[LOCAL_IPC_CHANNELS.listOutbox]({ status: 'pending' }) as Array<Record<string, unknown>>;
+      expect(pending).toHaveLength(1);
+      expect(pending[0]).toEqual(expect.objectContaining({
+        operation: 'create',
+        entityType: 'entry',
+        entityId: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee',
+        status: 'pending',
+      }));
+      // Row payloads must not widen the data exposed over the bridge.
+      expect(pending[0]).not.toHaveProperty('payload');
+
+      const itemId = pending[0].id as number;
+      await handlers[LOCAL_IPC_CHANNELS.markOutboxFailed]({ id: itemId, message: 'network down' });
+      const failed = await handlers[LOCAL_IPC_CHANNELS.listOutbox]({ status: 'failed' }) as Array<Record<string, unknown>>;
+      expect(failed).toEqual([expect.objectContaining({ id: itemId, lastError: 'network down' })]);
+
+      const retry = await handlers[LOCAL_IPC_CHANNELS.retryFailedOutbox](undefined) as { requeued: number };
+      expect(retry.requeued).toBe(1);
+
+      await handlers[LOCAL_IPC_CHANNELS.markOutboxSynced]({ id: itemId });
+      const synced = await handlers[LOCAL_IPC_CHANNELS.listOutbox]({ status: 'synced' }) as Array<Record<string, unknown>>;
+      expect(synced).toEqual([expect.objectContaining({ id: itemId })]);
+    } finally {
+      store.close();
+    }
+  });
+});

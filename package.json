@@ -1,6 +1,7 @@
 {
   "name": "dks",
   "version": "0.1.0",
+  "author": "tacenta2k",
   "private": true,
   "description": "DKS offline-first medical and visa office tracker.",
   "main": "dist-electron/main/index.js",

@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 
 import type {
   NotificationRecord,
@@ -43,8 +43,33 @@ export function NotificationBell({
     [notifications],
   );
 
+  const sectionRef = useRef<HTMLElement>(null);
+  // FIXES_UI §3.3: Escape or clicking outside the bell closes the popover.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setOpen(false);
+      }
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (sectionRef.current && target && !sectionRef.current.contains(target)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [open]);
+
   return (
-    <section className="notification-bell" aria-label="Notifications">
+    <section className="notification-bell" aria-label="Notifications" ref={sectionRef}>
       <button
         className="notification-bell__button"
         type="button"

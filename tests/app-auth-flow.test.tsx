@@ -47,10 +47,19 @@ describe('configured authentication flow', () => {
     render(<App authService={service} />);
 
     expect(await screen.findByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument();
+
+    // FIXES_UI §3.5: the account identity (email + role) lives in the avatar
+    // popup — no visible email text in the top bar.
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }));
     expect(screen.getByText('office@example.com')).toBeInTheDocument();
     expect(screen.getByText('Office')).toBeInTheDocument();
-    expect(screen.getByText('Supabase healthy')).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: /admin tools/i })).not.toBeInTheDocument();
+
+    // FIXES_UI §4: Office sees only Dashboard and Visa Sheet — no admin nav.
+    expect(screen.getByRole('button', { name: 'Dashboard' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Visa Sheet' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Recycle Bin' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Audit Log' })).not.toBeInTheDocument();
   });
 
   it('shows the real login form and signs in with submitted credentials', async () => {
@@ -69,9 +78,14 @@ describe('configured authentication flow', () => {
       email: 'admin@example.com',
       password: 'password',
     });
+    // FIXES_UI §3.5: the account identity lives in the avatar popup.
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }));
     expect(screen.getByText('Admin')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /admin tools/i })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Export data' })).toBeInTheDocument();
+
+    // FIXES_UI §4: Admin sees the admin navigation items.
+    expect(screen.getByRole('button', { name: 'Settings' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Recycle Bin' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Audit Log' })).toBeInTheDocument();
   });
 
   it('returns to the login screen after logout', async () => {
@@ -81,6 +95,8 @@ describe('configured authentication flow', () => {
     render(<App authService={service} />);
     await screen.findByRole('banner', { name: 'DKS top bar' });
 
+    // FIXES_UI §3.5: Log out lives in the avatar popup (no top-bar button).
+    fireEvent.click(screen.getByRole('button', { name: 'Account' }));
     fireEvent.click(screen.getByRole('button', { name: 'Log out' }));
 
     expect(await screen.findByRole('heading', { name: 'Sign in to DKS' })).toBeInTheDocument();
