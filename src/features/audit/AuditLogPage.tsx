@@ -57,6 +57,11 @@ function entryTime(entry: AuditEntry): string {
   return entry.timestamp ?? entry.time ?? entry.createdAt ?? '';
 }
 
+/** Stable identity for a row/panel (falls back to a synthetic key). */
+function rowKey(entry: AuditEntry): string {
+  return entry.id ?? `${entry.action}-${entryTime(entry)}-${entry.actorId ?? ''}`;
+}
+
 /** Local `DD/MM/YYYY HH:mm` for display; the ISO value stays in `dateTime`. */
 export function formatAuditTime(entry: AuditEntry): string {
   const raw = entryTime(entry);
@@ -152,6 +157,68 @@ export function summarizeAuditDetails(details: unknown): string {
   return String(details);
 }
 
+/**
+ * FIXES_UI §8 (AUDIT-04): render a details payload as `field: old → new`
+ * lines. Fields are resolved from the event metadata — values that carry an
+ * explicit `{ old, new }` pair are shown as a transition; everything else is
+ * shown as a plain value. We never invent historical column names: keys are
+ * rendered as-is (with `_` replaced by spaces) and unknown/raw ids are kept
+ * literal rather than mapped to a made-up label.
+ */
+export function formatAuditFieldLines(
+  details: unknown,
+): Array<{ field: string; text: string }> {
+  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+    return [];
+  }
+  const show = (value: unknown): string => {
+    if (value === null || value === undefined || value === '') {
+      return '—';
+    }
+    if (typeof value === 'object') {
+      try {
+        return JSON.stringify(value);
+      } catch {
+        return String(value);
+      }
+    }
+    return String(value);
+  };
+  return Object.entries(details as Record<string, unknown>).map(([key, value]) => {
+    const field = key.replace(/_/g, ' ');
+    if (
+      value &&
+      typeof value === 'object' &&
+      !Array.isArray(value) &&
+      ('old' in value || 'new' in value)
+    ) {
+      const pair = value as { old?: unknown; new?: unknown };
+      return { field, text: `${show(pair.old)} → ${show(pair.new)}` };
+    }
+    return { field, text: show(value) };
+  });
+}
+
+/**
+ * FIXES_UI §8 (AUDIT-04): scrub credential-looking keys before showing raw
+ * JSON so tokens/passwords/secrets are never exposed in the details panel.
+ */
+export function sanitizeAuditDetails(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map((item) => sanitizeAuditDetails(item));
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
+      out[key] = /token|password|passwd|secret|api[-_]?key|authorization|credential|private[-_]?key/i.test(key)
+        ? '•••'
+        : sanitizeAuditDetails(inner);
+    }
+    return out;
+  }
+  return value;
+}
+
 export interface AuditLogPageProps {
   entries: readonly AuditEntry[];
   role?: Role | string | null;
@@ -171,6 +238,7 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
   const [actorFilter, setActorFilter] = useState('');
   const [fromDate, setFromDate] = useState('');
   const [toDate, setToDate] = useState('');
+  const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const labelled = useMemo<LabelledEntry[]>(
     () => entries.map((entry) => ({
@@ -180,6 +248,11 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
       timeLabel: formatAuditTime(entry),
     })),
     [entries, profiles],
+  );
+
+  const selected = useMemo(
+    () => (selectedId ? (labelled.find((item) => rowKey(item.entry) === selectedId) ?? null) : null),
+    [labelled, selectedId],
   );
 
   const actionOptions = useMemo(
@@ -219,6 +292,10 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
       </section>
     );
   }
+
+  const selectedFieldLines = selected
+    ? formatAuditFieldLines(selected.entry.details)
+    : [];
 
   return (
     <section className="audit-log-page" aria-label="Audit log">
@@ -265,11 +342,18 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
           </thead>
           <tbody>
             {orderedEntries.map(({ entry, actionLabel, actorLabel, timeLabel }: LabelledEntry) => (
-              <tr key={entry.id ?? `${entry.action}-${entryTime(entry)}-${entry.actorId ?? ''}`}>
+              <tr key={rowKey(entry)}>
                 <td>{actionLabel}</td>
                 <td>{actorLabel}</td>
                 <td><time dateTime={entryTime(entry)}>{timeLabel}</time></td>
                 <td>
+                  <button
+                    type="button"
+                    className="audit-log-view"
+                    onClick={() => setSelectedId(rowKey(entry))}
+                  >
+                    View
+                  </button>
                   <span>{summarizeAuditDetails(entry.details)}</span>
                   {entry.details && typeof entry.details === 'object' ? (
                     <details>
@@ -283,6 +367,44 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
           </tbody>
         </table>
       )}
+      {/* FIXES_UI §8 (AUDIT-04): details side panel on event click. Shows
+          "field: old → new" transitions from the event metadata (never invented
+          names), plus an optional sanitised raw view. */}
+      {selected ? (
+        <aside className="audit-log-details" aria-label="Event details">
+          <div className="audit-log-details__header">
+            <div>
+              <p className="audit-log-details__action">{selected.actionLabel}</p>
+              <p className="audit-log-details__meta">{selected.actorLabel} · {selected.timeLabel}</p>
+            </div>
+            <button
+              type="button"
+              className="audit-log-details__close"
+              aria-label="Close event details"
+              onClick={() => setSelectedId(null)}
+            >
+              Close
+            </button>
+          </div>
+          <ul className="audit-log-details__fields">
+            {(selectedFieldLines.length > 0
+              ? selectedFieldLines
+              : [{ field: 'Details', text: selected.entry.details === null || selected.entry.details === undefined || selected.entry.details === '' ? 'No details recorded.' : String(selected.entry.details) }]
+            ).map((line) => (
+              <li key={line.field}>
+                <span className="audit-log-details__field">{line.field}</span>
+                <span className="audit-log-details__value">{line.text}</span>
+              </li>
+            ))}
+          </ul>
+          {selected.entry.details && typeof selected.entry.details === 'object' ? (
+            <details className="audit-log-details__raw">
+              <summary>View raw</summary>
+              <pre>{JSON.stringify(sanitizeAuditDetails(selected.entry.details), null, 2)}</pre>
+            </details>
+          ) : null}
+        </aside>
+      ) : null}
     </section>
   );
 }

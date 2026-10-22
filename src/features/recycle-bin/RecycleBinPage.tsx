@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 
 import { formatLocalDateTime } from '../../lib/date';
 import { rowDisplayLabel } from '../../lib/labels';
@@ -49,6 +49,27 @@ export function RecycleBinPage({
 }: RecycleBinPageProps) {
   const deleted = useMemo(() => deletedRows(rows), [rows]);
   const activeColumns = columns.filter((column) => column.deleted !== true);
+  const [search, setSearch] = useState('');
+
+  // FIXES_UI §7/§8 (RBIN-02): one compact search/count toolbar. The count is
+  // the number of visible (filtered) items, with truthful retention wording —
+  // automatic purge is not active in this build, so items are kept until the
+  // administrator permanently deletes them.
+  const searchTerms = search.trim().toLowerCase();
+  const visible = useMemo(() => {
+    if (!searchTerms) {
+      return deleted;
+    }
+    return deleted.filter((row) => {
+      if (rowLabel(row, activeColumns).toLowerCase().includes(searchTerms)) {
+        return true;
+      }
+      return activeColumns.some((column) => {
+        const value = displayValue(row, column);
+        return value !== '—' && value.toLowerCase().includes(searchTerms);
+      });
+    });
+  }, [activeColumns, deleted, searchTerms]);
 
   if (!can(role, 'recycleBin')) {
     return (
@@ -61,12 +82,26 @@ export function RecycleBinPage({
   return (
     <section className="recycle-bin-page" aria-label="Recycle bin">
       {/* FIXES_UI §7: the page title lives in the top bar; the "Admin tools"
-          eyebrow and duplicate h1 are removed. A compact count is kept. */}
+          eyebrow and duplicate h1 are removed. A compact search/count toolbar. */}
       {deleted.length > 0 ? (
-        <p className="recycle-bin-page__count">{deleted.length} deleted {deleted.length === 1 ? 'record' : 'records'}</p>
+        <div className="recycle-bin-toolbar" role="group" aria-label="Recycle bin search and count">
+          <input
+            className="recycle-bin-toolbar__search"
+            aria-label="Search deleted records"
+            type="search"
+            value={search}
+            placeholder="Search deleted records…"
+            onChange={(event) => setSearch(event.target.value)}
+          />
+          <span className="recycle-bin-page__count">
+            {visible.length} {visible.length === 1 ? 'item' : 'items'} · kept until permanently deleted
+          </span>
+        </div>
       ) : null}
       {deleted.length === 0 ? (
-        <p>No deleted records.</p>
+        <p className="recycle-bin-page__empty">Recycle Bin is empty</p>
+      ) : visible.length === 0 ? (
+        <p className="recycle-bin-page__empty">No deleted records match this search</p>
       ) : (
         <table>
           <thead>

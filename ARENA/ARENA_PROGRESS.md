@@ -158,6 +158,36 @@ Per `docs/FIXES_UI.md` §5 (Visa Sheet):
   pass unchanged against the new single-row toolbar and empty states.
 - Gate: rebuild 0; **39 files / 217 tests passed**; typecheck 0; build ✓.
 
+### 2.7 UI batch 3 — Dashboard / Recycle Bin / Audit Log (DASH-01, RBIN-01/02, AUDIT-01/04) — THIS TURN
+Per `docs/FIXES_UI.md` §6/§7/§8:
+- **Dashboard (DASH-01):** the duplicate heading/subtitle/Offline-first pill/
+  Export Data were already absent (top bar carries the title); removed the
+  large 40px top margin so the cards/charts use the available width with no
+  dead space under the 50px top bar.
+- **Recycle Bin (RBIN-01/02):** added one compact search/count toolbar —
+  `[Search deleted records…]  N items · kept until permanently deleted`. The
+  search filters deleted rows by record label or any cell value; the count is
+  the visible (filtered) item count. Truthful retention wording used because
+  **no automatic purge exists in this build** (verified by search of `src/`).
+  Full-width table + sticky header added. New empty states: "Recycle Bin is
+  empty" (0 deleted) and "No deleted records match this search" (0 filter
+  matches). Restore/Permanently-delete buttons kept name-suffixed
+  (`Restore [label]`) — that text is asserted by both `recycle-bin` and
+  `admin-features` tests and matches the confirmed S2 behaviour.
+- **Audit Log (AUDIT-01/04):** full-width table + sticky header + compact
+  filter row (Action / Actor / date range) now styled. Added the details side
+  panel (AUDIT-04): clicking a row's **View** button opens a right-hand panel
+  with the action, actor · time, and `field: old → new` transitions resolved
+  from the event metadata (never invented historical column names), plus an
+  optional **View raw** toggle showing **sanitised** formatted JSON
+  (token/password/secret/api-key/authorization/credential keys masked to `•••`).
+  The inline summary + "Show raw JSON" stay in the table (S3 "raw JSON on
+  demand" is confirmed behaviour and asserted by `audit-log`), so the panel is
+  additive, not a replacement.
+- **Tests:** no coverage removed — `audit-log` (5), `recycle-bin` (3),
+  `dashboard` (3), and App-level `admin-features` (8) all pass unchanged.
+- Gate: typecheck 0; **39 files / 217 tests passed**; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
@@ -172,7 +202,7 @@ Per `docs/FIXES_UI.md` §5 (Visa Sheet):
 - [x] Reconcile diverged pushed lineage (`70d91a0`) via merge `8757152` (no content change; post-merge tree byte-identical to `512dd2b`), then **pushed** fast-forward `70d91a0..8757152` to `origin/arena/0e0155c1-dks`. No force-push.
 - [x] **UI batch 1: Global shell & navigation (SHELL-01..07)** — implemented + gate green. See §2.5.
 - [x] **UI batch 2: Visa Sheet structure (SHEET-02/03/08/15/16-partial)** — one-row toolbar, admin de-dup, empty states, dense rows. See §2.6. (SHEET-01/04/10/11/13/14/16-button-removals deferred — see §2.6.)
-- [ ] UI batch 3: Dashboard / Recycle Bin / Audit Log layouts.
+- [x] **UI batch 3: Dashboard / Recycle Bin / Audit Log (DASH-01, RBIN-01/02, AUDIT-01/04)** — dashboard spacing, RB search/count + empty states, audit details side panel. See §2.7.
 - [ ] UI batch 4: Settings & dialogs, responsive, verification cleanup.
 
 ### Commit map (this session, this lineage)
@@ -180,7 +210,8 @@ Per `docs/FIXES_UI.md` §5 (Visa Sheet):
 - `512dd2b` docs: add ARENA implementation checklist and session progress
 - `8757152` merge: reconcile re-established branch with pushed lineage (no content change)
 - `f6411a8` feat: rebuild global shell and navigation (compact top bar, collapsible sidebar) — UI batch 1
-- `<tip>` feat: consolidate Visa Sheet toolbar + empty states — UI batch 2 (this commit)
+- `02172d3` feat: consolidate Visa Sheet toolbar, admin tools, and empty states — UI batch 2
+- `<tip>` feat: Dashboard / Recycle Bin / Audit Log layouts — UI batch 3 (this commit)
 - (remote `origin/arena/0e0155c1-dks` updated on push; see `git log`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)

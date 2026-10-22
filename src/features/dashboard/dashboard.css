@@ -1,7 +1,7 @@
 .dashboard-page {
   display: grid;
-  gap: 24px;
-  margin-top: 40px;
+  gap: 18px;
+  margin-top: 4px;
 }
 
 .dashboard-page--loading {

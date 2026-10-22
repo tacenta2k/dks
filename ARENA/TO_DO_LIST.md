@@ -74,7 +74,7 @@ Locked decisions that resolve conflicts (later decisions win):
 
 | ID | Source | Requirement | Type | Status |
 |----|--------|-------------|------|--------|
-| DASH-01 | FIXES_UI 6 | Remove duplicate heading/subtitle/Offline-first pill/Export Data; use full width; avoid large blank margins. | UI | NOT_STARTED |
+| DASH-01 | FIXES_UI 6 | Remove duplicate heading/subtitle/Offline-first pill/Export Data; use full width; avoid large blank margins. | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 | DASH-02 | FIXES_UI 6 | Cards row 1: Total Entries, Expired, Expiring Today, This Week, This Month; row 2: Within 2/3/6 Months, Within 1 Year. Compact (~80px); emphasize Expired/Today; reflow small; clickable → Visa Sheet with matching filter; exclude soft-deleted + draft; Primary Expiry only. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 | DASH-03 | FIXES_UI 6 | Charts: left (~40%) Expiry Status donut + legend/counts; right (~60%) Next 12 Months bar; stack on small; mutually-exclusive status categories; no invented status; empty state "No expiry data yet". | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 
@@ -82,8 +82,8 @@ Locked decisions that resolve conflicts (later decisions win):
 
 | ID | Source | Requirement | Type | Status |
 |----|--------|-------------|------|--------|
-| RBIN-01 | FIXES_UI 7 | Layout: top-bar title; compact search/count toolbar; full-width table; no big header/breadcrumb/subtitle/Admin-tools label. | UI | NOT_STARTED |
-| RBIN-02 | FIXES_UI 7 | Toolbar `[Search deleted records…]  N items` (+ truthful retention wording: auto-purge vs "kept until permanently deleted"). | UI | NOT_STARTED |
+| RBIN-01 | FIXES_UI 7 | Layout: top-bar title; compact search/count toolbar; full-width table; no big header/breadcrumb/subtitle/Admin-tools label. | UI | IMPLEMENTED_AWAITING_CONFIRMATION
+| RBIN-02 | FIXES_UI 7 | Toolbar `[Search deleted records…]  N items` (+ truthful retention wording: auto-purge vs "kept until permanently deleted"). | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 | RBIN-03 | FIXES_UI 7 | Table columns Record / Passport No (if available) / Expiry / Deleted / Purge in (if active) / Actions; resolve friendly Record label (else "Untitled record"); never raw UUID; omit inapplicable columns; Expiry DD/MM/YYYY; Deleted DD/MM/YYYY HH:mm; newest first; sticky header. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 | RBIN-04 | FIXES_UI 7 | Short [Restore] [Delete] buttons (no full name appended); prevent duplicate clicks; failure stays visible; confirmations for restore + permanent delete; empty states. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 | RBIN-05 | RESUME S2 | Recycle Bin shows row label (not `row-…`), local DD/MM/YYYY HH:mm deletion time, clear Restore/permanent-delete with confirmation, and "Deleted by" when known. | Functional+UI | CONFIRMED_BY_USER |
@@ -92,10 +92,10 @@ Locked decisions that resolve conflicts (later decisions win):
 
 | ID | Source | Requirement | Type | Status |
 |----|--------|-------------|------|--------|
-| AUDIT-01 | FIXES_UI 8 | Layout: top-bar title; compact filter row; full-width table; newest first; sticky header; read-only (no Restore/Delete/Clear). | UI | NOT_STARTED |
+| AUDIT-01 | FIXES_UI 8 | Layout: top-bar title; compact filter row; full-width table; newest first; sticky header; read-only (no Restore/Delete/Clear). | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 | AUDIT-02 | FIXES_UI 8 | Toolbar `[Search activity…] [Action ▾] [Date range ▾] [Actor ▾]  N events`; hide Actor if no useful choices; search friendly labels/summaries/file names. | UI | IMPLEMENTED_AWAITING_CONFIRMATION |
 | AUDIT-03 | FIXES_UI 8 | Table Time / Actor / Action / Record / Summary; Time DD/MM/YYYY HH:mm; Actor = Admin/Office account (email on hover, never imply individual for shared Office, fallback "Account unavailable", "System" only for system events); colored action badge; readable summary (no raw JSON). | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
-| AUDIT-04 | FIXES_UI 8 | Details side panel on event click: "field: old → new"; resolve from metadata; no invented names for deleted/renamed columns; optional sanitized "View raw"; empty states. | UI | NOT_STARTED |
+| AUDIT-04 | FIXES_UI 8 | Details side panel on event click: "field: old → new"; resolve from metadata; no invented names for deleted/renamed columns; optional sanitized "View raw"; empty states. | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 | AUDIT-05 | RESUME S3 | Real actor (join profiles), friendly action names, local timestamps, readable details + raw JSON on demand, filters for action/actor/date range. | Functional+UI | CONFIRMED_BY_USER |
 
 ## 7. Settings and dialogs
