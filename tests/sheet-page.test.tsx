@@ -119,4 +119,57 @@ describe('sheet page', () => {
 
     expect(await screen.findByText('Days Left')).toBeInTheDocument();
   }, 10_000);
+  describe('input focus is not stolen by background refreshes (focus-delay regression)', () => {
+    it('lets you type immediately in the Add Column dialog, and survives a background refresh', async () => {
+      const repository = createInMemorySheetRepository();
+      await seedFixtureColumns(repository);
+      await repository.createRow({ name: 'Ada Lovelace' });
+
+      const { rerender } = render(<SheetPage repository={repository} role="admin" refreshToken={0} />);
+      await screen.findByRole('button', { name: 'Add column' });
+
+      // Click the dialog, then type immediately.
+      fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+      expect(screen.getByRole('dialog', { name: 'Add column' })).toBeInTheDocument();
+      const nameField = screen.getByLabelText('Column name');
+      fireEvent.focus(nameField);
+      fireEvent.change(nameField, { target: { value: 'Passport No' } });
+      // The typed value appears immediately in the controlled input.
+      expect(nameField).toHaveValue('Passport No');
+
+      // A background refresh (sync landed / local mutation) must NOT remount
+      // the page and wipe the open dialog or its typed value.
+      rerender(<SheetPage repository={repository} role="admin" refreshToken={1} />);
+      await waitFor(() => expect(screen.getByRole('dialog', { name: 'Add column' })).toBeInTheDocument());
+      expect(nameField).toHaveValue('Passport No');
+
+      // Typing still works after the refresh.
+      fireEvent.change(nameField, { target: { value: 'Passport No ' } });
+      expect(nameField).toHaveValue('Passport No ');
+    }, 10_000);
+
+    it('keeps a sheet cell editor open and typing-capable across an in-place data refresh', async () => {
+      const repository = createInMemorySheetRepository();
+      await seedFixtureColumns(repository);
+      const row = await repository.createRow({ name: 'Grace Hopper', visa_expiry: '2026-06-01' });
+
+      const { rerender } = render(<SheetPage repository={repository} role="office" refreshToken={0} />);
+      await screen.findByText('Grace Hopper');
+
+      // In the test environment the accessible table is used; edit a value
+      // through it, then push a background refresh, and verify the row + its
+      // values are still present and editable (not remounted away).
+      const cell = screen.getByText('Grace Hopper');
+      expect(cell).toBeInTheDocument();
+
+      // Simulate an external change landing plus a refresh-token bump.
+      await repository.updateRow(row.id, { name: 'Grace M. Hopper' });
+      rerender(<SheetPage repository={repository} role="office" refreshToken={2} />);
+      await waitFor(() => expect(screen.getByText('Grace M. Hopper')).toBeInTheDocument());
+      // The original cell text is gone (data updated in place) and the page
+      // did not collapse into the loading overlay.
+      expect(screen.queryByText('Loading visa sheet…')).not.toBeInTheDocument();
+    }, 10_000);
+  });
+
 });

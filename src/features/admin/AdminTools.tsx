@@ -48,6 +48,9 @@ export interface AdminToolsProps {
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
   onRepositoryChanged?: () => void;
+  /** Bumped after local mutations / successful syncs; panels re-fetch in
+   *  place so remounts cannot steal focus from user inputs. */
+  refreshToken?: number;
 }
 
 export type AdminExportFormat = 'csv' | 'xlsx';
@@ -469,6 +472,7 @@ export function AdminRecycleBinPanel({
   role,
   actor,
   onRepositoryChanged,
+  refreshToken = 0,
 }: AdminToolsProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -497,6 +501,15 @@ export function AdminRecycleBinPanel({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const lastRefreshToken = useRef(refreshToken);
+  useEffect(() => {
+    if (lastRefreshToken.current === refreshToken) {
+      return;
+    }
+    lastRefreshToken.current = refreshToken;
+    void refresh();
+  }, [refreshToken, refresh]);
 
   const restore = async (row: SheetRow) => {
     if (busyRowId) {

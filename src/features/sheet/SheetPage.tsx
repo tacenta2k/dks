@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import type { CellValueChangedEvent, ColDef } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
@@ -38,6 +38,12 @@ export interface SheetPageProps {
   today?: string | Date;
   /** The host can render the richer administrator toolbar outside the grid. */
   hideAdminActions?: boolean;
+  /**
+   * Bumped by the shell after local mutations and after each successful sync.
+   * The page re-fetches IN PLACE (no remount, no loading overlay) so open cell
+   * editors, dialogs and input focus survive background refreshes.
+   */
+  refreshToken?: number;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -76,6 +82,7 @@ export function SheetPage({
   role = 'office',
   today,
   hideAdminActions = false,
+  refreshToken = 0,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -95,8 +102,13 @@ export function SheetPage({
   // AG Grid needs real layout measurements; jsdom uses the deterministic table below.
   const isTestEnvironment = import.meta.env.MODE === 'test';
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  // `quiet` refreshes replace the data without unmounting the page: the
+  // loading overlay used to destroy open editors, dialogs and focused inputs
+  // on every background refresh (focus-delay regression).
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    if (!options?.quiet) {
+      setLoading(true);
+    }
     try {
       const [nextColumns, nextRows] = await Promise.all([
         repository.getColumns(),
@@ -108,13 +120,24 @@ export function SheetPage({
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load the sheet.');
     } finally {
-      setLoading(false);
+      if (!options?.quiet) {
+        setLoading(false);
+      }
     }
   }, [repository]);
 
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const lastRefreshToken = useRef(refreshToken);
+  useEffect(() => {
+    if (lastRefreshToken.current === refreshToken) {
+      return;
+    }
+    lastRefreshToken.current = refreshToken;
+    void refresh({ quiet: true });
+  }, [refreshToken, refresh]);
 
   const activeColumns = useMemo(
     () => columns.filter((column) => column.deleted !== true && column.visible !== false),
@@ -143,7 +166,7 @@ export function SheetPage({
   const handleDuplicate = useCallback(async (row: SheetRow) => {
     try {
       await repository.duplicateRow(row.id);
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Duplicated ${displayLabel(row, activeColumns)}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to duplicate the row.');
@@ -160,7 +183,7 @@ export function SheetPage({
 
     try {
       await repository.softDeleteRow(row.id);
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Moved ${displayLabel(row, activeColumns)} to the recycle bin.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to delete the row.');
@@ -196,7 +219,7 @@ export function SheetPage({
     }
     try {
       await repository.updateRow(event.data.__rowId, { [field]: event.newValue });
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Saved ${column.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to save the cell.');
@@ -206,7 +229,7 @@ export function SheetPage({
   const addRow = async () => {
     try {
       await repository.createRow({});
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage('Added a new row.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add a row.');
@@ -216,7 +239,7 @@ export function SheetPage({
   const addColumn = async (column: ColumnDefinition) => {
     try {
       await repository.addColumn(column);
-      await refresh();
+      await refresh({ quiet: true });
       setWizardOpen(false);
       setStatusMessage(`Added ${column.name}.`);
     } catch (caught) {
@@ -231,7 +254,7 @@ export function SheetPage({
     }
     try {
       await repository.softDeleteColumn(column.id, role ?? '');
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Removed ${column.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to remove the column.');
@@ -250,7 +273,7 @@ export function SheetPage({
         nextExpiry,
         typeof dataValue(renewRow, primaryExpiry) === 'string' ? dataValue(renewRow, primaryExpiry) as string : null,
       );
-      await refresh();
+      await refresh({ quiet: true });
       setRenewRow(null);
       setStatusMessage(`Renewed ${displayLabel(renewRow, activeColumns)}.`);
     } catch (caught) {

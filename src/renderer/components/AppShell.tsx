@@ -171,6 +171,9 @@ export function AppShell({
   const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
   const [adminView, setAdminView] = useState<AdminView | null>(null);
   const [sheetRevision, setSheetRevision] = useState(0);
+  // Both counters drive IN-PLACE re-fetches of the visible page (no remount):
+  // sheetRevision = local mutation, repositoryRevision = sync landed data.
+  const pageRefreshToken = sheetRevision * 100_000 + repositoryRevision;
   const effectiveView: ShellView = adminView
     ?? (isSettingsOpen || activeView === 'settings' ? 'settings' : activeView);
   const copy = effectiveView === 'settings'
@@ -429,13 +432,15 @@ export function AppShell({
           </div> : null}
 
            {effectiveView === 'dashboard' ? (
+             // No revision in the key: remounting on every sync destroyed
+             // in-progress input focus. The token below re-fetches in place.
              <DashboardPage
-                key={`dashboard-${repositoryRevision}`}
                 repository={sheetRepository}
                thresholds={dashboardThresholds}
-               colors={dashboardColors}
-               onFilter={onDashboardFilter}
-             />
+                colors={dashboardColors}
+                onFilter={onDashboardFilter}
+                refreshToken={pageRefreshToken}
+              />
            ) : effectiveView === 'sheet' ? (
              <div className="admin-integrated-sheet">
                <AdminSheetActions
@@ -448,20 +453,20 @@ export function AppShell({
                  onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
                />
                 <SheetPage
-                   key={`${sheetRevision}-${repositoryRevision}`}
                   repository={sheetRepository}
                   hideAdminActions
                   role={role}
+                  refreshToken={pageRefreshToken}
                 />
-             </div>
+              </div>
            ) : effectiveView === 'recycle-bin' ? (
-             <AdminRecycleBinPanel
-                key={`recycle-bin-${sheetRevision}-${repositoryRevision}`}
-               repository={sheetRepository}
-               role={role}
-               actor={actor}
-               onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
-             />
+              <AdminRecycleBinPanel
+                repository={sheetRepository}
+                role={role}
+                actor={actor}
+                onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
+                refreshToken={pageRefreshToken}
+              />
            ) : effectiveView === 'audit-log' ? (
              <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} profiles={auditProfiles} />
            ) : (

@@ -65,18 +65,22 @@ const sourceRows: SheetRow[] = [
   { id: 'row-1', data: { name: 'Ahmed', visa_expiry: '2026-06-01' }, category: 'Employee', deleted: false },
 ];
 
-function mountGrid(onCellValueChanged?: (event: unknown) => void) {
-  const { rows } = buildGridRows(sourceRows, columns as never);
+function gridProps() {
   const defs = buildGridColumns(columns as never, {
     onDuplicate: vi.fn(),
     onDelete: vi.fn(),
     onRenew: vi.fn(),
   }, 'admin') as ColDef[];
+  const source = (rowsOverride?: SheetRow[]) => buildGridRows(rowsOverride ?? sourceRows, columns as never).rows;
+  return { defs, source };
+}
 
+function mountGrid(onCellValueChanged?: (event: unknown) => void) {
+  const { defs, source } = gridProps();
   return render(
     <div style={{ width: '900px', height: '500px' }}>
       <AgGridReact
-        rowData={rows}
+        rowData={source()}
         columnDefs={defs}
         defaultColDef={{ flex: 1, minWidth: 120, resizable: true, sortable: true, editable: true }}
         getRowId={(params) => params.data.__rowId}
@@ -179,5 +183,45 @@ describe('grid date editor end-to-end (F2)', () => {
     expect(commits).toHaveLength(1);
     const cell = (document.querySelector('.ag-root') as HTMLElement).querySelector('.ag-cell[col-id="visa_expiry"]');
     expect(cell?.textContent ?? '').not.toContain('01/06/2026');
+  }, 15_000);
+
+  it('an in-place data refresh (background sync) does not break a live cell edit', async () => {
+    const { defs, source } = gridProps();
+    const { rerender } = render(
+      <div style={{ width: '900px', height: '500px' }}>
+        <AgGridReact
+          rowData={source()}
+          columnDefs={defs}
+          defaultColDef={{ flex: 1, minWidth: 120, resizable: true, sortable: true, editable: true }}
+          getRowId={(params) => params.data.__rowId}
+        />
+      </div>,
+    );
+    const grid = document.querySelector('.ag-root') as HTMLElement;
+    const cell = grid.querySelector('.ag-cell[col-id="visa_expiry"]') as HTMLElement;
+    fireEvent.doubleClick(cell);
+    const input = await screen.findByLabelText('Date (DD/MM/YYYY)') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: '10' } });
+    expect(input).toHaveValue('10/');
+
+    // Background refresh: new rowData for the same row (name changed remotely).
+    rerender(
+      <div style={{ width: '900px', height: '500px' }}>
+        <AgGridReact
+          rowData={source([{ ...sourceRows[0], data: { name: 'Ahmed Ali', visa_expiry: '2026-06-01' } }])}
+          columnDefs={defs}
+          defaultColDef={{ flex: 1, minWidth: 120, resizable: true, sortable: true, editable: true }}
+          getRowId={(params) => params.data.__rowId}
+        />
+      </div>,
+    );
+    // The editor survived the data refresh — typing continues immediately.
+    expect(input).toBeInTheDocument();
+    fireEvent.change(input, { target: { value: '10012004' } });
+    expect(input).toHaveValue('10/01/2004');
+    fireEvent.keyDown(input, { key: 'Enter' });
+    await waitFor(() => expect(screen.queryByLabelText('Date (DD/MM/YYYY)')).not.toBeInTheDocument());
+    const editedCell = (document.querySelector('.ag-root') as HTMLElement).querySelector('.ag-cell[col-id="visa_expiry"]');
+    expect(editedCell?.textContent).toContain('10/01/2004');
   }, 15_000);
 });
