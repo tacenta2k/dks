@@ -322,6 +322,9 @@ describe('entries RLS — Office edits and deletes of Admin-created rows', () =>
 
 interface FakeRemoteOptions {
   seed?: Record<string, Record<string, unknown>[]>;
+  /** Simulates the server still refusing writes for one row (e.g. old RLS). */
+  rejectEntryId?: string;
+  rejectMessage?: string;
 }
 
 function createFakeRemote(options: FakeRemoteOptions = {}) {
@@ -347,6 +350,12 @@ function createFakeRemote(options: FakeRemoteOptions = {}) {
         return { data: values, error: null };
       },
       insert: async (values) => {
+        if (values.some((value) => value.id === options.rejectEntryId)) {
+          return {
+            data: null,
+            error: { message: options.rejectMessage ?? 'rejected by the server' },
+          };
+        }
         for (const value of values) {
           inserts.push({ table, ...value });
           const rows = tables[table] ?? (tables[table] = []);
@@ -356,6 +365,12 @@ function createFakeRemote(options: FakeRemoteOptions = {}) {
       },
       update: (values) => ({
         eq: async (column: string, id: string) => {
+          if (id === options.rejectEntryId) {
+            return {
+              data: null,
+              error: { message: options.rejectMessage ?? 'rejected by the server' },
+            };
+          }
           updates.push({ table, ...values });
           const rows = tables[table] ?? [];
           const index = rows.findIndex((row) => row[column] === id);
@@ -524,6 +539,69 @@ describe('entries RLS — sync client writes', () => {
       expect(afterTwoFailures.attempts).toBe(2);
       expect(afterTwoFailures.status).toBe('failed');
       expect(afterTwoFailures.lastError).toBe('second failure');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the recorded reason while a failed item is requeued and retried', async () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    try {
+      const item = store.enqueueOutbox({
+        idempotencyKey: 'reason-1',
+        operation: 'update',
+        entityType: 'entry',
+        entityId: ROW_ID,
+        payload: {},
+      });
+      store.markOutboxFailed(item.id, 'permission denied for table entries');
+
+      // Requeuing used to wipe last_error, so a pending retry looked like a
+      // fresh item with no explanation. The reason now survives the retry and
+      // is only cleared once the write actually succeeds.
+      expect(store.retryFailedOutbox()).toBe(1);
+      const [requeued] = store.listOutbox('all');
+      expect(requeued.status).toBe('pending');
+      expect(requeued.lastError).toBe('permission denied for table entries');
+      expect(requeued.attempts).toBe(1);
+
+      store.markOutboxSynced(item.id);
+      const [synced] = store.listOutbox('all');
+      expect(synced.status).toBe('synced');
+      expect(synced.lastError).toBeNull();
+    } finally {
+      store.close();
+    }
+  });
+
+  it('attempts every sibling even when the first item in the queue fails', async () => {
+    const { store, local } = createSqliteLocal();
+    const siblingId = 'aaaaaaaa-5555-4555-8555-000000000005';
+    try {
+      store.createEntry({ id: ROW_ID, data: { name: 'First' }, category: 'Employee' });
+      store.createEntry({ id: siblingId, data: { name: 'Second' }, category: 'Employee' });
+
+      // Every write to the first row is rejected (e.g. a policy that still
+      // refuses); the second row must still be attempted and synced.
+      const remote = createFakeRemote({
+        seed: { entries: [], app_columns: [] },
+        rejectEntryId: ROW_ID,
+        rejectMessage: 'new row violates row-level security policy for table "entries"',
+      });
+
+      const result = await runSupabaseSync({ client: remote.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('error');
+      expect(remote.inserts.some((payload) => payload.id === siblingId)).toBe(true);
+      const items = store.listOutbox('all');
+      const failed = items.filter((row) => row.entityId === ROW_ID);
+      const synced = items.filter((row) => row.entityId === siblingId);
+      expect(failed.every((row) => row.status === 'failed')).toBe(true);
+      expect(failed.every((row) => row.attempts > 0)).toBe(true);
+      expect(failed.every((row) => (row.lastError ?? '').includes('row-level security'))).toBe(true);
+      expect(synced.every((row) => row.status === 'synced')).toBe(true);
+      // The failure is reported per item, never by clearing the whole queue.
+      expect(store.getPendingOutboxCount()).toBe(failed.length);
     } finally {
       store.close();
     }

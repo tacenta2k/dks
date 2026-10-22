@@ -11,6 +11,28 @@ Status legend:
 - `NOT_STARTED` — not yet implemented.
 - `BLOCKED` — waiting on a user-only action (SQL, packaging, secrets).
 
+Round-3 user overrides (latest decisions — these win over anything older):
+
+- **Actions column stays.** It must not be removed; its duplicate / delete /
+  renew controls must be small, aligned, accessible icon buttons with tooltips
+  that sit fully inside each row.
+- **Dashboard is approved ("perfect").** No visual changes to it, ever, in this
+  round.
+- **Visa Sheet fills the whole available content width and height** — no
+  centered max-width wrapper and no wide empty margins (verify at 1920px and at
+  a narrower window).
+- **Draft row sits immediately after the last saved record**, with visible
+  grid/cell borders. When a value is committed, that row becomes a saved row
+  and a new blank draft appears directly beneath it. This supersedes the
+  earlier "pinned to the bottom of the viewport" proposal.
+- **The `+` column header stays.** Add Row / Add Column / Manage Columns toolbar
+  buttons stay removed.
+- **Notification popover:** no custom date snooze; expiry items get Mark read
+  plus only snooze choices that do not exceed the time remaining; an action
+  updates the item in place and must not make the popover disappear.
+- **The three handoff/spec files (`HANDOFF.md`, `docs/RESUME_NEXT_SESSION.md`,
+  `docs/FIXES_UI.md`) are never edited.**
+
 Locked decisions that resolve conflicts (later decisions win):
 - No backups of any kind.
 - No passport-format validation (plain text; non-blocking duplicate warning only).

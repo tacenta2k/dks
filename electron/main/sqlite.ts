@@ -1198,9 +1198,18 @@ export class SqliteStore {
     return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
   }
 
+  /**
+   * Requeue every failed item for another attempt.
+   *
+   * `last_error` is deliberately KEPT: the reason used to be wiped here, so
+   * while the retry was in flight (and if the process died mid-attempt) the
+   * user saw a pending item with no explanation even though the failure had
+   * already been recorded. The reason survives until a successful write
+   * (`markOutboxSynced`) clears it or the next attempt replaces it.
+   */
   public retryFailedOutbox(): number {
     this.ensureOpen();
-    const result = this.database.prepare('UPDATE outbox SET status = \'pending\', last_error = NULL WHERE status = \'failed\'').run();
+    const result = this.database.prepare('UPDATE outbox SET status = \'pending\' WHERE status = \'failed\'').run();
     return result.changes;
   }
 

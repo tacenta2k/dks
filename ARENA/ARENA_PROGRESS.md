@@ -643,3 +643,49 @@ says otherwise; nothing is marked CONFIRMED here.
   narrower than DKS ever runs).
 
 **Batch D gate:** 55 test files / 298 tests passed; typecheck clean; build ✓.
+
+---
+
+# Round 3
+
+Round-3 scope: the Office sync/RLS follow-up, the `app_columns_name_key`
+duplicate during Office sync, the Clear-audit-log failure, Windows startup
+registration, and the remaining UI refinements (Dashboard stays untouched).
+
+## 12. Round 3 — Batch A: Office entry sync / RLS (verified + hardened)
+
+What was already shipped in Round 2 and re-verified here:
+
+- `src/features/sync/supabase-sync.ts` writes **new** rows with `insert()` and
+  **existing** rows with `update().eq('id', …)`. An update therefore never
+  re-runs the INSERT policy — that upsert was the actual cause of
+  `new row violates row-level security policy for table "entries"`.
+- `created_by` is stamped only on INSERT; `updated_by` comes from the live
+  authenticated session; the SQL trigger keeps `created_by` immutable.
+- Soft delete is an UPDATE of a live row (Office may do it); restoring or
+  updating an already-deleted row is refused for Office by the UPDATE policy
+  and the `guard_office_restore` trigger; hard DELETE stays admin-only.
+- Each queued entry is written in its own try/catch, so one rejected row can no
+  longer stop sibling rows (that was the old batch-upsert behaviour, and the
+  reason items showed "attempted 0×" — they were never attempted at all).
+- `markOutboxFailed` increments `attempts`, so a real attempt is never shown as
+  "attempted 0×".
+
+Hardened in this batch:
+
+- `retryFailedOutbox()` no longer clears `last_error`. The recorded reason used
+  to be wiped the moment a retry started, so a pending item could sit there with
+  no explanation (and a crash mid-retry lost it entirely). The reason now
+  survives requeueing and is cleared only by a successful write.
+
+Tests (`tests/entries-rls.test.ts`, 16 passing): policy-model tests for Office
+updating/soft-deleting an Admin-created row, Office being refused on an
+already-deleted row, `created_by` immutability, admin restore/permanent-delete,
+"uses a real UPDATE (not an upsert) … omits created_by", outbox drain to zero,
+attempt counting, **reason retained across requeue**, and **a failing first
+item does not stop its siblings**.
+
+USER-MUST-RUN: `ARENA/sql/fix-entries-rls.sql` (see the Batch C note for its
+audit-log section). Until that file is run on the project, the *server* still
+has the old policy and Office will keep seeing the RLS error — the client fix
+cannot override a database policy.
