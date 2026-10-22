@@ -815,13 +815,51 @@ What changed:
     without touching the registry.
 - `auto-launch` removed from `package.json`; `package-lock.json` regenerated
   and `npm ci --dry-run` verified in sync.
-- `ARENA/WINDOWS_STARTUP.md` documents the single mechanism, read-only
-  PowerShell inspection commands, how to identify a DKS entry from its command
-  path, and safe manual removal steps.
+- The table, the read-only inspection commands and the manual removal steps are
+  recorded below (§15.1–15.3) so no extra spec file had to be added.
+
+### 15.1 The one mechanism
+
+| | |
+|---|---|
+| Mechanism | Electron `app.setLoginItemSettings` (`configureAutoLaunch`) |
+| Windows storage | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\DKS` |
+| Command | `"<install dir>\DKS.exe" --dks-startup=DKS` |
+| Written when | packaged build only, once at startup |
+| Hidden start | never (`openAsHidden: false`; only `--hidden`/`--autostart`/`--startup` hide) |
+
+### 15.2 Read-only inspection (PowerShell)
+
+```powershell
+Get-CimInstance Win32_StartupCommand |
+  Select-Object Name, Location, Command | Format-Table -AutoSize -Wrap
+
+Get-CimInstance Win32_StartupCommand |
+  Where-Object { $_.Name -like 'Aswin*' -or $_.Command -like '*DKS*' } |
+  Select-Object Name, Location, Command | Format-List
+
+Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' |
+  Select-Object * -ExcludeProperty PS* | Format-List
+```
+
+Decide which entry is DKS from the **command path**, never from the name: a
+`…\Programs\DKS\DKS.exe` plus `--dks-startup=DKS` is current DKS; a
+`…\node_modules\electron\dist\electron.exe` entry is a stale development
+registration; anything else (including `utweb`) is not DKS and is left alone.
+
+### 15.3 Manual removal of a confirmed stale DKS entry (user only)
+
+```powershell
+reg export "HKCU\Software\Microsoft\Windows\CurrentVersion\Run" "$env:USERPROFILE\Desktop\dks-run-backup.reg"
+Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name '<CONFIRMED NAME>'
+```
+
+Never delete the whole `Run` key and never use "Disable all"; other apps keep
+their entries there.
 
 Honest limits: the two `Aswin` entries cannot be attributed to DKS from this
-environment — their command paths must be read on the user's PC (see the
-read-only commands in `ARENA/WINDOWS_STARTUP.md`). The separate `utweb`
+environment — their command paths must be read on the user's PC (see §15.2).
+The separate `utweb`
 registry entry is unrelated and is not touched. No registry entry, startup
 setting or shortcut is modified by the app or by this work.
 
