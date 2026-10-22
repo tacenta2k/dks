@@ -1,43 +1,58 @@
 'use strict';
 
 /**
- * R7 — final packaging gate.
+ * R8 — final packaging gate.
  *
  * `scripts/verify-native-modules.mjs` checks the source tree before
  * electron-builder runs. This hook checks the artefact that is actually about
- * to be wrapped in an installer: the packaged application itself.
+ * to be wrapped in an installer: the packaged application itself, as electron-
+ * builder really lays it out on Windows —
  *
- * R7b: the probe no longer requires
- * `resources/app.asar.unpacked/node_modules/better-sqlite3` directly. That
- * failed on Windows with `Cannot find module 'bindings'` because `bindings` is
- * an ordinary production dependency inside `app.asar`, not part of the
- * unpacked native module. The child probe is now anchored at
- * `resources/app.asar/package.json` (see `scripts/lib/app-asar-probe.cjs`), so
- * Electron resolves the package exactly as the running app does and redirects
- * the unpacked `better_sqlite3.node` automatically.
+ *   resources/app.asar              one 127 MB archive FILE (not a folder)
+ *   resources/app.asar.unpacked/    the unpacked native modules
+ *   resources/icon.png              the app icon
  *
- * If the binding is missing, not unpacked, resolved outside the app or built
- * for another ABI, the dist fails here — a broken installer can no longer be
- * produced.
+ * The confirmed Windows failure: an earlier revision ran
+ * `existsSync(resources/app.asar/package.json)` in plain Node. `app.asar` is a
+ * single archive file, so that can never be true and `npm run dist` always
+ * died here. Plain Node therefore only ever checks the archive *file* and its
+ * header listing (`@electron/asar`, same library electron-builder packs with).
+ * Everything *inside* the archive is verified by the child probe
+ * (`scripts/lib/app-asar-probe.cjs`) executed by the packaged Electron with
+ * `ELECTRON_RUN_AS_NODE=1`, whose fs and module loader are ASAR-aware — the
+ * same resolution the real app performs:
+ *
+ *   - better-sqlite3's entry point and its JS production dependencies
+ *     (`bindings`, `file-uri-to-path`) must resolve from inside `app.asar`;
+ *   - the ABI-matched native binding must exist in `app.asar.unpacked`
+ *     (checked on disk here, and re-checked through Electron's redirect there);
+ *   - requiring better-sqlite3 must open an in-memory DB and run `select 1`.
+ *
+ * If any of that fails, the dist fails here with a message that names the
+ * actual problem (missing archive / missing packaged dependency / missing
+ * native binding / ABI mismatch) — a broken installer can no longer be
+ * produced. asar stays enabled, better-sqlite3 stays unpacked, and nothing is
+ * vendored or skipped.
  */
 
 const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 const path = require('node:path');
 
-const MODULE_NAME = 'better-sqlite3';
-const PROBE_SCRIPT = path.join(__dirname, 'lib', 'app-asar-probe.cjs');
-const MAX_LINES = 20;
+const {
+  MODULE_NAME,
+  assertAsarArchiveFile,
+  classifyProbeFailure,
+  expectedProbePaths,
+  findMissingPackagedEntries,
+  pickProbeErrorLines,
+  samePath,
+} = require('./lib/app-asar-inspect.cjs');
 
-function lastLines(text, limit = MAX_LINES) {
-  return String(text ?? '')
-    .replace(/\r\n?/g, '\n')
-    .replace(/\u001b\[[0-9;]*[A-Za-z]/g, '')
-    .split('\n')
-    .map((line) => line.replace(/\s+$/, ''))
-    .filter((line) => line.trim().length > 0)
-    .map((line) => (line.length > 300 ? `${line.slice(0, 299)}…` : line))
-    .slice(-limit);
+const PROBE_SCRIPT = path.join(__dirname, 'lib', 'app-asar-probe.cjs');
+
+function rel(appOutDir, target) {
+  return path.relative(appOutDir, target) || target;
 }
 
 function packagedExecutable(context) {
@@ -53,9 +68,26 @@ function packagedExecutable(context) {
   return candidates.find((candidate) => existsSync(candidate)) ?? null;
 }
 
+function readReport(stdout) {
+  const value = (key) => new RegExp(`${key}=([^\\n]*)`).exec(stdout)?.[1]?.trim() || null;
+  return {
+    electronVersion: value('DKS_ELECTRON'),
+    abi: value('DKS_ABI'),
+    appRoot: value('DKS_APP_ROOT'),
+    packageEntry: value('DKS_PACKAGE'),
+    nativePath: value('DKS_NATIVE'),
+    bindingsEntry: value('DKS_BINDINGS'),
+    fileUriToPathEntry: value('DKS_FILE_URI_TO_PATH'),
+    ok: /DKS_OK=1/.test(stdout),
+  };
+}
+
 /**
  * ELECTRON_RUN_AS_NODE is set for this child process only; the hook itself
- * keeps running as plain Node.
+ * keeps running as plain Node. The child environment is scrubbed so the build
+ * machine cannot inject lookups into the packaged app's module resolution —
+ * and a stray ELECTRON_NO_ASAR cannot silently disable the archive support
+ * this verification relies on.
  */
 function probe(electron, appOutDir, appAsarPackageJson) {
   const env = {
@@ -63,10 +95,9 @@ function probe(electron, appOutDir, appAsarPackageJson) {
     ELECTRON_RUN_AS_NODE: '1',
     ELECTRON_NO_ATTACH_CONSOLE: '1',
   };
-  // Never let the build machine's environment inject a lookup path into the
-  // packaged app's module resolution.
   delete env.NODE_PATH;
   delete env.NODE_OPTIONS;
+  delete env.ELECTRON_NO_ASAR;
 
   const result = spawnSync(electron, [PROBE_SCRIPT, appAsarPackageJson], {
     cwd: appOutDir,
@@ -75,51 +106,102 @@ function probe(electron, appOutDir, appAsarPackageJson) {
     maxBuffer: 20 * 1024 * 1024,
   });
 
-  const stdout = result.stdout ?? '';
-  const stderr = result.stderr ?? '';
-  const value = (key) => new RegExp(`${key}=([^\\n]*)`).exec(stdout)?.[1]?.trim() ?? null;
-
   return {
-    ok: result.status === 0 && /DKS_OK=1/.test(stdout),
+    ...readReport(result.stdout ?? ''),
     status: result.status,
-    electronVersion: value('DKS_ELECTRON'),
-    abi: value('DKS_ABI'),
-    packageEntry: value('DKS_PACKAGE'),
-    nativePath: value('DKS_NATIVE'),
-    appRoot: value('DKS_APP_ROOT'),
-    output: `${stdout}\n${stderr}`,
+    spawnError: result.error ? String(result.error.message ?? result.error) : null,
+    output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
   };
+}
+
+function probeFailureError(appOutDir, result) {
+  const diagnostics = [
+    `electron=${result.electronVersion ?? 'unknown'}`,
+    `module ABI=${result.abi ?? 'unknown'}`,
+    `package=${result.packageEntry ?? 'unresolved'}`,
+    `native=${result.nativePath ?? 'unresolved'}`,
+    `bindings=${result.bindingsEntry ?? 'unresolved'}`,
+    `file-uri-to-path=${result.fileUriToPathEntry ?? 'unresolved'}`,
+  ].join(', ');
+  const detail = pickProbeErrorLines(result.output)
+    .map((line) => `[dks]   ${line}`)
+    .join('\n');
+  const suffix = `${diagnostics}, exit ${String(result.status)}${result.spawnError ? `, spawn: ${result.spawnError}` : ''}`;
+  const hint = '[dks] Refusing to build an installer with a broken local database. '
+    + 'Re-run `npm run dist` — its pre-package guard (verify:native) rebuilds better-sqlite3 for Electron.';
+
+  const kind = classifyProbeFailure(result.output);
+  if (kind === 'abi-mismatch') {
+    return new Error(
+      `[dks] ABI mismatch — the packaged better-sqlite3 native binding was built for a different `
+      + `NODE_MODULE_VERSION than the packaged Electron (${suffix}):\n${detail}\n${hint}`,
+    );
+  }
+  if (kind === 'missing-module') {
+    return new Error(
+      `[dks] a packaged JS dependency could not be resolved from resources/app.asar by the packaged `
+      + `Electron (${suffix}):\n${detail}\n${hint}`,
+    );
+  }
+  return new Error(
+    `[dks] the packaged ${MODULE_NAME} could not be loaded by the packaged Electron (${suffix}):\n`
+    + `${detail}\n${hint}`,
+  );
+}
+
+function assertProbePath(appOutDir, label, actual, expected, devModuleDir) {
+  if (typeof actual === 'string' && actual.length > 0 && actual.startsWith(devModuleDir)) {
+    throw new Error(`[dks] the probe loaded ${label} from the development checkout (${actual}).`);
+  }
+  if (!samePath(actual, expected)) {
+    throw new Error(
+      `[dks] ${label} resolved to ${actual ?? 'nothing'}; expected ${rel(appOutDir, expected)} — `
+      + 'resolution must stay inside resources/app.asar (never app.asar.unpacked, never the build '
+      + 'machine).',
+    );
+  }
 }
 
 module.exports = async function verifyPackagedNativeModules(context) {
   const { appOutDir } = context;
   const resourcesDir = path.join(appOutDir, 'resources');
-  const appAsarPackageJson = path.join(resourcesDir, 'app.asar', 'package.json');
-  const unpackedModule = path.join(resourcesDir, 'app.asar.unpacked', 'node_modules', MODULE_NAME);
-  const unpackedBinary = path.join(unpackedModule, 'build', 'Release', 'better_sqlite3.node');
+  const expected = expectedProbePaths(resourcesDir);
 
   if (!existsSync(resourcesDir)) {
     throw new Error(`[dks] packaged resources directory is missing: ${resourcesDir}`);
   }
 
-  if (!existsSync(appAsarPackageJson)) {
-    throw new Error(
-      `[dks] ${path.join('resources', 'app.asar', 'package.json')} is missing — `
-      + 'asar must stay enabled so the app resolves its dependencies from app.asar.',
-    );
-  }
+  // The archive itself: one FILE. Never existsSync/stat below it in Node.
+  assertAsarArchiveFile(expected.appAsar);
 
-  if (!existsSync(unpackedModule)) {
+  // The unpacked native module is a real on-disk layout — plain fs is right here.
+  if (!existsSync(expected.unpackedModuleDir)) {
     throw new Error(
       `[dks] ${MODULE_NAME} was not unpacked into resources/app.asar.unpacked — `
       + 'check asarUnpack in electron-builder.yml.',
     );
   }
-
-  if (!existsSync(unpackedBinary)) {
+  if (!existsSync(expected.unpackedNativeBinary)) {
     throw new Error(
-      `[dks] the packaged native binding is missing: ${path.relative(appOutDir, unpackedBinary)} — `
+      `[dks] the packaged native binding is missing: ${rel(appOutDir, expected.unpackedNativeBinary)} — `
       + 'the app would start without a local database.',
+    );
+  }
+
+  // Archive contents, verified in plain Node from the asar header: the app
+  // manifest, better-sqlite3's own JavaScript and every JS dependency it
+  // lazily requires must all be readable at runtime. Missing files are named
+  // individually — this is what used to surface much later as
+  // "Cannot find module 'bindings'".
+  const missing = findMissingPackagedEntries(expected.appAsar, resourcesDir);
+  if (missing.length > 0) {
+    const lines = missing
+      .map((problem) => `[dks]   - ${problem.label}: ${problem.entry}`)
+      .join('\n');
+    throw new Error(
+      `[dks] resources/app.asar is missing packaged files the app needs:\n${lines}\n`
+      + '[dks] production dependencies must ship inside the asar (or its app.asar.unpacked mirror) — '
+      + 'check the dependency set in package.json and the asarUnpack globs.',
     );
   }
 
@@ -131,50 +213,22 @@ module.exports = async function verifyPackagedNativeModules(context) {
     );
   }
 
-  const result = probe(electron, appOutDir, appAsarPackageJson);
-  const diagnostics = [
-    `electron=${result.electronVersion ?? 'unknown'}`,
-    `module ABI=${result.abi ?? 'unknown'}`,
-    `package=${result.packageEntry ?? 'unresolved'}`,
-    `native=${result.nativePath ?? 'unresolved'}`,
-  ].join(', ');
-
+  const result = probe(electron, appOutDir, expected.appAsarPackageJson);
   if (!result.ok) {
-    throw new Error(
-      `[dks] the packaged ${MODULE_NAME} could not be loaded by the packaged Electron `
-      + `(${diagnostics}, exit ${String(result.status)}):\n`
-      + lastLines(result.output).map((line) => `[dks]   ${line}`).join('\n') + '\n'
-      + '[dks] Refusing to build an installer with a broken local database. '
-      + 'Re-run `npm run dist` (it rebuilds the module for Electron).',
-    );
+    throw probeFailureError(appOutDir, result);
   }
 
-  // The probe must have loaded the app's own copy, never the dev checkout and
-  // never the bare unpacked directory (that is what broke `bindings`).
-  const expectedDir = path.join(resourcesDir, 'app.asar', 'node_modules', MODULE_NAME);
-  if (!result.packageEntry || !result.packageEntry.startsWith(expectedDir)) {
-    throw new Error(
-      `[dks] ${MODULE_NAME} resolved to ${result.packageEntry ?? 'nothing'}; expected it inside `
-      + `${path.relative(appOutDir, expectedDir)} (dev-checkout or unpacked resolution is not acceptable).`,
-    );
-  }
-
+  // The probe must have loaded the app's own copies, resolved through the
+  // archive — never the dev checkout and never the bare unpacked directory.
   const devModuleDir = path.join(__dirname, '..', 'node_modules', MODULE_NAME);
-  if (result.packageEntry.startsWith(devModuleDir)) {
-    throw new Error(`[dks] the probe loaded the development checkout (${result.packageEntry}).`);
-  }
-
-  const expectedNative = path.join(expectedDir, 'build', 'Release', 'better_sqlite3.node');
-  if (result.nativePath !== expectedNative) {
-    throw new Error(
-      `[dks] the probe expected the unpacked binding at ${expectedNative} but saw `
-      + `${result.nativePath ?? 'nothing'}.`,
-    );
-  }
+  assertProbePath(appOutDir, MODULE_NAME, result.packageEntry, expected.packageEntry, devModuleDir);
+  assertProbePath(appOutDir, "'bindings'", result.bindingsEntry, expected.bindingsEntry, devModuleDir);
+  assertProbePath(appOutDir, "'file-uri-to-path'", result.fileUriToPathEntry, expected.fileUriToPathEntry, devModuleDir);
+  assertProbePath(appOutDir, 'the native binding', result.nativePath, expected.nativePath, devModuleDir);
 
   console.log(
     `[dks] packaged ${MODULE_NAME} loads under Electron `
     + `(module ABI ${result.abi ?? 'unknown'}, Electron ${result.electronVersion ?? 'unknown'}) `
-    + `from ${path.relative(appOutDir, result.packageEntry)}`,
+    + `from ${rel(appOutDir, result.packageEntry)}`,
   );
 };

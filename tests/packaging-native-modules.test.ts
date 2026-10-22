@@ -155,15 +155,21 @@ describe('packaged native modules (R7)', () => {
 
     const post = readNormalised('scripts/after-pack.cjs');
     // Checks the artefact that actually ends up in the installer.
-    expect(post).toContain("'app.asar.unpacked'");
-    expect(post).toContain('better_sqlite3.node');
+    expect(post).toContain('app.asar.unpacked');
     expect(post).toContain('ELECTRON_RUN_AS_NODE');
     expect(post).toContain('throw new Error');
-    // R7b: module resolution is anchored at app.asar, never at app.asar.unpacked
-    // (bindings lives inside the asar), and the child process gets a clean env.
-    expect(post).toContain("'app.asar', 'package.json'");
+    // R8: resources/app.asar is a single archive FILE on the staged output, so
+    // the hook verifies the file and its @electron/asar header listing in plain
+    // Node, and delegates everything inside the archive to the packaged
+    // Electron child probe (ASAR-aware module loading). The child environment
+    // stays scrubbed.
+    expect(post).toContain('assertAsarArchiveFile');
     expect(post).toContain("'lib', 'app-asar-probe.cjs'");
     expect(post).toContain('delete env.NODE_PATH');
+
+    const asarInspect = readNormalised('scripts/lib/app-asar-inspect.cjs');
+    expect(asarInspect).toContain('better_sqlite3.node');
+    expect(asarInspect).toContain('@electron/asar');
   });
 });
 

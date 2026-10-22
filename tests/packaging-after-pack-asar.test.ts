@@ -1,0 +1,623 @@
+import { spawnSync } from 'node:child_process';
+import {
+  copyFileSync,
+  cpSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { createRequire } from 'node:module';
+import { tmpdir } from 'node:os';
+import { basename, dirname, join, resolve } from 'node:path';
+import { describe, expect, it } from 'vitest';
+
+/**
+ * R8 — packaging regression tests for the confirmed Windows failure.
+ *
+ * `dir /a release\win-unpacked\resources` on the real Windows build shows:
+ *
+ *   app.asar               127 MB FILE  (one archive, not a folder)
+ *   app.asar.unpacked      <DIR>       (unpacked native modules)
+ *   icon.png               FILE
+ *
+ * The previous afterPack hook ran `existsSync(resources\app.asar\package.json)`
+ * in plain Node — always false for a real archive file — and `npm run dist`
+ * died. These tests lock the corrected behaviour:
+ *
+ *   - the hook verifies app.asar as a single archive FILE and reads its
+ *     contents with @electron/asar (the same library electron-builder packs
+ *     with), never with Node fs below the archive path;
+ *   - the child probe runs under the packaged Electron with
+ *     ELECTRON_RUN_AS_NODE=1 (asar-aware fs + module loading — Electron's
+ *     `lib/node/init.ts` calls `wrapFsWithAsar`) and must resolve
+ *     better-sqlite3, `bindings` and `file-uri-to-path` from inside the real
+ *     archive file, then load the ABI-matched binding from
+ *     app.asar.unpacked and run `select 1`;
+ *   - each failure mode has its own clear headline: app.asar missing,
+ *     app.asar not a file, packaged JS dependency missing, native binding not
+ *     unpacked, ABI mismatch.
+ *
+ * The Node-level tests run everywhere. The "real Electron" block additionally
+ * runs the packaged-Electron paths end-to-end when an Electron binary is
+ * installed (skipped in the offline Linux sandbox, where electron's
+ * postinstall could not download the binary; runs on the Windows build
+ * machine).
+ */
+
+const require2 = createRequire(import.meta.url);
+const ROOT = resolve(__dirname, '..');
+const DEV_MODULES = join(ROOT, 'node_modules');
+const PROBE = join(ROOT, 'scripts', 'lib', 'app-asar-probe.cjs');
+
+interface ProbePathExpectations {
+  appAsar: string;
+  appAsarPackageJson: string;
+  unpackedDir: string;
+  unpackedModuleDir: string;
+  unpackedNativeBinary: string;
+  packageEntry: string;
+  nativePath: string;
+  bindingsEntry: string;
+  fileUriToPathEntry: string;
+}
+
+interface InspectApi {
+  MODULE_NAME: string;
+  assertAsarArchiveFile(appAsarPath: string): void;
+  classifyProbeFailure(output: string): 'abi-mismatch' | 'missing-module' | 'unknown';
+  expectedProbePaths(resourcesDir: string): ProbePathExpectations;
+  findMissingPackagedEntries(appAsarPath: string, resourcesDir: string): Array<{ entry: string; label: string }>;
+  listAsarEntries(appAsarPath: string): string[];
+  pickProbeErrorLines(output: string, limit?: number): string[];
+}
+
+interface AsarLib {
+  createPackage(src: string, dest: string): Promise<void>;
+}
+
+const afterPack = require2(join(ROOT, 'scripts', 'after-pack.cjs')) as (context: unknown) => Promise<void>;
+const inspect = require2(join(ROOT, 'scripts', 'lib', 'app-asar-inspect.cjs')) as InspectApi;
+const asar = require2('@electron/asar') as AsarLib;
+
+/** CRLF-safe read: a Windows checkout must not change the result. */
+function readNormalised(file: string): string {
+  return readFileSync(resolve(ROOT, file), 'utf8').replace(/\r\n?/g, '\n');
+}
+
+interface LayoutOptions {
+  withAppAsarFile?: boolean;
+  appAsarAsDirectory?: boolean;
+  withUnpackedModule?: boolean;
+  withUnpackedBinary?: boolean;
+  withBindings?: boolean;
+  withFileUriToPath?: boolean;
+  /** 'archive' (default): dependency only inside the asar; 'mirror': only in app.asar.unpacked. */
+  dependencyPlacement?: 'archive' | 'mirror';
+}
+
+interface PackagedLayout {
+  root: string;
+  appOutDir: string;
+  resources: string;
+  appAsar: string;
+  appAsarPackageJson: string;
+  unpacked: string;
+  unpackedModuleDir: string;
+  unpackedNativeBinary: string;
+  cleanup: () => void;
+}
+
+function stageBetterSqlite(target: string) {
+  mkdirSync(join(target, 'lib'), { recursive: true });
+  mkdirSync(join(target, 'build', 'Release'), { recursive: true });
+  copyFileSync(join(DEV_MODULES, 'better-sqlite3', 'package.json'), join(target, 'package.json'));
+  cpSync(join(DEV_MODULES, 'better-sqlite3', 'lib'), join(target, 'lib'), { recursive: true });
+  copyFileSync(
+    join(DEV_MODULES, 'better-sqlite3', 'build', 'Release', 'better_sqlite3.node'),
+    join(target, 'build', 'Release', 'better_sqlite3.node'),
+  );
+}
+
+/**
+ * Builds the real Windows packaging layout on disk: `resources/app.asar` as a
+ * genuine single-file archive (packed with @electron/asar, the library
+ * electron-builder itself uses) plus `resources/app.asar.unpacked`. The temp
+ * path contains spaces, mirroring "Program Files" installs.
+ */
+async function makePackagedLayout(opts: LayoutOptions = {}): Promise<PackagedLayout> {
+  const {
+    withAppAsarFile = true,
+    appAsarAsDirectory = false,
+    withUnpackedModule = true,
+    withUnpackedBinary = true,
+    withBindings = true,
+    withFileUriToPath = true,
+    dependencyPlacement = 'archive',
+  } = opts;
+
+  const root = mkdtempSync(join(tmpdir(), 'dks packaged asar '));
+  const appOutDir = join(root, 'win-unpacked Test App');
+  const resources = join(appOutDir, 'resources');
+  mkdirSync(resources, { recursive: true });
+
+  const appAsar = join(resources, 'app.asar');
+  const unpacked = join(resources, 'app.asar.unpacked');
+  const unpackedModuleDir = join(unpacked, 'node_modules', 'better-sqlite3');
+  const unpackedNativeBinary = join(unpackedModuleDir, 'build', 'Release', 'better_sqlite3.node');
+
+  if (appAsarAsDirectory) {
+    mkdirSync(join(appAsar, 'node_modules'), { recursive: true });
+    writeFileSync(join(appAsar, 'package.json'), JSON.stringify({ name: 'DKS' }));
+  } else if (withAppAsarFile) {
+    const src = join(root, 'asar-src');
+    stageBetterSqlite(join(src, 'node_modules', 'better-sqlite3'));
+    writeFileSync(
+      join(src, 'package.json'),
+      JSON.stringify({ name: 'DKS', version: '0.0.0-test', main: 'dist-electron/main/index.js' }),
+    );
+    if (withBindings && dependencyPlacement === 'archive') {
+      cpSync(join(DEV_MODULES, 'bindings'), join(src, 'node_modules', 'bindings'), { recursive: true });
+    }
+    if (withFileUriToPath && dependencyPlacement === 'archive') {
+      cpSync(
+        join(DEV_MODULES, 'file-uri-to-path'),
+        join(src, 'node_modules', 'file-uri-to-path'),
+        { recursive: true },
+      );
+    }
+    await asar.createPackage(src, appAsar);
+  }
+
+  if (withUnpackedModule) {
+    stageBetterSqlite(unpackedModuleDir);
+    if (dependencyPlacement === 'mirror') {
+      if (withBindings) {
+        cpSync(join(DEV_MODULES, 'bindings'), join(unpacked, 'node_modules', 'bindings'), { recursive: true });
+      }
+      if (withFileUriToPath) {
+        cpSync(
+          join(DEV_MODULES, 'file-uri-to-path'),
+          join(unpacked, 'node_modules', 'file-uri-to-path'),
+          { recursive: true },
+        );
+      }
+    }
+    if (!withUnpackedBinary) {
+      rmSync(unpackedNativeBinary, { force: true });
+    }
+  }
+
+  return {
+    root,
+    appOutDir,
+    resources,
+    appAsar,
+    appAsarPackageJson: join(appAsar, 'package.json'),
+    unpacked,
+    unpackedModuleDir,
+    unpackedNativeBinary,
+    cleanup: () => rmSync(root, { recursive: true, force: true }),
+  };
+}
+
+interface HookResult {
+  ok: boolean;
+  message: string;
+}
+
+/** Runs the real exported afterPack hook against a staging dir. */
+async function runHook(appOutDir: string, productFilename = 'DKS'): Promise<HookResult> {
+  const context = {
+    appOutDir,
+    electronPlatformName: process.platform,
+    packager: { appInfo: { productFilename } },
+  };
+  try {
+    await afterPack(context);
+    return { ok: true, message: '' };
+  } catch (error) {
+    return { ok: false, message: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+function reportValue(stdout: string, key: string): string | null {
+  return new RegExp(`${key}=([^\\n]*)`).exec(stdout)?.[1]?.trim() ?? null;
+}
+
+describe('packaged app.asar archive layout (R8)', () => {
+  it('requires resources/app.asar to be a single archive file, and plain Node never looks inside it', async () => {
+    const layout = await makePackagedLayout();
+    try {
+      // The real staged artifact is one FILE.
+      expect(statSync(layout.appAsar).isFile()).toBe(true);
+      // THE confirmed Windows failure: plain Node cannot see inside an asar
+      // file, so any existsSync below it is a bug by construction.
+      expect(existsSync(join(layout.appAsar, 'package.json'))).toBe(false);
+      // The guard accepts the archive file…
+      expect(() => inspect.assertAsarArchiveFile(layout.appAsar)).not.toThrow();
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('rejects an app.asar that is a directory, with a clear error', async () => {
+    const layout = await makePackagedLayout({ appAsarAsDirectory: true, withAppAsarFile: false });
+    try {
+      expect(() => inspect.assertAsarArchiveFile(layout.appAsar)).toThrow(/single asar archive file/);
+      const result = await runHook(layout.appOutDir);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('must be a single asar archive file');
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('fails with a clear error when resources/app.asar is missing', async () => {
+    const layout = await makePackagedLayout({ withAppAsarFile: false });
+    try {
+      const result = await runHook(layout.appOutDir);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('resources/app.asar is missing');
+      expect(result.message).toContain('asar: true');
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('verifies the packaged JS files inside a real .asar archive via its header, not Node fs', async () => {
+    const layout = await makePackagedLayout();
+    try {
+      const entries = inspect.listAsarEntries(layout.appAsar);
+      expect(entries).toContain('package.json');
+      expect(entries).toContain('node_modules/better-sqlite3/package.json');
+      expect(entries).toContain('node_modules/better-sqlite3/lib/index.js');
+      expect(entries).toContain('node_modules/bindings/package.json');
+      expect(entries).toContain('node_modules/bindings/bindings.js');
+      expect(entries).toContain('node_modules/file-uri-to-path/package.json');
+      expect(entries).toContain('node_modules/file-uri-to-path/index.js');
+      // Nothing is reported missing for a complete archive.
+      expect(inspect.findMissingPackagedEntries(layout.appAsar, layout.resources)).toEqual([]);
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('fails before launch with a clear error when the native binding was not unpacked', async () => {
+    const layout = await makePackagedLayout({ withUnpackedBinary: false });
+    try {
+      // Deliberately NO executable in this fixture: the binding check must
+      // fire before the hook even looks for one.
+      const result = await runHook(layout.appOutDir);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('the packaged native binding is missing');
+      expect(result.message).toContain(join('app.asar.unpacked', 'node_modules', 'better-sqlite3'));
+      expect(result.message).not.toContain('cannot find the packaged Electron executable');
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('fails before launch with a clear error naming the missing packaged JS dependency', async () => {
+    const noBindings = await makePackagedLayout({ withBindings: false });
+    try {
+      const result = await runHook(noBindings.appOutDir);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain('resources/app.asar is missing packaged files');
+      expect(result.message).toContain("the packaged JS dependency 'bindings'");
+      expect(result.message).toContain('node_modules/bindings');
+    } finally {
+      noBindings.cleanup();
+    }
+
+    const noFileUri = await makePackagedLayout({ withFileUriToPath: false });
+    try {
+      const result = await runHook(noFileUri.appOutDir);
+      expect(result.ok).toBe(false);
+      expect(result.message).toContain("the packaged JS dependency 'file-uri-to-path'");
+    } finally {
+      noFileUri.cleanup();
+    }
+  });
+
+  it('tolerates dependencies mirrored under app.asar.unpacked (changed unpack layout)', async () => {
+    const layout = await makePackagedLayout({ dependencyPlacement: 'mirror' });
+    try {
+      // The archive no longer contains bindings, but the unpack mirror does:
+      // Electron resolves both, so this is not a "missing dependency".
+      const entries = inspect.listAsarEntries(layout.appAsar);
+      expect(entries).not.toContain('node_modules/bindings/bindings.js');
+      expect(inspect.findMissingPackagedEntries(layout.appAsar, layout.resources)).toEqual([]);
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('classifies probe failures: ABI mismatch vs missing module vs unknown', () => {
+    const abi = [
+      'Error: The module was compiled against a different Node.js version using',
+      'NODE_MODULE_VERSION 137. This version of Node.js requires',
+      'NODE_MODULE_VERSION 132. Please try re-compiling or re-installing',
+    ].join('\n');
+    expect(inspect.classifyProbeFailure(abi)).toBe('abi-mismatch');
+    expect(inspect.classifyProbeFailure(abi.toLowerCase())).toBe('abi-mismatch');
+    expect(inspect.classifyProbeFailure("Error: Cannot find module 'bindings'")).toBe('missing-module');
+    expect(inspect.classifyProbeFailure('code: MODULE_NOT_FOUND')).toBe('missing-module');
+    expect(inspect.classifyProbeFailure('something exploded')).toBe('unknown');
+    expect(inspect.classifyProbeFailure('')).toBe('unknown');
+  });
+
+  it('picks the signal line out of a loader error instead of stack frames', () => {
+    const noisy = [
+      'internal/modules/cjs/loader:1',
+      '    at Module._extensions..node (node:internal/modules/cjs/loader:1454:18)',
+      '[probe] cannot load better-sqlite3 from the packaged app: The module was compiled against a different Node.js version using',
+      'NODE_MODULE_VERSION 127. This version of Node.js requires',
+      'NODE_MODULE_VERSION 132.',
+      '    at Module.load (node:internal/modules/cjs/loader:1148:32)',
+    ].join('\n');
+    const lines = inspect.pickProbeErrorLines(noisy);
+    expect(lines.some((line) => line.includes('NODE_MODULE_VERSION'))).toBe(true);
+    expect(lines.some((line) => line.includes('[probe] cannot load'))).toBe(true);
+    expect(lines.join(' ')).not.toContain('cjs/loader:1454');
+    expect(lines.join(' ')).not.toContain('Module.load');
+    // Per-line output is capped and limited.
+    expect(inspect.pickProbeErrorLines(`x${'y'.repeat(5_000)}`, 8)[0].length).toBeLessThanOrEqual(300);
+  });
+
+  it('keeps the hook free of any Node-fs access below resources/app.asar', () => {
+    // Scan code without comments (the doc block quotes the historical bug).
+    const hook = readNormalised('scripts/after-pack.cjs')
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .replace(/(^|\s)\/\/[^\n]*/g, '$1');
+    // The exact Windows bug must not come back: no existsSync/stat into the archive.
+    expect(hook).not.toMatch(/existsSync\([^)]*app[A-Za-z]*\.?appAsarPackageJson\)/);
+    expect(hook).not.toMatch(/existsSync\([^)]*app\.asar[^)]*package\.json/);
+    expect(hook).not.toMatch(/statSync\([^)]*appAsarPackageJson\)/);
+    // The archive is checked as a FILE, its contents via @electron/asar, and
+    // everything deeper is delegated to the packaged Electron child probe.
+    expect(hook).toContain('assertAsarArchiveFile');
+    expect(hook).toContain('findMissingPackagedEntries');
+    expect(hook).toContain('ELECTRON_RUN_AS_NODE');
+    expect(hook).toContain('throw new Error');
+    // A build-machine env must not leak (or disable ASAR) in the child.
+    expect(hook).toContain('delete env.NODE_PATH');
+    expect(hook).toContain('delete env.NODE_OPTIONS');
+    expect(hook).toContain('delete env.ELECTRON_NO_ASAR');
+  });
+
+  it('keeps the probe contract: diagnostics first, deps resolved inside app.asar, real query last', () => {
+    const probe = readNormalised('scripts/lib/app-asar-probe.cjs');
+    // Diagnostics are written before resolution/loading can fail.
+    expect(probe.indexOf('DKS_ELECTRON')).toBeLessThan(probe.indexOf('createRequire(appPackageJson)'));
+    // Packaged JS dependencies are iterated from the shared declaration and
+    // each is reported through its DKS_* report key.
+    expect(probe).toContain('JS_DEPENDENCIES');
+    expect(probe).toContain('dep.reportKey');
+    const asarInspect = readNormalised('scripts/lib/app-asar-inspect.cjs');
+    expect(asarInspect).toContain("'bindings'");
+    expect(asarInspect).toContain("'file-uri-to-path'");
+    expect(asarInspect).toContain('DKS_BINDINGS');
+    expect(asarInspect).toContain('DKS_FILE_URI_TO_PATH');
+    // Resolution outside the archive (or through the unpacked dir) is refused.
+    expect(probe).toContain('resolved outside app.asar');
+    expect(probe).toContain('resolved through app.asar.unpacked');
+    // The smoke test: real open + select 1 + close, reported as DKS_OK=1.
+    expect(probe).toContain("new Database(':memory:')");
+    expect(probe).toContain("prepare('select 1 as ok')");
+    expect(probe).toContain('db.close()');
+    expect(probe).toContain('DKS_OK=1');
+  });
+
+  it('keeps @electron/asar out of the archive-inspection module top level (import-safe, CRLF-safe)', () => {
+    const helper = readNormalised('scripts/lib/app-asar-inspect.cjs');
+    expect(helper.startsWith('#!')).toBe(false);
+    expect(helper.indexOf("function loadAsar")).toBeLessThan(helper.indexOf("require('@electron/asar')"));
+  });
+
+  it('proves the probe fs-gate fires with a clear message when the runtime lacks ASAR support', async () => {
+    // Plain Node + a REAL app.asar file: exactly the situation plain Node must
+    // refuse. (Under the packaged Electron — ASAR-aware — the same probe
+    // succeeds; see the real-Electron block below.)
+    const layout = await makePackagedLayout();
+    try {
+      const result = spawnSync(process.execPath, [PROBE, layout.appAsarPackageJson], { encoding: 'utf8' });
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain('ASAR support disabled');
+      expect(result.stderr).toContain('app.asar archive');
+    } finally {
+      layout.cleanup();
+    }
+  });
+});
+
+/**
+ * The packaged-Electron paths, end-to-end. Skipped when the postinstall never
+ * fetched the Electron binary (the offline Linux sandbox); they run wherever
+ * `node_modules/electron` is real — notably the Windows build machine.
+ *
+ * Fixtures are staged into `<electron dist>/resources`: the hook resolves the
+ * packaged resources dir from appOutDir, and the real Electron layout is the
+ * most faithful "win-unpacked" stand-in (its own resources only contain
+ * default_app.asar). Everything staged is removed after each test.
+ */
+function findRealElectron(): { exe: string; exeDir: string; productBase: string } | null {
+  try {
+    const resolved = require2('electron');
+    if (typeof resolved === 'string' && existsSync(resolved)) {
+      const exeDir = dirname(resolved);
+      return {
+        exe: resolved,
+        exeDir,
+        productBase: basename(resolved).replace(/\.exe$/i, ''),
+      };
+    }
+  } catch {
+    // Electron's postinstall did not run (offline install): no binary.
+  }
+  return null;
+}
+
+const realElectron = findRealElectron();
+const realDistResources = realElectron ? join(realElectron.exeDir, 'resources') : null;
+const supportedForRealElectron = process.platform === 'win32' || process.platform === 'linux';
+
+async function stageIntoRealElectronDist(opts: LayoutOptions = {}) {
+  if (!realElectron || !realDistResources) {
+    throw new Error('real Electron fixture requested without a real Electron install');
+  }
+  const layout = await makePackagedLayout(opts);
+  const dstAsar = join(realDistResources, 'app.asar');
+  const dstUnpacked = join(realDistResources, 'app.asar.unpacked');
+  // Always start from a clean slate in case a previous run was interrupted.
+  rmSync(dstAsar, { force: true });
+  rmSync(dstUnpacked, { recursive: true, force: true });
+  copyFileSync(layout.appAsar, dstAsar);
+  cpSync(layout.unpacked, dstUnpacked, { recursive: true });
+  layout.cleanup();
+  return {
+    appOutDir: realElectron.exeDir,
+    resources: realDistResources,
+    appAsar: dstAsar,
+    appAsarPackageJson: join(dstAsar, 'package.json'),
+    unpackedModuleDir: join(dstUnpacked, 'node_modules', 'better-sqlite3'),
+    cleanup: () => {
+      rmSync(dstAsar, { force: true });
+      rmSync(dstUnpacked, { recursive: true, force: true });
+    },
+  };
+}
+
+function electronVersionFromNodeModules(): string | null {
+  try {
+    const raw = readFileSync(join(DEV_MODULES, 'electron', 'package.json'), 'utf8');
+    const version = (JSON.parse(raw) as { version?: unknown }).version;
+    return typeof version === 'string' ? version : null;
+  } catch {
+    return null;
+  }
+}
+
+describe.skipIf(!realElectron || !supportedForRealElectron)(
+  'packaged Electron runtime through the real app.asar file (R8)',
+  () => {
+    it('resolves better-sqlite3, bindings and file-uri-to-path through the real archive file', async () => {
+      const fixture = await stageIntoRealElectronDist();
+      try {
+        const env: NodeJS.ProcessEnv = {
+          ...process.env,
+          ELECTRON_RUN_AS_NODE: '1',
+          ELECTRON_NO_ATTACH_CONSOLE: '1',
+        };
+        delete env.NODE_PATH;
+        delete env.NODE_OPTIONS;
+        delete env.ELECTRON_NO_ASAR;
+        const result = spawnSync(realElectron!.exe, [PROBE, fixture.appAsarPackageJson], {
+          cwd: fixture.appOutDir,
+          env,
+          encoding: 'utf8',
+          maxBuffer: 20 * 1024 * 1024,
+        });
+        const stdout = result.stdout ?? '';
+        const combined = `${stdout}\n${result.stderr ?? ''}`;
+
+        // Resolution must come from INSIDE the real archive file — this is
+        // Electron's ASAR-aware module loading, not a directory walk.
+        const expected = inspect.expectedProbePaths(fixture.resources);
+        const norm = (value: string | null) => (value ?? '')
+          .replace(/[\\/]+$/, '')
+          .replace(/^([A-Z]):/, (match) => match.toLowerCase());
+        expect(norm(reportValue(stdout, 'DKS_PACKAGE'))).toBe(norm(expected.packageEntry));
+        expect(norm(reportValue(stdout, 'DKS_BINDINGS'))).toBe(norm(expected.bindingsEntry));
+        expect(norm(reportValue(stdout, 'DKS_FILE_URI_TO_PATH'))).toBe(norm(expected.fileUriToPathEntry));
+        expect(norm(reportValue(stdout, 'DKS_NATIVE'))).toBe(norm(expected.nativePath));
+        expect(reportValue(stdout, 'DKS_APP_ROOT')).toBeTruthy();
+        expect(reportValue(stdout, 'DKS_ABI')).toMatch(/^\d+$/);
+
+        // Exhaustive outcome: the probe either fully loads (ABI matches this
+        // machine's Electron build) or rejects specifically at the native
+        // load — nothing else is an acceptable failure.
+        const loaded = /DKS_OK=1/.test(stdout);
+        const abiRejected = /NODE_MODULE_VERSION|was compiled against a different/i.test(combined);
+        expect(loaded !== abiRejected).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }, 120_000);
+
+    it('afterPack reports a clear ABI mismatch when the unpacked binding targets another runtime', async (ctx) => {
+      // The staged binding is the dev build (whatever ABI the test-running
+      // Node has). It only models the mismatch when that ABI differs from the
+      // packaged Electron's — e.g. after the documented
+      // `npm rebuild better-sqlite3` misstep, exactly the state that broke the
+      // installer. When node_modules already carries the Electron-ABI build
+      // (right after a successful `npm run dist`) there is nothing to
+      // mismatch: the happy-path test below covers the archive loading then.
+      const probeAbi = spawnSync(
+        realElectron!.exe,
+        ['-e', 'process.stdout.write(process.versions.modules)'],
+        { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8' },
+      );
+      const electronAbi = probeAbi.status === 0 ? (probeAbi.stdout ?? '').trim() : '';
+      if (!electronAbi || electronAbi === process.versions.modules) {
+        // eslint-disable-next-line no-console
+        console.warn(
+          `[dks-test] dev binding and packaged Electron share module ABI ${electronAbi || 'unknown'}; `
+          + 'skipping the synthetic mismatch case (not reproducible in this state)',
+        );
+        ctx.skip();
+        return;
+      }
+      const fixture = await stageIntoRealElectronDist();
+      try {
+        const result = await runHook(fixture.appOutDir, realElectron!.productBase);
+        expect(result.ok).toBe(false);
+        expect(result.message).toContain('ABI mismatch');
+        expect(result.message).toContain('NODE_MODULE_VERSION');
+        expect(result.message).toContain('npm run dist');
+      } finally {
+        fixture.cleanup();
+      }
+    }, 120_000);
+
+    it('full afterPack succeeds when the packaged binding matches the packaged Electron', async (ctx) => {
+      // Stage an Electron-ABI better-sqlite3 build through its own installer.
+      // Needs network access to GitHub Releases: when that is not possible
+      // (offline sandbox), this test skips instead of failing falsely.
+      const fixture = await stageIntoRealElectronDist();
+      try {
+        const prebuildBin = join(DEV_MODULES, 'prebuild-install', 'bin.js');
+        const electronVersion = electronVersionFromNodeModules();
+        let staged = false;
+        if (existsSync(prebuildBin) && electronVersion) {
+          rmSync(join(fixture.unpackedModuleDir, 'build'), { recursive: true, force: true });
+          const attempt = spawnSync(
+            process.execPath,
+            [prebuildBin, '--runtime', 'electron', '--target', electronVersion],
+            { cwd: fixture.unpackedModuleDir, encoding: 'utf8', timeout: 180_000 },
+          );
+          staged = attempt.status === 0
+            && existsSync(join(fixture.unpackedModuleDir, 'build', 'Release', 'better_sqlite3.node'));
+          if (!staged) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[dks-test] could not stage an Electron-ABI better-sqlite3 prebuild `
+              + `(offline or no matching asset): ${(attempt.stderr ?? attempt.stdout ?? '').trim().slice(0, 200)}`,
+            );
+          }
+        }
+        if (!staged) {
+          ctx.skip();
+          return;
+        }
+        const result = await runHook(fixture.appOutDir, realElectron!.productBase);
+        expect(result.ok, result.message).toBe(true);
+      } finally {
+        fixture.cleanup();
+      }
+    }, 240_000);
+  },
+);

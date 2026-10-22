@@ -1544,3 +1544,166 @@ passed**; `npm run typecheck` clean; `npm run build` clean.
 `resources/app.asar` archive (Node can only read it as a directory), and the
 packaged Electron ABI. Those checks run on Windows via
 `npm run dist` / `npm run verify:native`.
+
+## 24. Fix — afterPack must treat resources/app.asar as an archive FILE (R8)
+
+Confirmed Windows packaging failure after `a9d0212`: `npm run dist` died in
+`afterPack` on the real staged output.
+
+### 24.1 Root cause
+
+The user's real staged layout (`dir /a release\win-unpacked\resources`):
+
+```
+app.asar               127 MB FILE   (one archive, not a folder)
+app.asar.unpacked      <DIR>        (unpacked native modules)
+icon.png               FILE
+```
+
+`scripts/after-pack.cjs` (a9d0212) checked
+`existsSync(resources\app.asar\package.json)` in plain Node. `app.asar` is a
+single archive *file*, so that path can never exist in the filesystem — the
+guard threw `resources\app.asar\package.json is missing` on every build even
+though the archive was intact. The probe design itself (anchored at
+`app.asar/package.json` under the packaged Electron, R7c) was sound and is
+kept; the parent-side existence check was the bug.
+
+Why the Electron-side resolve is valid (verified against the exact pinned
+Electron, v34.5.8, upstream source `lib/node/init.ts` and
+`lib/node/asar-fs-wrapper.ts`): `ELECTRON_RUN_AS_NODE=1` still calls
+`wrapFsWithAsar(require('fs'))` as its first step, wraps
+`process.dlopen`/`Module._extensions['.node']` (the `app.asar.unpacked`
+redirect), and wraps `internalModuleStat` — so the packaged Electron resolves
+and loads modules from inside a real `app.asar` file even in run-as-node
+mode, exactly like the running app does. Plain Node cannot, which is
+precisely why Node-side checks must stop at the archive file.
+
+### 24.2 The corrected guard
+
+`scripts/after-pack.cjs` (hook, plain Node on the build machine), in order:
+
+1. `resources/app.asar` exists **as a FILE** (`statSync().isFile()`); a
+   missing archive or a directory masquerading as it fails with a named
+   error. Node never stats below the archive path.
+2. The unpacked module dir and `build/Release/better_sqlite3.node` exist on
+   disk under `resources/app.asar.unpacked` (real fs — correct there).
+3. Archive contents verified in plain Node through the `@electron/asar`
+   header listing (`scripts/lib/app-asar-inspect.cjs`, new pure helper;
+   `@electron/asar` is lazy-required and is what electron-builder packs
+   with): the app manifest, better-sqlite3's `package.json` + its `main`
+   entry, and the packaged JS dependencies `bindings` (package + main) and
+   `file-uri-to-path` (package + main). Missing files are reported
+   one-by-one in a clear "resources/app.asar is missing packaged files"
+   error; an entry mirrored in `app.asar.unpacked` is tolerated (changed
+   unpack layouts stay buildable).
+4. The packaged Electron executable runs the child probe with
+   `ELECTRON_RUN_AS_NODE=1` set **for that child only** (`NODE_PATH`,
+   `NODE_OPTIONS` and now also `ELECTRON_NO_ASAR` are scrubbed from its
+   environment so the build machine cannot poison or neuter ASAR-aware
+   resolution).
+
+`scripts/lib/app-asar-probe.cjs` (child, inside the packaged Electron):
+
+- prints `DKS_ELECTRON`/`DKS_ABI`/`DKS_EXEC`/`DKS_APP_ROOT` before anything
+  can fail;
+- proves the archive is readable through Electron's asar-aware fs
+  (`package.json` inside it must stat — a corrupt archive or a disabled-ASAR
+  runtime gets its own explicit message);
+- resolves `better-sqlite3` **and** `bindings` **and** `file-uri-to-path`
+  with `createRequire(<resources>/app.asar/package.json).resolve`, refuses
+  anything outside `app.asar` or via `app.asar.unpacked`, and reports each
+  path (`DKS_PACKAGE`/`DKS_BINDINGS`/`DKS_FILE_URI_TO_PATH`/`DKS_NATIVE`);
+- checks the native binding is readable (Electron answers from
+  `app.asar.unpacked`);
+- requires the package, opens `:memory:`, runs `select 1 as ok`, closes —
+  the ABI assertion — and prints `DKS_OK=1`.
+
+Failure reporting now names the cause instead of dumping loader noise:
+`classifyProbeFailure` maps the output to *ABI mismatch* (`NODE_MODULE_VERSION`),
+*packaged JS dependency missing* (`Cannot find module`), or generic, and
+`pickProbeErrorLines` prints the signal line (the `[probe] …` message /
+loader error) rather than stack frames. Path validation compares against the
+exact expected in-archive paths (case-folding on Windows).
+
+Nothing about asar (`asar: true`), `asarUnpack` (`node_modules/better-sqlite3/**`),
+the icon configuration, the app identity, the dependencies or the pre-package
+`verify:native` ABI guard changed. No binaries are vendored; the guard is not
+bypassed or weakened — it is stricter (it previously could not pass at all).
+
+### 24.3 Regression tests
+
+New suite `tests/packaging-after-pack-asar.test.ts` — 16 tests:
+
+- **real archive as a FILE, not a directory**: fixtures are packed with
+  `@electron/asar` itself under a temp path containing spaces; asserts
+  `statSync(app.asar).isFile()` and that plain-Node
+  `existsSync(app.asar/package.json)` is false — the exact Windows failure
+  line, locked;
+- **hook failure modes with clear errors**: archive missing ("resources/app.asar
+  is missing"), archive as directory ("must be a single asar archive file"),
+  native binding not unpacked ("the packaged native binding is missing",
+  fired before the executable lookup), a missing packaged JS dependency
+  ("the packaged JS dependency 'bindings'" / "'file-uri-to-path'" named with
+  its archive path), and unpack-mirror tolerance;
+- **classification**: ABI mismatch vs missing module vs unknown, and
+  signal-line extraction (NODE_MODULE_VERSION line survives, `[eval]`
+  frames do not);
+- **probe contract**: diagnostics before resolution, explicit
+  `DKS_BINDINGS`/`DKS_FILE_URI_TO_PATH` reporting, refusal outside the
+  archive, and the `:memory:` + `select 1` + close smoke test; plus a
+  Node-vs-asar contrast test proving the probe's fs gate fires with a clear
+  message under a runtime without ASAR support;
+- **real Electron block** (skipped where the postinstall binary is absent —
+  the offline Linux sandbox; runs on the Windows build machine):
+  - better-sqlite3 + both JS deps resolve through the **real archive file**
+    under `ELECTRON_RUN_AS_NODE`; the outcome is asserted exhaustively
+    (either full `DKS_OK=1` load, or rejection specifically at the native
+    load with `NODE_MODULE_VERSION` — nothing else is acceptable);
+  - afterPack reports the classified "ABI mismatch … NODE_MODULE_VERSION
+    … npm run dist" error when the staged binding is the Node-ABI dev build
+    (skips with a clear note when dev and Electron ABIs coincide, i.e. right
+    after a successful dist);
+  - full afterPack **success** with an Electron-ABI prebuild staged through
+    better-sqlite3's own installer (skips cleanly when the GitHub download
+    is unreachable).
+
+`tests/packaging-native-modules.test.ts`: two stale source assertions
+updated to the R8 contract (17 tests, all passing).
+
+CRLF re-verification: all five guard scripts (`after-pack.cjs`,
+`app-asar-probe.cjs`, `app-asar-inspect.cjs`, `native-guard.mjs`,
+`verify-native-modules.mjs`) were converted to CRLF in place and the two
+packaging suites still passed 30/30 (files restored to LF afterwards).
+
+### 24.4 Gate results (Linux sandbox, Node v22.22.3, ABI 127)
+
+- `npm rebuild better-sqlite3` — rebuilt (offline source build; sandbox
+  blocks the prebuilt download), binding loads (`select 1`).
+- `npm test` — **62 files / 406 passed / 3 skipped = 409** (was 61/393; the
+  skips are the real-Electron block, which needs the Electron binary that
+  the sandbox could not download — it runs on Windows).
+- `npm run typecheck` — clean. `npm run build` — clean (known chunk-size
+  warnings only).
+- Electron itself could not be installed here (GitHub release downloads are
+  blocked), so the packaged-Electron legs are source-verified against
+  Electron v34.5.8 and gate-tested by the sandbox skippable block; the
+  definitive proof is the Windows run below.
+
+### 24.5 Exact Windows command order (user, from a clean checkout state)
+
+```bat
+cd /d <repo>
+npm rebuild better-sqlite3
+npm test
+npm run typecheck
+npm run build
+npm run verify:native
+npm run dist
+```
+
+Expected: `verify:native` prints `better-sqlite3 loads under Electron
+(module ABI 132) — safe to package`, and afterPack now passes the staged
+`resources\app.asar` archive validation and prints the packaged-load success
+line. The NSIS step itself still requires the elevated terminal / Developer
+Mode documented in §5 (winCodeSign symlinks) and remains **unverified until
+the user builds and installs it**.
