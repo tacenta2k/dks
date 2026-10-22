@@ -2,6 +2,7 @@ import {
   app,
   BrowserWindow,
   ipcMain,
+  nativeImage,
   shell,
 } from 'electron';
 import type { IpcMainEvent } from 'electron';
@@ -25,6 +26,7 @@ import {
 } from './updater';
 import { createTray, destroyTray, type TrayActions } from './tray';
 import { shouldStartHidden, startupRegistration } from './startup';
+import { resolveAppIcon, type AppIconLocation } from './icons';
 import type { Tray } from 'electron';
 import { createSqliteStore, type SqliteStore } from './sqlite';
 import {
@@ -62,6 +64,49 @@ export function configureAppIdentity(): void {
 // Applied immediately (not inside whenReady) so no notification or window can
 // be created before the identity is set.
 configureAppIdentity();
+
+/**
+ * The window/taskbar icon comes from the same official logo as the packaged
+ * executable (see electron-builder.yml + electron/main/icons.ts). Resolved once
+ * so every window, the tray and a re-created window share one path.
+ */
+export function resolveWindowIcon(): AppIconLocation {
+  return resolveAppIcon({
+    isPackaged: app.isPackaged,
+    appPath: app.getAppPath(),
+    resourcesPath: process.resourcesPath,
+    platform: process.platform,
+  });
+}
+
+let cachedIconPath: AppIconLocation | null = null;
+
+export function appIconPath(): string | null {
+  if (!cachedIconPath) {
+    cachedIconPath = resolveWindowIcon();
+    if (cachedIconPath.source === 'missing') {
+      // Not fatal: Windows falls back to the exe icon. Logged so a packaging
+      // mistake shows up in the DKS main log (%APPDATA%/DKS/logs/main.log).
+      log.warn('[dks] app icon not found; using the executable icon', cachedIconPath.candidates);
+    }
+  }
+  return cachedIconPath.path;
+}
+
+/** `nativeImage` for BrowserWindow/Tray, or undefined when no file was found. */
+function loadWindowIcon(): Electron.NativeImage | undefined {
+  const iconPath = appIconPath();
+  if (!iconPath) {
+    return undefined;
+  }
+  try {
+    const image = nativeImage.createFromPath(iconPath);
+    return image.isEmpty() ? undefined : image;
+  } catch (error) {
+    log.warn('[dks] unable to load the app icon', error);
+    return undefined;
+  }
+}
 
 export const APP_VERSION_CHANNEL = 'dks:app-version' as const;
 export const MINIMIZE_TO_TRAY_CHANNEL = 'dks:minimize-to-tray' as const;
@@ -245,6 +290,7 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
   // flag is therefore the negation of the hidden request.
   const startHidden = options.startHidden ?? shouldStartHidden(process.argv);
   log.info(`[dks] createMainWindow (hidden=${String(startHidden)})`);
+  const windowIcon = loadWindowIcon();
 
   const window = new BrowserWindow({
     width: 1_440,
@@ -253,6 +299,9 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
     minHeight: 680,
     show: !startHidden,
     autoHideMenuBar: true,
+    // Without this Windows shows the generic Electron icon in the title bar and
+    // the alt-tab switcher even though the exe itself carries the DKS icon.
+    icon: windowIcon,
     title: 'DKS',
     webPreferences: {
       preload: path.join(__dirname, '../preload/index.js'),
@@ -450,7 +499,7 @@ function createDksTray(): Tray | null {
   };
 
   try {
-    return createTray({ actions, tooltip: 'DKS' });
+    return createTray({ actions, tooltip: 'DKS', iconPath: appIconPath() ?? undefined });
   } catch {
     return null;
   }

@@ -17,6 +17,8 @@ import {
   resolveAppVersion,
 } from '../../lib/app-info';
 import type { ThemePreference } from '../../lib/types';
+import dksLogo from '../../assets/dks-logo.png';
+import dksLogoDark from '../../assets/dks-logo-dark.png';
 import type { Role } from '../auth/auth-types';
 import type { SheetRepository } from '../sheet/repository';
 import './settings.css';
@@ -577,6 +579,24 @@ export function SettingsPage({
               <div className="settings-maintenance__grid">
                 <div className="settings-maintenance__card settings-about">
                   <div className="settings-about__identity">
+                    {/* The official logo (same source as the app icon). The
+                        dark-mode variant is the same artwork lightened, so the
+                        card needs no white plate behind it. */}
+                    <img
+                      className="settings-about__logo settings-about__logo--on-light"
+                      src={dksLogo}
+                      alt="DKS — Software for businesses"
+                      width={168}
+                      height={74}
+                    />
+                    <img
+                      className="settings-about__logo settings-about__logo--on-dark"
+                      src={dksLogoDark}
+                      alt=""
+                      aria-hidden="true"
+                      width={168}
+                      height={74}
+                    />
                     <strong className="settings-about__name">DKS</strong>
                     <p className="settings-about__version" aria-label={`Version ${resolvedVersion}`}>
                       Version {resolvedVersion}

@@ -2,6 +2,7 @@ import { FormEvent, useRef, useState } from 'react';
 
 import { isSupabaseConfigured } from '../../lib/supabase';
 import type { AuthStatus, SupabaseHealth } from './auth-types';
+import dksMark from '../../assets/dks-mark.png';
 
 export interface AuthScreenProps {
   onSignIn?: (email: string, password: string) => Promise<void> | void;
@@ -72,8 +73,8 @@ export function AuthScreen({
   return (
     <main className="login-page" aria-labelledby="login-title">
       <section className="login-card" data-auth-status={authStatus}>
-        <div className="brand-mark brand-mark--large" aria-hidden="true">
-          <span>D</span>
+        <div className="brand-mark brand-mark--image brand-mark--large" aria-hidden="true">
+          <img src={dksMark} alt="" width={56} height={56} draggable={false} />
         </div>
         <p className="eyebrow">DKS workspace</p>
         <h1 id="login-title">Sign in to DKS</h1>

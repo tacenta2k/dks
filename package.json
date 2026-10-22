@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.node.json --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "icons": "node scripts/generate-icons.mjs",
     "dist": "npm run build && electron-builder --config electron-builder.yml --publish never",
     "release": "npm run build && electron-builder --config electron-builder.yml --publish always",
     "preview": "vite preview --outDir dist-electron/renderer"
@@ -52,6 +53,8 @@
     "electron": "^34.3.3",
     "electron-builder": "^25.1.8",
     "jsdom": "^25.0.1",
+    "png-to-ico": "^3.0.2",
+    "sharp": "^0.35.5",
     "typescript": "^5.7.3",
     "vite": "^5.4.11",
     "vitest": "^2.1.8",

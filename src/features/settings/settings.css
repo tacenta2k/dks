@@ -385,6 +385,26 @@
   min-width: 0;
 }
 
+/* Navy artwork on a light card; the lightened variant on a dark card. */
+.settings-about__logo {
+  width: 168px;
+  height: auto;
+  margin: 0 0 6px;
+  object-fit: contain;
+}
+
+.settings-about__logo--on-dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .settings-about__logo--on-light {
+  display: none;
+}
+
+:root[data-theme='dark'] .settings-about__logo--on-dark {
+  display: block;
+}
+
 .settings-about .settings-about__name {
   font-size: 16px;
   letter-spacing: 0.04em;

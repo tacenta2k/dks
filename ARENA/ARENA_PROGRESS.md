@@ -1056,3 +1056,68 @@ rebuild succeeded and the module loads.
 
 Gate: 58 files / 343 tests, `tsc` (both configs) clean, `build:electron` clean.
 All three SQL files parse (pglast); they were not executed anywhere.
+
+## 19. Round 3 — Batch H: official DKS app icon
+
+The user supplied the official logo (`DKS — SOFTWARE FOR BUSINESSES`) and asked
+for it to become the Windows icon. Nothing here was verified on Windows: the
+packaged exe, installer and Add/Remove Programs entry still need a real
+`npm run dist` on the user's PC.
+
+### 19.1 Source and generator
+
+- `build/logo-source.png` — the supplied logo, committed unchanged as the single
+  source of truth (1254×1254, white page, navy "D" + blue "K"/"S" + tagline).
+- `scripts/generate-icons.mjs` (run with `npm run icons`) derives everything
+  else with `sharp` + `png-to-ico` (both dev dependencies, free). It measures
+  the artwork instead of hard-coding coordinates: ink bounding box, row runs to
+  separate the wordmark from the tagline, and the gap after the "D" for the
+  square mark. The white page is keyed out with an ink-over-white unmultiply so
+  the artwork keeps smooth edges and no grey halo.
+
+### 19.2 Files produced
+
+| file | what it is | used by |
+|---|---|---|
+| `build/icon.ico` | 16, 32, 48, 256 px frames | exe, installer, uninstaller, header icon, taskbar |
+| `build/icon.png` | 1024 px master (wordmark on a rounded white plate) | `BrowserWindow` icon (copied to `resources/icon.png`) |
+| `src/assets/dks-mark.png` | square "D" mark, transparent | sidebar tile, sign-in card, favicon |
+| `src/assets/dks-logo.png` | full lockup, transparent | Settings → About |
+| `src/assets/dks-logo-dark.png` | the same lockup lightened (~25% toward white) | Settings → About in dark mode |
+
+Small sizes are simplified rather than squashed: a 2.3:1 lockup inside a square
+canvas is only ~6 px tall at 16 px, so 16 px uses the square "D", 32/48 px the
+wordmark, and 256 px the full lockup with tagline.
+
+### 19.3 Wiring
+
+- `electron-builder.yml`: `win.icon: build/icon.ico`, `nsis.installerIcon`,
+  `nsis.uninstallerIcon`, `nsis.installerHeaderIcon` all point at the .ico;
+  `icon: build/icon.png` plus `extraResources` copies the PNG to
+  `resources/icon.png` so the running app can hand the same artwork to the
+  window. `productName: DKS` and `appId: com.dks.tracker` are unchanged.
+- `electron/main/icons.ts`: pure resolution rules (packaged → resources, dev →
+  `build/`; `.ico` first on Windows, `.png` elsewhere) so they can be tested
+  without Electron.
+- `electron/main/index.ts`: `nativeImage.createFromPath(...)` →
+  `BrowserWindow({ icon })`, the same path for the tray, and a warning log (not
+  a crash) when no icon file is found.
+- Settings → About, the sidebar and the sign-in card now show the real logo
+  instead of the "D" letter tile; the About card swaps to the lightened variant
+  in dark mode so no white plate is needed (the dark-theme parity guard stays
+  green).
+
+### 19.4 Tests and gate
+
+`tests/app-icon.test.ts` (15): the committed source is a real PNG, the .ico has
+exactly the 16/32/48/256 frames with in-file offsets and readable payloads, the
+master is 1024×1024, the renderer assets exist, the builder identity/icon keys
+are unchanged except for the new icon entries, the main process loads the icon
+through `nativeImage` with an `isEmpty()` fallback, and the four resolution
+cases (packaged / dev / missing / platform preference) behave.
+
+Gate: 59 files / 358 tests, `tsc` (both configs) clean, `build:electron` +
+renderer build clean. `electron-builder --win --dir` **loaded the configuration
+successfully** and then stopped at `@electron/rebuild` cross-compiling
+better-sqlite3 for win32 from Linux — an environment limit of this sandbox, not
+a configuration error.

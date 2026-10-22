@@ -4,9 +4,18 @@ artifactName: DKS-${version}-${os}-${arch}.${ext}
 directories:
   output: release
   buildResources: build
+# DKS icon set (generated from build/logo-source.png by scripts/generate-icons.mjs).
+# build/icon.ico carries 256/48/32/16 px frames for the exe, the installer and
+# Add/Remove Programs; build/icon.png is the 1024px master plus the window icon.
+icon: build/icon.png
 files:
   - dist-electron/**
   - package.json
+extraResources:
+  # Kept outside the asar so BrowserWindow can load it with
+  # nativeImage.createFromPath(process.resourcesPath/icon.png).
+  - from: build/icon.png
+    to: icon.png
 asar: true
 asarUnpack:
   - node_modules/better-sqlite3/**
@@ -15,6 +24,7 @@ extraMetadata:
 win:
   target:
     - nsis
+  icon: build/icon.ico
   executableName: DKS
   publisherName: DKS
 nsis:
@@ -25,5 +35,8 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DKS
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
 publish:
   provider: github

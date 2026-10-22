@@ -8,6 +8,7 @@ import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
 import { DashboardPage } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
+import dksMark from '../../assets/dks-mark.png';
 import { NotificationBell } from '../../features/notifications/NotificationBell';
 import type {
   NotificationRecord,
@@ -128,8 +129,10 @@ function loadSidebarCollapsed(): boolean {
 function Brand({ caption = 'Office workspace' }: { caption?: string }) {
   return (
     <div className="brand-lockup" title="DKS">
-      <div className="brand-mark" aria-hidden="true">
-        <span>D</span>
+      {/* The official DKS mark (generated from build/logo-source.png), so the
+          sidebar shows the real branding instead of a letter tile. */}
+      <div className="brand-mark brand-mark--image" aria-hidden="true">
+        <img src={dksMark} alt="" width={37} height={37} draggable={false} />
       </div>
       <div className="brand-text">
         <p className="brand-name">DKS</p>
