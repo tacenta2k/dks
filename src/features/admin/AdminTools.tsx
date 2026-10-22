@@ -301,6 +301,17 @@ export function AdminSheetActions({
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // R7 follow-up: the toolbar loads its own snapshot, independently of the
+  // grid. Exporting/printing before that read resolved produced an EMPTY
+  // artifact (0 rows, no columns) — the intermittent admin-features failure.
+  // These refs make every action wait for the real loaded state.
+  const snapshotReady = useRef(false);
+  const snapshotLoad = useRef<Promise<boolean> | null>(null);
+  // State is captured by the click handler's closure; after awaiting the load
+  // the closure still holds the pre-load arrays, so the loaded snapshot is also
+  // mirrored into refs and read from there.
+  const columnsRef = useRef<ColumnDefinition[]>([]);
+  const rowsRef = useRef<SheetRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -340,25 +351,57 @@ export function AdminSheetActions({
     };
   }, [toolsOpen]);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    snapshotReady.current = false;
     try {
       const [nextColumns, nextRows] = await Promise.all([
         repository.getColumns(),
         repository.getRows(),
       ]);
+      columnsRef.current = nextColumns;
+      rowsRef.current = nextRows;
       setColumns(nextColumns);
       setRows(nextRows);
       setError(null);
+      snapshotReady.current = true;
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load admin sheet actions.');
+      return false;
     } finally {
       setLoading(false);
     }
   }, [repository]);
 
   useEffect(() => {
-    void refresh();
+    const pending = refresh();
+    snapshotLoad.current = pending;
+    return () => {
+      // A late resolution must not flip the flag for a newer repository.
+      if (snapshotLoad.current === pending) {
+        snapshotLoad.current = null;
+        snapshotReady.current = false;
+      }
+    };
+  }, [refresh]);
+
+  /**
+   * Resolves once the toolbar's snapshot has been read. Returns false when the
+   * read failed, so callers can report it instead of exporting/printing an
+   * empty sheet.
+   */
+  const ensureSnapshotLoaded = useCallback(async (): Promise<boolean> => {
+    if (snapshotReady.current) {
+      return true;
+    }
+    const pending = snapshotLoad.current ?? refresh();
+    snapshotLoad.current = pending;
+    await pending;
+    if (snapshotLoad.current === pending) {
+      snapshotLoad.current = null;
+    }
+    return snapshotReady.current;
   }, [refresh]);
 
   const saveExport = onSaveExport ?? saveArtifactWithBrowserFallback;
@@ -370,9 +413,16 @@ export function AdminSheetActions({
     setBusy(true);
     setError(null);
     try {
+      // Never export a half-loaded snapshot: wait for the real loaded state.
+      if (!(await ensureSnapshotLoaded())) {
+        setError('The sheet data could not be loaded, so nothing was exported.');
+        return;
+      }
+      const loadedRows = activeRows(rowsRef.current);
+      const loadedColumns = columnsRef.current;
       const artifact = format === 'xlsx'
-        ? createXlsxExport({ role, rows: activeRows(rows), columns })
-        : createCsvExport({ role, rows: activeRows(rows), columns });
+        ? createXlsxExport({ role, rows: loadedRows, columns: loadedColumns })
+        : createCsvExport({ role, rows: loadedRows, columns: loadedColumns });
       // The service builds pure artifacts; invoke the injected/native saver here.
       saveExport(artifact);
       setStatus(`Exported ${artifact.rowCount} rows as ${format === 'xlsx' ? 'Excel' : 'CSV'}.`);
@@ -393,8 +443,17 @@ export function AdminSheetActions({
     setBusy(true);
     setError(null);
     try {
+      // Column mapping is built from the snapshot, so wait for it first.
+      if (!(await ensureSnapshotLoaded())) {
+        setError('The sheet data could not be loaded, so the file was not imported.');
+        return;
+      }
       const source = await importSourceForFile(file);
-      const nextPreview = await previewImport(source, { role, columns, fileName: file.name });
+      const nextPreview = await previewImport(source, {
+        role,
+        columns: columnsRef.current,
+        fileName: file.name,
+      });
       const initialTypes: Record<string, ImportColumnType> = {};
       for (const header of nextPreview.unmappedHeaders) {
         initialTypes[header] = nextPreview.suggestedColumnTypes.find((s) => s.header === header)?.type ?? 'text';
@@ -517,6 +576,14 @@ export function AdminSheetActions({
     }
   };
 
+  const openReport = async () => {
+    if (!(await ensureSnapshotLoaded())) {
+      setError('The sheet data could not be loaded, so the report was not opened.');
+      return;
+    }
+    setReportOpen(true);
+  };
+
   const handlePrint = (model: PrintReportModel) => {
     if (onPrint) {
       onPrint(model);
@@ -604,7 +671,7 @@ export function AdminSheetActions({
                 role="menuitem"
                 onClick={() => {
                   setToolsOpen(false);
-                  setReportOpen(true);
+                  void openReport();
                 }}
               >
                 Print / PDF report

@@ -18,9 +18,10 @@ const path = require('node:path');
 
 const MODULE_NAME = 'better-sqlite3';
 
+// Require the package directory (what the app loads), not the raw .node file:
+// the addon exports `{ Database, Statement, … }` and is not a constructor.
 const PROBE_SCRIPT = `
-const target = process.env.DKS_NATIVE_MODULE;
-const Database = require(target);
+const Database = require(process.env.DKS_NATIVE_MODULE_DIR);
 const db = new Database(':memory:');
 const row = db.prepare('select 1 as ok').get();
 if (!row || row.ok !== 1) {
@@ -49,7 +50,7 @@ function probe(electron, target) {
       ...process.env,
       ELECTRON_RUN_AS_NODE: '1',
       ELECTRON_NO_ATTACH_CONSOLE: '1',
-      DKS_NATIVE_MODULE: target,
+      DKS_NATIVE_MODULE_DIR: target,
     },
     encoding: 'utf8',
   });
@@ -95,7 +96,7 @@ module.exports = async function verifyPackagedNativeModules(context) {
     );
   }
 
-  const result = probe(electron, binary);
+  const result = probe(electron, unpackedModule);
   if (!result.ok) {
     throw new Error(
       `[dks] the packaged ${MODULE_NAME} binding cannot be loaded by the packaged Electron `

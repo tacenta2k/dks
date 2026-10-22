@@ -1325,3 +1325,114 @@ suites.
 
 **This is not verified by me.** I cannot run the packaged Windows app; only the
 user can confirm it, so the status stays `IMPLEMENTED_AWAITING_CONFIRMATION`.
+
+## 22. Fix — Windows follow-up to the packaging guard, and the flaky export test
+
+Two defects were found on Windows after `f568656`.
+
+### 22.1 The repair step called a flag `install-app-deps` does not accept
+
+`scripts/verify-native-modules.mjs` detected the Node-ABI binary correctly
+(137 vs Electron's 132) but its repair ran
+`electron-builder install-app-deps --config electron-builder.yml`. The
+sub-command only defines `--platform`/`--arch` (verified in
+`node_modules/electron-builder/out/cli/install-app-deps.js` and reproduced:
+`Unknown argument: config`), and it then printed a build-tools hint that was
+wrong — plain `install-app-deps` works on this machine.
+
+What changed:
+
+- Repair is now a three-step ladder, and the binary is **not deleted first**:
+  1. `node node_modules/electron-builder/cli.js install-app-deps` — **no flags**
+     (it reads `electron-builder.yml` from the project directory itself).
+  2. Fallback: `node node_modules/@electron/rebuild/lib/cli.js --force
+     --which-module better-sqlite3 --version <electron>` — flags checked against
+     the installed CLI help (`lib/cli.js --help`).
+  3. Only if the probe still mismatches: delete
+     `node_modules/better-sqlite3/build` and rebuild again (this is what defeats
+     a correct `.forge-meta` sitting next to a Node-ABI binary).
+- The ABI probe is repeated after **every** attempt; the dist fails only if the
+  module still cannot be loaded.
+- Captured child output is truncated to the last 20 lines (300 chars/line) and
+  the failure summary picks the real `Error: …` line instead of stack frames.
+- The build-tools hint is printed **only** for a genuine compiler/toolchain
+  error (`MSBuild`/`error MSB####`/`cl.exe`/`C1083`/`LNK####`/Visual
+  Studio/`make: ***`/…). Network failures (`ECONNRESET`, `ETIMEDOUT`, proxy,
+  certificate) get their own hint; everything else is reported verbatim.
+- **Probe bug found while testing the repair:** both scripts required
+  `build/Release/better_sqlite3.node` directly and treated it as a constructor,
+  but the addon exports `{ Database, Statement, … }`. That made a *healthy*
+  build look broken (a false negative that would have aborted every dist).
+  Both `scripts/verify-native-modules.mjs` and `scripts/after-pack.cjs` now
+  require the **package directory** — exactly what the app loads, whose own
+  `bindings` lookup dlopens the .node, so the ABI check still applies.
+- `scripts/verify-native-modules.d.mts` added so the tests can import the
+  command builders with types; `main()` only runs when the file is executed
+  directly.
+
+Tests (`tests/packaging-native-modules.test.ts`, 6 → 13):
+
+- `install-app-deps` command carries **no** arguments after the sub-command and
+  never `--config`.
+- every flag of the `@electron/rebuild` fallback is present in the real
+  `lib/cli.js --help` output; `--build-from-source` only when requested.
+- `lastLines()` keeps the last 20 lines and caps a pathological line at 300
+  chars; `summarizeFailure()` returns the real error line, not `[eval]-wrapper`
+  frames.
+- toolchain vs network vs unknown error classification (`node-gyp failed to
+  rebuild` alone is **not** a compiler error).
+- `probeNativeModule(process.execPath, node_modules/better-sqlite3)` must
+  succeed and report the running Node ABI — the regression that catches the
+  "raw .node is not a constructor" false negative.
+- the script sources contain no quoted `--config` and no `stdio: 'inherit'`.
+
+End-to-end checks in the sandbox (fake `electron` → the local node binary):
+the probe reports `safe to package` and exits 0 with no repair; the afterPack
+hook reports `packaged better-sqlite3 loads under Electron`; the real
+`install-app-deps --config …` invocation was reproduced failing with
+`Unknown argument: config`.
+
+### 22.2 The flaky export test (`tests/admin-features.test.tsx`)
+
+`exports current rows as CSV and Excel …` failed once on Windows with
+`rowCount: 0` and only a "Days Left" column, in an otherwise green 380/381 run.
+
+Real race (not a timeout): `AdminSheetActions` (the Tools ▾ menu) loads **its
+own** snapshot in an effect, independently of the grid. The test waited for the
+grid (`findByText('Ada Lovelace')`), then clicked Export CSV while the
+toolbar's `getRows`/`getColumns` were still pending — so the export was built
+from the initial empty `rows`/`columns` state (`activeRows([])` → 0 rows, and
+the export service always adds the derived Days Left column). Awaiting the load
+inside the click handler would not have been enough on its own: the closure
+still captured the pre-load arrays.
+
+Fix in `src/features/admin/AdminTools.tsx`:
+
+- the mount refresh now returns `Promise<boolean>` and records the loaded
+  snapshot in `columnsRef`/`rowsRef`;
+- new `ensureSnapshotLoaded()` awaits the in-flight load (starting one if the
+  effect has not run yet) and reports failure;
+- Export CSV/Excel, the Import preview and the Print/PDF report all await it and
+  read the refs, so no action can run against a half-loaded snapshot; a failed
+  load produces a clear message instead of an empty file.
+
+Tests:
+
+- new regression test `waits for the toolbar snapshot before exporting (R7
+  regression)`: a gated repository holds the toolbar read, the menu is clicked
+  while it is pending, and it asserts **no** artifact is written, then that the
+  released export contains 1 row, "Ada Lovelace" and both "Name" and
+  "Days Left" columns. It fails against the previous code
+  (`expected [ Array(1) ] to have a length of +0 but got 1`), which was verified
+  by temporarily reverting `AdminTools.tsx`.
+- the two existing toolbar tests now await the real loaded state (`saved` has
+  one artifact before the menu is reopened; the Print report dialog is awaited)
+  instead of assuming the click completed synchronously. No assertion was
+  weakened or removed and no timeout was raised for the new waits.
+
+### 22.3 Gate
+
+`npm rebuild better-sqlite3` (sandbox: `--nodedir=/usr/local`), `npm test` run
+twice, `npm run typecheck`, `npm run build`. Results: **61 files / 389 tests** passed in both runs (381 before + 7 new
+packaging tests + 1 export regression test), `tsc` (both configs) clean, renderer
+and main builds clean.

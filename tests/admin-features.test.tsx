@@ -3,9 +3,10 @@ import '@testing-library/jest-dom/vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
-import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { AdminSheetActions } from '../src/features/admin';
+import { createInMemorySheetRepository, type SheetRepository } from '../src/features/sheet/repository';
 import { seedFixtureColumns } from './fixtures/sheet-columns';
-import type { ExportArtifact } from '../src/features/import-export/export-service';
+import type { CsvExportArtifact, ExportArtifact } from '../src/features/import-export/export-service';
 import type { PdfExportFile, PrintReportModel } from '../src/features/print/print-service';
 
 function adminProfile() {
@@ -80,6 +81,11 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
+
+    // R7: the toolbar waits for its own snapshot before exporting, so the save
+    // happens asynchronously. Wait for it (and for the Tools button to be
+    // re-enabled) before opening the menu a second time.
+    await waitFor(() => expect(saved).toHaveLength(1));
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Export Excel' }));
 
@@ -87,6 +93,53 @@ describe('admin renderer integration', () => {
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
     expect(saved[1]).toEqual(expect.objectContaining({ fileName: 'dks-export.xlsx', rowCount: 1 }));
   }, 15_000);
+
+  it('waits for the toolbar snapshot before exporting (R7 regression)', async () => {
+    const repository = await seededRepository();
+    // Hold the toolbar's own getRows/getColumns read so the click happens while
+    // the snapshot is still loading — the exact race that produced an empty
+    // "0 rows, Days Left only" artifact on Windows.
+    let releaseSnapshot: () => void = () => undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const delayed = Object.create(repository) as SheetRepository;
+    delayed.getRows = async () => {
+      await snapshotGate;
+      return repository.getRows();
+    };
+    delayed.getColumns = async () => {
+      await snapshotGate;
+      return repository.getColumns();
+    };
+
+    const saved: ExportArtifact[] = [];
+    render(
+      <AdminSheetActions
+        repository={delayed}
+        role="admin"
+        actor={{ id: 'admin-1', name: 'Admin User', email: 'admin@dks.test' }}
+        onSaveExport={(artifact) => saved.push(artifact)}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: /^Tools/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
+
+    // Nothing may be written while the rows/columns are still loading.
+    expect(saved).toHaveLength(0);
+
+    releaseSnapshot();
+
+    await waitFor(() => expect(saved).toHaveLength(1));
+    const artifact = saved[0] as CsvExportArtifact;
+    expect(artifact).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
+    // The exported snapshot is the real one, not the empty pre-load state.
+    expect(artifact.columns.map((column) => column.name)).toEqual(
+      expect.arrayContaining(['Name', 'Days Left']),
+    );
+    expect(artifact.data).toContain('Ada Lovelace');
+  });
 
   it('previews and imports mapped file rows into the repository', async () => {
     const repository = await seededRepository();
@@ -126,7 +179,8 @@ describe('admin renderer integration', () => {
     await screen.findByText('Ada Lovelace');
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Print / PDF report' }));
-    expect(screen.getByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
+    // R7: the report opens once the toolbar snapshot is loaded.
+    expect(await screen.findByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Print report' }));
     fireEvent.click(screen.getByRole('button', { name: 'Export PDF' }));
 

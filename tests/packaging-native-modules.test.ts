@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -147,5 +148,120 @@ describe('packaged native modules (R7)', () => {
     expect(post).toContain('better_sqlite3.node');
     expect(post).toContain('ELECTRON_RUN_AS_NODE');
     expect(post).toContain('throw new Error');
+  });
+});
+
+/**
+ * R7 follow-up: the first repair implementation called
+ * `electron-builder install-app-deps --config electron-builder.yml`, which the
+ * sub-command rejects with "Unknown argument: config". The repair then blamed
+ * missing Windows build tools. These tests lock the real command line, checked
+ * against the installed CLI rather than against assumptions.
+ */
+describe('native module repair step (R7 follow-up)', () => {
+  it('calls install-app-deps with no unsupported flags', async () => {
+    const { installAppDepsCommand } = await import('../scripts/verify-native-modules.mjs');
+    const spec = installAppDepsCommand();
+
+    expect(spec.available).toBe(true);
+    expect(spec.command).toBe(process.execPath);
+    const subcommandIndex = spec.args.indexOf('install-app-deps');
+    expect(subcommandIndex).toBeGreaterThan(-1);
+    expect(spec.args[subcommandIndex - 1]).toContain('electron-builder');
+    // install-app-deps only defines --platform/--arch and reads
+    // electron-builder.yml from the project itself: no --config.
+    expect(spec.args.slice(subcommandIndex + 1)).toEqual([]);
+    expect(spec.args).not.toContain('--config');
+  });
+
+  it('falls back to @electron/rebuild with flags the installed CLI documents', async () => {
+    const { electronRebuildCommand } = await import('../scripts/verify-native-modules.mjs');
+    const spec = electronRebuildCommand();
+
+    expect(spec.available).toBe(true);
+    const help = spawnSync(process.execPath, [spec.args[0], '--help'], { encoding: 'utf8' });
+    expect(help.status).toBe(0);
+    const documented = new Set(
+      [...(help.stdout ?? '').matchAll(/--[a-z][a-z-]*/g)].map((match) => match[0]),
+    );
+    expect(documented.size).toBeGreaterThan(5);
+
+    for (const flag of spec.args.filter((arg) => arg.startsWith('--'))) {
+      expect(documented.has(flag), `${flag} is not documented by @electron/rebuild --help`).toBe(true);
+    }
+    // Force a rebuild of exactly one module; no source build unless asked.
+    expect(spec.args).toEqual(expect.arrayContaining(['--force', '--which-module', 'better-sqlite3']));
+    expect(spec.args).not.toContain('--config');
+    expect(electronRebuildCommand({ buildFromSource: true }).args).toContain('--build-from-source');
+  });
+
+  it('truncates captured child output instead of dumping Electron internals', async () => {
+    const { lastLines } = await import('../scripts/verify-native-modules.mjs');
+    const noisy = Array.from({ length: 200 }, (_, index) => `line ${index}`).join('\n');
+
+    const lines = lastLines(noisy);
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toBe('line 180');
+    expect(lines.at(-1)).toBe('line 199');
+    // One pathological minified line cannot flood the terminal either.
+    expect(lastLines('x'.repeat(5_000), 1)[0].length).toBeLessThanOrEqual(300);
+    expect(lastLines(undefined)).toEqual([]);
+  });
+
+  it('only blames the toolchain when the rebuild reported a compiler error', async () => {
+    const { looksLikeToolchainError, looksLikeNetworkError } = await import(
+      '../scripts/verify-native-modules.mjs'
+    );
+
+    expect(looksLikeToolchainError('gyp ERR! stack Error: Could not find any Visual Studio installation')).toBe(true);
+    expect(looksLikeToolchainError('error MSB8020: The build tools for v143 cannot be found')).toBe(true);
+    expect(looksLikeToolchainError('Unknown argument: config')).toBe(false);
+    expect(looksLikeToolchainError('NODE_MODULE_VERSION 137')).toBe(false);
+    expect(looksLikeToolchainError('')).toBe(false);
+    // The sandbox rebuild failed with a network error inside node-gyp; that must
+    // not be reported as "install Visual Studio".
+    expect(looksLikeToolchainError('node-gyp failed to rebuild better-sqlite3')).toBe(false);
+    expect(looksLikeNetworkError('code: ECONNRESET host: www.electronjs.org')).toBe(true);
+    expect(looksLikeNetworkError('gyp ERR! stack Error: Could not find any Visual Studio installation')).toBe(false);
+  });
+
+  it('summarises the real error line instead of stack frames', async () => {
+    const { summarizeFailure } = await import('../scripts/verify-native-modules.mjs');
+    const stderr = [
+      '/home/user/dks/[eval]-wrapper:6',
+      'throw err;',
+      '^',
+      "Error: The module was compiled against a different Node.js version using NODE_MODULE_VERSION 137.",
+      '    at Module._extensions..node (node:internal/modules/cjs/loader:1454:18)',
+      '    at Module.load (node:internal/modules/cjs/loader:1148:32)',
+    ].join('\n');
+
+    const summary = summarizeFailure(stderr);
+    expect(summary[0]).toContain('NODE_MODULE_VERSION 137');
+    expect(summary.length).toBeLessThanOrEqual(3);
+    expect(summary.join(' ')).not.toContain('[eval]-wrapper');
+    expect(summary.join(' ')).not.toContain('throw err');
+  });
+
+  it('probes the package entry point, which a correct build must satisfy', async () => {
+    const { probeNativeModule } = await import('../scripts/verify-native-modules.mjs');
+    // Requires `better-sqlite3` (not the raw .node, which is not a constructor)
+    // with the current Node: this is the exact false-negative that made the
+    // first guard report a healthy build as broken.
+    const result = probeNativeModule(process.execPath, resolve(ROOT, 'node_modules/better-sqlite3'));
+    expect(result.detail).not.toContain('is not a constructor');
+    expect(result.ok, result.detail).toBe(true);
+    expect(result.abi).toBe(process.versions.modules);
+  });
+
+  it('keeps the repair itself free of unsupported flags and inherited stdio', () => {
+    const source = readNormalised('scripts/verify-native-modules.mjs');
+
+    // `--config` may only appear in the explanatory comments (backticks).
+    expect(source).not.toMatch(/['"]--config['"]/);
+    expect(source).not.toContain("stdio: 'inherit'");
+    // Every repair attempt is followed by a fresh probe.
+    expect((source.match(/probeOrMissing\(/g) ?? []).length).toBeGreaterThanOrEqual(4);
+    expect(source).toContain('maxBuffer');
   });
 });
