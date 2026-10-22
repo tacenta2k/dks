@@ -883,3 +883,29 @@ USER-ONLY packaging/visual checks.
 
 Gate: 58 test files / 328 tests, `tsc` (both configs) clean, `build:electron`
 clean.
+
+## 17. Round 3 — Batch F: CSV/XLSX expiry import
+
+No product code was missing for this batch; the gap was proof, so it is now
+locked by a test.
+
+- An expiry-like header (`Expiry`, `Expiration`, `Valid until`, `Due date`, or a
+  majority of date-like sample values) is offered in the preview as a date
+  column, defaulting to `date_expiry`; the Admin can change the type before
+  importing (`suggestImportColumnType` + the preview's type selects).
+- Choosing "create" makes a real `date_expiry` column; choosing an existing
+  TEXT column that holds dates offers a conversion (`dateMappedToText` →
+  `convertColumnDateValues`), and impossible/non-date text is kept, never
+  dropped.
+- Values are normalised to ISO (`YYYY-MM-DD`) at import; the sheet derives Days
+  Left afterwards. The new test imports `Name,Visa Expiry`, creates the expiry
+  column and asserts `daysLeft` = 9 and 407 against a fixed "today", plus the
+  ISO storage value — i.e. Days Left works with no extra setup step because a
+  lone `date_expiry` column is the primary expiry.
+- `tests/import-export.test.ts` is now 19 tests.
+
+Remaining NOT_STARTED rows (`PKG-06`, `PKG-07`) are USER-ONLY: a packaged
+Windows build and a visual pass on real hardware. Nothing implementable is left
+open in the tracking list.
+
+Gate: 58 files / 329 tests, `tsc` (both configs) clean, `build:electron` clean.

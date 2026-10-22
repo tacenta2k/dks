@@ -13,6 +13,7 @@ import {
   sampleHeaderValues,
   suggestImportColumnType,
 } from '../src/features/import-export/import-service';
+import { buildGridRows } from '../src/features/sheet/grid-columns';
 import type { ColumnDefinition } from '../src/lib/columns';
 import type { SheetRow } from '../src/features/sheet/types';
 
@@ -309,6 +310,30 @@ describe('admin import and export workflows', () => {
       expect(suggestedTypes).toEqual(['date_expiry']);
       expect(result.columns.find((column) => column.id === 'visa_expiry')?.type).toBe('date_expiry');
       expect(result.records[0]?.data).toEqual({ name: 'Ada', visa_expiry: '2004-01-10' });
+    });
+
+    it('computes Days Left from an imported expiry column (no manual step)', async () => {
+      const result = await importRows('Name,Visa Expiry\nAda,10/01/2004\nGrace,11/02/2005', {
+        role: 'admin',
+        columns: [{ id: 'name', name: 'Name', type: 'text', position: 0 }],
+        fileName: 'rows.csv',
+        createColumn: (header, suggested) => ({ id: 'visa_expiry', name: header, type: suggested.type }),
+      });
+
+      // The freshly created expiry column becomes the primary expiry when no
+      // other one exists, so Days Left is derived without an extra setting.
+      const derived = buildGridRows(
+        result.records.map((record, index) => ({
+          id: `row-${index}`,
+          data: record.data,
+          deleted: false,
+        })),
+        result.columns,
+        { today: '2004-01-01' },
+      );
+      expect(derived.rows.map((row) => row.daysLeft)).toEqual([9, 407]);
+      // The stored values stay ISO; the raw text is never rewritten.
+      expect(result.records[0]?.data.visa_expiry).toBe('2004-01-10');
     });
 
     it('convertColumnDateValues converts valid dates to ISO and keeps the rest untouched', () => {
