@@ -541,7 +541,12 @@
    Measured from the 50px global top bar; the toolbar is the only chrome above
    the grid and the grid scrolls internally.
    --------------------------------------------------------------------------- */
-.content--sheet {
+/* Double class on purpose: the generic `.content` rule sets
+   `width: min(100%, 1280px); margin: 0 auto`. Both are single-class selectors,
+   so the winner depended on CSS bundle order — the sheet could still render as
+   a centered 1280px column on a 1920px screen. `.content.content--sheet`
+   outranks it regardless of order. */
+.content.content--sheet {
   display: flex;
   width: 100%;
   max-width: none;
@@ -552,12 +557,22 @@
   padding: 10px 12px 12px;
 }
 
-.content--sheet .sheet-page {
+.content.content--sheet .sheet-page {
+  width: 100%;
+  max-width: none;
   flex: 1;
   min-height: 0;
   grid-template-rows: auto auto minmax(0, 1fr);
   gap: 8px;
   margin-top: 0;
+}
+
+/* Nothing inside the sheet may re-introduce a centered column. */
+.content.content--sheet .sheet-workbench,
+.content.content--sheet .sheet-grid-wrap,
+.content.content--sheet .sheet-accessible-table-wrap {
+  width: 100%;
+  max-width: none;
 }
 
 .content--sheet .sheet-workbench {
@@ -783,16 +798,37 @@
   letter-spacing: 0;
 }
 
-/* SHEET-11 — pinned blank draft row. */
-.ag-floating-bottom .ag-row,
-.ag-floating-bottom .ag-cell {
-  background: color-mix(in srgb, var(--color-surface-muted) 70%, transparent);
+/* SHEET-11 / R3: the blank draft row sits immediately after the last saved
+   record (it is a normal row at the end of the list, not a pinned overlay).
+   Its cells get a visible outline so the "type here to add" row is obvious. */
+.ag-row.sheet-draft-row {
+  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
   font-style: italic;
-  color: var(--color-text-subtle);
+}
+
+.ag-row.sheet-draft-row .ag-cell {
+  border-right: 1px dashed var(--color-border-strong);
+  border-bottom: 1px dashed var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.ag-row.sheet-draft-row .ag-cell:first-child {
+  border-left: 1px dashed var(--color-border-strong);
 }
 
 .sheet-draft-row td {
-  background: color-mix(in srgb, var(--color-surface-muted) 70%, transparent);
+  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
+  border-top: 1px dashed var(--color-border-strong) !important;
+  border-bottom: 1px dashed var(--color-border-strong) !important;
+}
+
+.sheet-draft-row td:first-child {
+  border-left: 1px dashed var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .sheet-draft-row td,
+:root[data-theme='dark'] .ag-row.sheet-draft-row {
+  background: color-mix(in srgb, var(--color-surface-muted) 85%, transparent);
 }
 
 .sheet-draft-input {

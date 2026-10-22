@@ -8,7 +8,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import type { CellValueChangedEvent, ColDef } from 'ag-grid-community';
+import type { CellValueChangedEvent, ColDef, GridApi } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
@@ -152,6 +152,7 @@ export function SheetPage({
   const [renameColumn, setRenameColumn] = useState<ColumnDefinition | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
+  const gridApiRef = useRef<GridApi<SheetGridRendererData> | null>(null);
   // AG Grid needs real layout measurements; jsdom uses the deterministic table below.
   const isTestEnvironment = import.meta.env.MODE === 'test';
   // FIXES_UI §5.2 "Smaller windows": the last two chips move into a menu.
@@ -216,19 +217,10 @@ export function SheetPage({
     () => groupable.find((column) => column.id === groupByColumnId) ?? null,
     [groupable, groupByColumnId],
   );
-  const displayRows = useMemo(() => {
-    const visibleRows = builtRows.rows.filter((row) => matchingIds.has(row.__rowId));
-    return groupGridRows(visibleRows, groupColumn);
-  }, [builtRows.rows, matchingIds, groupColumn]);
-  const duplicatePassportValues = useMemo(() => {
-    const passportColumn = activeColumns.find((column) => (
-      column.isPassport === true || column.is_passport === true || /passport/i.test(column.name)
-    ));
-    return passportColumn ? findDuplicatePassportValues(rows, passportColumn) : new Set<string>();
-  }, [rows, activeColumns]);
-
-  // SHEET-11: one blank row pinned at the bottom. It is not a record until the
-  // first meaningful committed value; focusing it alone creates nothing.
+  // SHEET-11 / R3 user decision: ONE blank draft row, placed immediately after
+  // the last saved record (never pinned to the bottom of the viewport). The
+  // first meaningful committed value turns it into a real record and a fresh
+  // blank draft appears beneath it, because a draft is always appended here.
   const draftRow = useMemo(() => {
     const data: SheetGridRendererData = {
       __rowId: DRAFT_ROW_ID,
@@ -240,6 +232,18 @@ export function SheetPage({
     });
     return data;
   }, [activeColumns]);
+
+  const displayRows = useMemo(() => {
+    const visibleRows = builtRows.rows.filter((row) => matchingIds.has(row.__rowId));
+    const grouped = groupGridRows(visibleRows, groupColumn);
+    return [...grouped, draftRow];
+  }, [builtRows.rows, matchingIds, groupColumn, draftRow]);
+  const duplicatePassportValues = useMemo(() => {
+    const passportColumn = activeColumns.find((column) => (
+      column.isPassport === true || column.is_passport === true || /passport/i.test(column.name)
+    ));
+    return passportColumn ? findDuplicatePassportValues(rows, passportColumn) : new Set<string>();
+  }, [rows, activeColumns]);
 
   const handleDuplicate = useCallback(async (row: SheetRow) => {
     try {
@@ -305,6 +309,23 @@ export function SheetPage({
       await repository.createRow({ [field]: value });
       await refresh({ quiet: true });
       setStatusMessage('Added a new record.');
+      // SHEET-11 "continuous focus": the committed row is saved and a fresh
+      // blank draft is now the last row — put the cursor back in the same
+      // column so the next record can be typed without touching the mouse.
+      const api = gridApiRef.current;
+      if (api) {
+        const rowIndex = api.getDisplayedRowCount() - 1;
+        if (rowIndex >= 0) {
+          window.requestAnimationFrame(() => {
+            try {
+              api.setFocusedCell(rowIndex, field);
+              api.startEditingCell({ rowIndex, colKey: field });
+            } catch {
+              // The grid can be torn down between the refresh and the frame.
+            }
+          });
+        }
+      }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
     }
@@ -678,12 +699,35 @@ export function SheetPage({
                     editable: true,
                   }}
                   getRowId={(params) => params.data.__rowId}
-                  getRowClass={(params) => (
-                    params.data && (isGroupHeaderRow(params.data) || params.data.__rowId === DRAFT_ROW_ID)
-                      ? ''
-                      : rowClassForStatus(params.data?.status ?? null)
-                  )}
-                  pinnedBottomRowData={[draftRow]}
+                  getRowClass={(params) => {
+                    if (!params.data) {
+                      return '';
+                    }
+                    // R3 batch E: the draft row carries its own class so its
+                    // cells keep visible borders wherever it sits.
+                    if (params.data.__rowId === DRAFT_ROW_ID) {
+                      return 'sheet-draft-row';
+                    }
+                    if (isGroupHeaderRow(params.data)) {
+                      return '';
+                    }
+                    return rowClassForStatus(params.data.status ?? null);
+                  }}
+                  // Sorting must never move the blank draft row away from the
+                  // end of the list (Community API: postSortRows).
+                  postSortRows={(params) => {
+                    const nodes = params.nodes;
+                    if (!nodes) {
+                      return;
+                    }
+                    const draftIndex = nodes.findIndex(
+                      (node) => (node.data as SheetGridRendererData | undefined)?.__rowId === DRAFT_ROW_ID,
+                    );
+                    if (draftIndex >= 0 && draftIndex !== nodes.length - 1) {
+                      const [draftNode] = nodes.splice(draftIndex, 1);
+                      nodes.push(draftNode);
+                    }
+                  }}
                   isFullWidthRow={(params) => isGroupHeaderRow(params.rowNode.data)}
                   fullWidthCellRenderer={GroupHeaderCell}
                   getContextMenuItems={(params) => {
@@ -699,6 +743,9 @@ export function SheetPage({
                       onDelete: handleDelete,
                       onRenew: handleRenew,
                     });
+                  }}
+                  onGridReady={(event) => {
+                    gridApiRef.current = event.api;
                   }}
                   onCellValueChanged={(event) => void handleCellValueChanged(event)}
                   domLayout="normal"
@@ -827,7 +874,7 @@ export function SheetPage({
               no filter match) — never two, and never covering the grid header. */}
           {rows.length === 0 ? (
             <div className="sheet-grid__empty" role="status">
-              <p>No records yet. Type in the blank bottom row to add your first entry.</p>
+              <p>No records yet. Type in the blank row at the end to add your first entry.</p>
             </div>
           ) : matchingRows.length === 0 ? (
             <div className="sheet-grid__empty" role="status">

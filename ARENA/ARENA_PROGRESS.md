@@ -829,3 +829,57 @@ Tests: `tests/startup.test.ts` (6) — packaged registration points at the real
 exe and never hides the window, a development run registers nothing, an
 unsupported platform is not faked, and the tree keeps exactly one mechanism
 (no `auto-launch` dependency or client).
+
+## 16. Round 3 — Batch E: sheet layout, draft row, filters, dark theme
+
+The user restated five sheet decisions and one notification decision; this batch
+implements them without touching the Dashboard.
+
+- **Full-width sheet.** `.content` (the shared page wrapper) sets
+  `width: min(100%, 1280px); margin: 0 auto`. The sheet opt-out
+  (`.content--sheet`) was a single-class selector too, so the winner depended
+  on CSS bundle order — which is why the sheet could still render as a centered
+  1280px column with blank space either side. The override is now
+  `.content.content--sheet` (and the same double-class guard for the workbench,
+  grid wrapper and table wrapper), so the sheet fills the content area at
+  1920px and at narrow widths.
+- **Draft row placement (new user decision).** The blank draft is no longer a
+  pinned bottom overlay. It is appended to `rowData` after the last visible
+  saved record, carries `sheet-draft-row` (dashed borders on every cell, dark
+  theme included), and `postSortRows` keeps it last after any column sort. A
+  freshly committed record therefore gets a brand-new blank row directly
+  beneath it. Empty-state copy now says "blank row at the end", not "bottom
+  row".
+- **Continuous entry.** After a draft commit the grid re-focuses the same column
+  on the new last row, so a run of records can be typed without the mouse.
+- **Actions column.** Kept (per the user override): three 24px icon buttons
+  (duplicate / delete / renew) with `title` and `aria-label` in a 100px column;
+  no overflow, no overlay, no removal.
+- **Filters, `+` header.** Already in the required shape and left alone: status
+  dropdown `All statuses | Valid | Expiring soon | Expired | No expiry`, chips
+  `Today | ≤7d | ≤30d | ≤60d | ≤90d`, `+` header only — no Add Row / Add
+  Column / Manage Columns toolbar buttons.
+- **Dark theme parity.** Every sheet surface, popover (notification, more
+  filters, column menu, avatar), dialog and admin table paints from the
+  `--color-*` tokens; the only literal colours left are semantic
+  (danger/warning) fills. The personal theme preference still outranks the
+  workspace default (R2-08 unchanged).
+- **Notification popover (user override).** No custom date snooze exists in the
+  UI; expiry alerts get Mark read plus snooze choices that never exceed the
+  remaining days, and the popover stays open while an action updates the list in
+  place (`tests/notification-popover.test.tsx`).
+- **About / toasts.** About already shows the real version, "Made by Tacenta"
+  and the GitHub icon opening `https://github.com/tacenta2k` in the system
+  browser. Packaged toast attribution is asserted against
+  `electron-builder.yml` (`appId` == `setAppUserModelId`, shortcut named DKS).
+- **Dashboard:** not touched.
+
+Tests: `tests/sheet-layout.test.tsx` (7) and `tests/dark-theme-parity.test.ts`
+(5). Batch F needed no code: the import preview already detects expiry-like
+headers/values, offers explicit `date_expiry` creation or conversion of an
+existing text column, normalises dates to ISO and leaves Days Left derived
+(`tests/import-export.test.ts`, 18). The two remaining NOT_STARTED rows are
+USER-ONLY packaging/visual checks.
+
+Gate: 58 test files / 328 tests, `tsc` (both configs) clean, `build:electron`
+clean.
