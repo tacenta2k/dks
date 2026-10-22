@@ -15,6 +15,7 @@ import { createAppStore } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
 import type { DksSettings, PartialSettings } from '../features/settings/SettingsPage';
+import type { AuditProfile } from '../features/audit/AuditLogPage';
 import {
   loadWorkspaceSettings,
   partialSettingsToRecord,
@@ -96,6 +97,7 @@ export function App({
     pendingCount: 0,
   });
   const [workspaceSettings, setWorkspaceSettings] = useState<PartialSettings | undefined>(undefined);
+  const [auditProfiles, setAuditProfiles] = useState<AuditProfile[]>([]);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const lastSettingsSignature = useRef('');
   const resolvedTheme = resolveTheme(themePreference, systemDark);
@@ -214,6 +216,36 @@ export function App({
       cancelled = true;
     };
   }, [appStore, authService, authStatus, isWorkspaceVisible, profile?.id]);
+
+  // S3: resolve audit actors by joining `profiles` so the Audit Log shows a
+  // real person (or "Office (shared account)") instead of "Unknown".
+  useEffect(() => {
+    if (!isWorkspaceVisible || authStatus === 'demo' || profile?.role !== 'admin') {
+      setAuditProfiles([]);
+      return undefined;
+    }
+    const client = authService.authClient;
+    if (!client) {
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await client.from('profiles').select('id,email,full_name,role') as unknown as {
+          data?: AuditProfile[] | null;
+        };
+        if (!cancelled && Array.isArray(result?.data)) {
+          setAuditProfiles(result.data);
+        }
+      } catch {
+        // Profile lookup is best-effort; the audit log falls back to the
+        // recorded actor names and neutral labels.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authService, authStatus, isWorkspaceVisible, profile?.id, profile?.role]);
 
   const persistWorkspaceSettings = async (settings: DksSettings): Promise<void> => {
     const signature = JSON.stringify(settings);
@@ -595,6 +627,7 @@ export function App({
       settings={workspaceSettings}
       onSettingsChange={persistWorkspaceSettings}
       settingsError={settingsLoadError}
+      auditProfiles={auditProfiles}
       repositoryRevision={repositoryRevision}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}

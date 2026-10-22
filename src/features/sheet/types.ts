@@ -10,6 +10,12 @@ export interface SheetRow {
   deleted?: boolean;
   updatedAt?: string;
   updated_at?: string;
+  updatedBy?: string | null;
+  updated_by?: string | null;
+  deletedAt?: string | null;
+  deleted_at?: string | null;
+  deletedBy?: string | null;
+  deleted_by?: string | null;
 }
 
 export interface ColumnInput {

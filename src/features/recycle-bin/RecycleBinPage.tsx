@@ -1,5 +1,7 @@
 import { useMemo } from 'react';
 
+import { formatLocalDateTime } from '../../lib/date';
+import { rowDisplayLabel } from '../../lib/labels';
 import { can } from '../../lib/permissions';
 import type { ColumnDefinition } from '../../lib/columns';
 import type { Role } from '../auth/auth-types';
@@ -13,10 +15,19 @@ export interface RecycleBinPageProps {
   onPermanentDelete?: (row: SheetRow) => void | Promise<void>;
 }
 
+/** Human label (S2): never a raw row id like `row-7ce65046-…`. */
 function rowLabel(row: SheetRow, columns: readonly ColumnDefinition[]): string {
-  const preferred = columns.find((column) => /name|passport/i.test(column.name) || column.id === 'name');
-  const value = preferred ? row.data[preferred.id] ?? row.data[preferred.name] : null;
-  return value === null || value === undefined || String(value).trim() === '' ? row.id : String(value);
+  return rowDisplayLabel(row, columns);
+}
+
+function deletedAtText(row: SheetRow): string {
+  const raw = row.deletedAt ?? row.deleted_at ?? row.updatedAt ?? row.updated_at;
+  return raw ? formatLocalDateTime(raw) : '—';
+}
+
+function deletedByText(row: SheetRow): string | null {
+  const raw = row.deletedBy ?? row.deleted_by ?? row.updatedBy ?? row.updated_by;
+  return typeof raw === 'string' && raw.trim() ? raw.trim() : null;
 }
 
 function displayValue(row: SheetRow, column: ColumnDefinition): string {
@@ -63,6 +74,7 @@ export function RecycleBinPage({
               <th scope="col">Record</th>
               {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
               <th scope="col">Deleted at</th>
+              <th scope="col">Deleted by</th>
               <th scope="col">Actions</th>
             </tr>
           </thead>
@@ -74,8 +86,11 @@ export function RecycleBinPage({
                   <th scope="row">{label}</th>
                   {activeColumns.map((column) => <td key={column.id}>{displayValue(row, column)}</td>)}
                   <td>
-                    {row.updatedAt ?? row.updated_at ?? '—'}
+                    <time dateTime={row.deletedAt ?? row.deleted_at ?? row.updatedAt ?? row.updated_at}>
+                      {deletedAtText(row)}
+                    </time>
                   </td>
+                  <td>{deletedByText(row) ?? '—'}</td>
                   <td>
                     {can(role, 'restore') ? (
                       <button type="button" onClick={() => void onRestore?.(row)}>

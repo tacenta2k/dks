@@ -402,14 +402,28 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
       const category = input.category === undefined || input.category === null
         ? undefined
         : requiredString(input.category, 'category');
+      const updatedBy = optionalNullableString(input.updatedBy ?? input.updated_by, 'updatedBy');
       const result = createRow(store, {
         id: optionalString(input.id, 'id'),
         data,
         category,
         idempotencyKey: optionalString(input.idempotencyKey ?? input.idempotency_key, 'idempotencyKey'),
-        updatedBy: optionalNullableString(input.updatedBy ?? input.updated_by, 'updatedBy'),
+        updatedBy,
       });
-      return rowFromUnknown(result, 'created row');
+      const created = rowFromUnknown(result, 'created row');
+      // S3: record who created the row (single audit per created row; bulk
+      // imports record one 'import' audit instead).
+      if (store.recordAudit && created && typeof created === 'object') {
+        store.recordAudit(makeAuditRecord({
+          actor: updatedBy,
+          entityType: 'entry',
+          entityId: (created as { id?: unknown }).id,
+          action: 'create',
+          after: created,
+          createdAt: now(),
+        }));
+      }
+      return created;
     },
 
     [LOCAL_IPC_CHANNELS.updateRow]: (payload) => {

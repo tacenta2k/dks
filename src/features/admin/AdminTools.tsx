@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 
 import { can } from '../../lib/permissions';
+import { rowDisplayLabel } from '../../lib/labels';
 import type { ColumnDefinition } from '../../lib/columns';
 import type { Role } from '../auth/auth-types';
 import {
@@ -16,7 +17,7 @@ import {
   type ImportPreview,
   type ImportSource,
 } from '../import-export/import-service';
-import { AuditLogPage } from '../audit/AuditLogPage';
+import { AuditLogPage, type AuditProfile } from '../audit/AuditLogPage';
 import { PrintReportModal } from '../print/PrintReportModal';
 import {
   exportReportToPdf,
@@ -132,27 +133,11 @@ function isConfirmed(message: string): boolean {
 
 /**
  * Human-readable row label for confirmations and status messages (S1/S2):
- * the first text-like column value wins, with a stable fallback instead of a
- * raw record id.
+ * never a raw record id. Delegates to the shared `rowDisplayLabel` helper so
+ * toasts, the Recycle Bin and notifications stay consistent.
  */
 export function displayRowLabel(row: SheetRow, columns: readonly ColumnDefinition[]): string {
-  const preferred = columns.find((column) => (
-    column.deleted !== true
-    && ['text', 'notes', 'phone', 'email'].includes(column.type)
-  ));
-  const fallbacks = columns.filter((column) => (
-    column.deleted !== true && column.id !== preferred?.id
-  ));
-  for (const column of [...(preferred ? [preferred] : []), ...fallbacks]) {
-    const value = row.data[column.id] ?? row.data[column.name];
-    if (typeof value === 'string' && value.trim()) {
-      return value.trim();
-    }
-    if (typeof value === 'number' && Number.isFinite(value)) {
-      return String(value);
-    }
-  }
-  return 'Untitled record';
+  return rowDisplayLabel(row, columns);
 }
 
 async function importSourceForFile(file: File): Promise<ImportSource> {
@@ -588,7 +573,8 @@ export function AdminRecycleBinPanel({
 export function AdminAuditLogPanel({
   repository: providedRepository,
   role,
-}: AdminToolsProps) {
+  profiles = [],
+}: AdminToolsProps & { profiles?: readonly AuditProfile[] }) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
     [providedRepository],
@@ -628,7 +614,7 @@ export function AdminAuditLogPanel({
   return (
     <div className="admin-panel">
       {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
-      <AuditLogPage role={role} entries={entries} />
+      <AuditLogPage role={role} entries={entries} profiles={profiles} />
     </div>
   );
 }

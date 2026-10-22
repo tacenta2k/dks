@@ -356,11 +356,17 @@ export class ElectronSheetRepository implements SheetRepository {
     ).then((row) => requiredRow(row, 'duplicated row'));
   }
 
-  async softDeleteRow(rowId: string): Promise<SheetRow> {
+  async softDeleteRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {
     return this.use(
       'softDeleteRow',
-      (local) => local.softDeleteRow({ id: rowId }),
-      () => this.fallback.softDeleteRow(rowId),
+      (local) => local.softDeleteRow({
+        id: rowId,
+        role: this.role,
+        actorId: options.actorId,
+        actor: options.actor,
+        updatedBy: options.actor ?? null,
+      }),
+      () => this.fallback.softDeleteRow(rowId, options),
     ).then((row) => requiredRow(row, 'deleted row'));
   }
 

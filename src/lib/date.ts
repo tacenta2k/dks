@@ -272,6 +272,26 @@ export function formatDisplayDate(value: string | Date | null | undefined): stri
   return text;
 }
 
+/**
+ * Format a timestamp as local `DD/MM/YYYY HH:mm` (S2/S3). Falls back to the
+ * date-only display form for date values, and returns the input unchanged
+ * when nothing parseable was supplied.
+ */
+export function formatLocalDateTime(value: string | Date | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  const pad = (part: number) => String(part).padStart(2, '0');
+  return `${pad(date.getDate())}/${pad(date.getMonth() + 1)}/${date.getFullYear()} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+export const formatDateTimeLocal = formatLocalDateTime;
+export const formatDdMmYyyyTime = formatLocalDateTime;
+
 export const toDisplayDate = formatDisplayDate;
 export const formatDdMmYyyy = formatDisplayDate;
 

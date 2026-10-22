@@ -80,6 +80,7 @@ function row(id: string, expiry: string, passportExpiry = '2026-01-01'): AlertRo
   return {
     id,
     data: {
+      name: 'Ravi Kumar',
       visa_expiry: expiry,
       passport_expiry: passportExpiry,
     },
@@ -289,7 +290,9 @@ describe('notification alert evaluator', () => {
     render(createElement(NotificationBell, { notifications: [record], onSnooze }));
     expect(screen.getByRole('button', { name: 'Notifications (1 unread)' })).toBeTruthy();
     fireEvent.click(screen.getByRole('button', { name: 'Notifications (1 unread)' }));
-    expect(screen.getByText('r1 expires in 30 days.')).toBeTruthy();
+    // S1: the body carries the human row label, never the raw row id.
+    expect(screen.getByText('Ravi Kumar expires in 30 days.')).toBeTruthy();
+    expect(screen.queryByText(/r1 expires/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Snooze custom' })).toBeTruthy();
   });
 });

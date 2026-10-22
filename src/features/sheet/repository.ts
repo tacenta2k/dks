@@ -25,7 +25,7 @@ export interface SheetRepository {
   createRow(data?: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   duplicateRow(rowId: string): Promise<SheetRow>;
-  softDeleteRow(rowId: string): Promise<SheetRow>;
+  softDeleteRow(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
   /** Optional admin methods keep older adapters and test doubles assignable. */
   restoreRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
   permanentDeleteRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow | null>;
@@ -246,7 +246,7 @@ export class InMemorySheetRepository implements SheetRepository {
     return this.createRow(source.data, source.category);
   }
 
-  async softDeleteRow(rowId: string): Promise<SheetRow> {
+  async softDeleteRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {
     const index = this.rows.findIndex((row) => row.id === rowId);
     if (index < 0) {
       throw new Error(`Unknown sheet row: ${rowId}`);
@@ -259,7 +259,7 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: now(),
     };
     this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? updated : row);
-    this.recordAudit('soft_delete', { rowId });
+    this.recordAudit('soft_delete', { rowId }, options);
     return clone(updated);
   }
 

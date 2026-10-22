@@ -169,6 +169,19 @@ export interface OutboxInput {
   payload: unknown;
 }
 
+function columnActor(input: unknown): string | null {
+  const role = typeof (input as { role?: unknown } | undefined | null)?.role === 'string'
+    ? String((input as { role?: unknown }).role).toLowerCase()
+    : '';
+  if (role === 'office') {
+    return 'Office (shared account)';
+  }
+  if (role === 'admin') {
+    return 'Admin';
+  }
+  return null;
+}
+
 export interface AuditRecord {
   id: number;
   actor: string | null;
@@ -697,6 +710,21 @@ export class SqliteStore {
       });
     });
     execute();
+    // S3: every mutation records who did it (when known) so the Audit Log
+    // can show a real actor instead of "Unknown".
+    this.recordAudit({
+      actor: next.updatedBy,
+      entityType: 'entry',
+      entityId: id,
+      action: !current.deleted && next.deleted
+        ? 'soft_delete'
+        : current.deleted && !next.deleted
+          ? 'restore'
+          : 'update',
+      before: { data: current.data, category: current.category, deleted: current.deleted },
+      after: { data: next.data, category: next.category, deleted: next.deleted },
+      createdAt: timestamp,
+    });
     return next;
   }
 
@@ -965,6 +993,15 @@ export class SqliteStore {
       });
     });
     execute();
+    this.recordAudit({
+      actor: columnActor(input),
+      entityType: 'column',
+      entityId: input.id,
+      action: existing ? 'update_column' : 'create_column',
+      before: existing ? { name: existing.name, type: existing.type } : null,
+      after: { name: input.name, type: input.type },
+      createdAt: timestamp,
+    });
 
     const result = this.getColumn(input.id);
     if (!result) {
@@ -1048,6 +1085,15 @@ export class SqliteStore {
       });
     });
     execute();
+    this.recordAudit({
+      actor: columnActor({ role }),
+      entityType: 'column',
+      entityId: id,
+      action: 'delete_column',
+      before: { name: column.name, type: column.type },
+      after: null,
+      createdAt: timestamp,
+    });
     return this.getColumn(id);
   }
 

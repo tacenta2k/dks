@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -157,6 +157,7 @@ describe('admin renderer integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Open Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
-    expect(screen.getByText('create')).toBeInTheDocument();
+    // S3: friendly action names (raw code "create" is no longer shown).
+    expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();
   });
 });

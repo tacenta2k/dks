@@ -27,6 +27,7 @@ import {
   SettingsPage,
   type PartialSettings,
 } from '../../features/settings/SettingsPage';
+import type { AuditProfile } from '../../features/audit/AuditLogPage';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -55,6 +56,7 @@ export interface AppShellProps {
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
   resendNote?: string;
   settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
+  auditProfiles?: readonly AuditProfile[];
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
@@ -153,6 +155,7 @@ export function AppShell({
   onCheckForUpdates,
   resendNote,
   settingsError,
+  auditProfiles = [],
   onSaveExport,
   onSavePdf,
   onPrint,
@@ -460,7 +463,7 @@ export function AppShell({
                onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
              />
            ) : effectiveView === 'audit-log' ? (
-             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} />
+             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} profiles={auditProfiles} />
            ) : (
              <SettingsPage
                role={role}
