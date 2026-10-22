@@ -188,6 +188,36 @@ Per `docs/FIXES_UI.md` §6/§7/§8:
   `dashboard` (3), and App-level `admin-features` (8) all pass unchanged.
 - Gate: typecheck 0; **39 files / 217 tests passed**; build ✓.
 
+### 2.8 UI batch 4 — Settings inner nav, login cleanup, restart persistence (SET-01, SET-12, SYNC-10) — THIS TURN
+Per `docs/FIXES_UI.md` §9.1 / §13 / §4+3.2:
+- **Settings (SET-01):** converted the single scrolling page into the approved
+  **inner navigation** — left nav (Expiry rules / Notifications / Workspace /
+  About & updates) + one selected section at a time. Split the old "Expiry
+  rules" block: thresholds + status colours stay under Expiry rules; the
+  notification-days + daily/weekly summary controls moved to their own
+  **Notifications** section. Removed the duplicate page header (eyebrow
+  "Administration" + `<h2>Settings` + description — the top bar carries the
+  title) and the "Close settings" button. Inputs capped at ~320px; layout
+  stacks on narrow windows. **Kept (documented conflict, honest):** the
+  "Resend:" note — it is the user-confirmed SET-03 email-status text and is
+  asserted by `settings.test.tsx`, so it is not developer placeholder; the
+  transient save-feedback banner stays (SET-06 territory). `settings.test.tsx`
+  updated to navigate the inner nav per section — **no coverage removed**, same
+  controls asserted per section.
+- **Login (SET-12):** removed the obsolete developer "Authentication will be
+  connected in STEP 2 …" placeholder. Kept the real login form, branding, and
+  the dev/test-only demo control (gated to no-Supabase + DEV/test). No
+  social/signup/guest/bypass added; no new logo/fonts/palette.
+- **Restart persistence (SYNC-10):** sidebar collapse state already persisted
+  (`localStorage['dks.sidebarCollapsed']`). Added a startup effect that reads
+  the persisted `local.getSnapshot().syncStatus` so the top-bar sync state
+  (pending count / last sync / error) is restored immediately on restart
+  instead of flashing the default offline/0 before the first background tick.
+  Demo mode is left untouched. `sync-status-ui` is unaffected (renders
+  `AppShell` directly); App-level tests have no `window.dks.local` so the new
+  effect is a safe no-op there.
+- Gate: typecheck 0; **39 files / 217 tests passed**; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
@@ -203,7 +233,9 @@ Per `docs/FIXES_UI.md` §6/§7/§8:
 - [x] **UI batch 1: Global shell & navigation (SHELL-01..07)** — implemented + gate green. See §2.5.
 - [x] **UI batch 2: Visa Sheet structure (SHEET-02/03/08/15/16-partial)** — one-row toolbar, admin de-dup, empty states, dense rows. See §2.6. (SHEET-01/04/10/11/13/14/16-button-removals deferred — see §2.6.)
 - [x] **UI batch 3: Dashboard / Recycle Bin / Audit Log (DASH-01, RBIN-01/02, AUDIT-01/04)** — dashboard spacing, RB search/count + empty states, audit details side panel. See §2.7.
-- [ ] UI batch 4: Settings & dialogs, responsive, verification cleanup.
+- [x] **UI batch 4: Settings inner nav, login cleanup, restart persistence (SET-01, SET-12, SYNC-10)** — see §2.8.
+- [ ] Remaining deferred sheet items (SHEET-01/04/06/10/11/12/13/14/16) — need new AG Grid interaction surfaces; existing test-covered controls kept to avoid regression.
+- [ ] PKG-07 UI verification checklist (user-facing) + SYNC-09 dev-window focus (main-process) — see Notes.
 
 ### Commit map (this session, this lineage)
 - `0204f2d` fix: allow authenticated entry sync under entries RLS
@@ -211,7 +243,8 @@ Per `docs/FIXES_UI.md` §6/§7/§8:
 - `8757152` merge: reconcile re-established branch with pushed lineage (no content change)
 - `f6411a8` feat: rebuild global shell and navigation (compact top bar, collapsible sidebar) — UI batch 1
 - `02172d3` feat: consolidate Visa Sheet toolbar, admin tools, and empty states — UI batch 2
-- `<tip>` feat: Dashboard / Recycle Bin / Audit Log layouts — UI batch 3 (this commit)
+- `626b18b` feat: rebuild Dashboard, Recycle Bin, and Audit Log layouts — UI batch 3
+- `<tip>` feat: Settings inner nav, login cleanup, restart sync persistence — UI batch 4 (this commit)
 - (remote `origin/arena/0e0155c1-dks` updated on push; see `git log`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)

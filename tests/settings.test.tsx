@@ -5,6 +5,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { AppShell } from '../src/renderer/components/AppShell';
 import { SettingsPage } from '../src/features/settings/SettingsPage';
 
+// FIXES_UI §9.1: Settings now uses an inner navigation (Expiry rules /
+// Notifications / Workspace / About & updates) with one section at a time, so
+// the tests navigate to the relevant section before asserting its controls.
+const nav = (label: string) => fireEvent.click(screen.getByRole('button', { name: label }));
+
 describe('settings page', () => {
   it('denies office users without rendering protected settings controls', () => {
     render(<SettingsPage role="office" />);
@@ -35,24 +40,35 @@ describe('settings page', () => {
       />,
     );
 
+    // Expiry rules (default active section).
     expect(screen.getByLabelText('Green status color')).toHaveValue('#16a34a');
     expect(screen.getByLabelText('Yellow status color')).toHaveValue('#eab308');
     expect(screen.getByLabelText('Urgent status color')).toHaveValue('#f97316');
     expect(screen.getByLabelText('Today status color')).toHaveValue('#dc2626');
     expect(screen.getByLabelText('Expired status color')).toHaveValue('#7f1d1d');
+
+    nav('Workspace');
     expect(screen.getByLabelText('Currency code')).toHaveValue('OMR');
     expect(screen.getByLabelText('Currency symbol')).toHaveValue('ر.ع.');
     expect(screen.getByLabelText('Currency decimals')).toHaveValue(3);
     expect(screen.getByLabelText('Primary expiry column')).toHaveValue('visa_expiry');
     expect(screen.getByLabelText('Theme default')).toHaveValue('light');
+
+    nav('Notifications');
     expect(screen.getByLabelText('Daily summary')).toBeChecked();
     expect(screen.getByLabelText('Notification day 1')).toHaveValue(90);
-    expect(screen.queryByText(/backup/i)).not.toBeInTheDocument();
+
+    nav('About & updates');
     expect(screen.getByText('Version 1.2.3')).toBeInTheDocument();
     expect(screen.getByText('Resend:', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/backup/i)).not.toBeInTheDocument();
 
+    // Local-first changes across sections, plus the update action.
+    nav('Expiry rules');
     fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#008000' } });
+    nav('Notifications');
     fireEvent.click(screen.getByLabelText('Daily summary'));
+    nav('About & updates');
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
 
     expect(onSettingsChange).toHaveBeenCalled();
@@ -77,6 +93,7 @@ describe('settings page', () => {
       />,
     );
 
+    nav('Workspace');
     const select = screen.getByLabelText('Primary expiry column') as HTMLSelectElement;
     expect(select.value).toBe('visa_expiry');
   });
@@ -91,6 +108,7 @@ describe('settings page', () => {
       />,
     );
 
+    nav('Notifications');
     fireEvent.click(screen.getByLabelText('Weekly summary'));
     fireEvent.change(screen.getByLabelText('Weekly summary day'), { target: { value: '5' } });
     fireEvent.change(screen.getByLabelText('Weekly summary time'), { target: { value: '17:30' } });
@@ -116,6 +134,7 @@ describe('settings page', () => {
       />,
     );
 
+    nav('Workspace');
     expect((screen.getByLabelText('Primary expiry column') as HTMLSelectElement).value).toBe('visa_expiry');
   });
 

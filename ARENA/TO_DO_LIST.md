@@ -102,7 +102,7 @@ Locked decisions that resolve conflicts (later decisions win):
 
 | ID | Source | Requirement | Type | Status |
 |----|--------|-------------|------|--------|
-| SET-01 | FIXES_UI 9.1 | Inner navigation layout (Expiry rules / Notifications / Workspace / About & updates); top bar visible; inputs max ~320px; responsive stacking; remove duplicate headings, Close, Export Data, Offline-first, permanent banner, backup UI, dev Resend text. | UI | NOT_STARTED |
+| SET-01 | FIXES_UI 9.1 | Inner navigation layout (Expiry rules / Notifications / Workspace / About & updates); top bar visible; inputs max ~320px; responsive stacking; remove duplicate headings, Close, Export Data, Offline-first, permanent banner, backup UI, dev Resend text. | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 | SET-02 | FIXES_UI 9.2 | Expiry rules: two editable thresholds (urgent < expiring-soon), whole numbers; derived 5-band ranges; today = "Expires today" not "Expired"; editable color swatches + preview; "Reset to defaults" is draft-only. | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
 | SET-03 | FIXES_UI 9.3 | Notifications: reminder chips (90/60/30/15/7/1/On expiry day + Add day), whole non-negative, no dupes, 0 = "On expiry day"; Daily + Weekly summary (enable/day/time); show actual saved state; weekly persists locally + Supabase; email status text; no email key field. | UI+Functional | CONFIRMED_BY_USER |
 | SET-04 | FIXES_UI 9.4 | Workspace defaults: Currency/Symbol/Decimals (editable, no value conversion), Primary expiry (actual Date-Expiry columns only; canonical auto-select for one; preserve + Admin-change for many; recompute on change), Default theme for new sign-ins. | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
@@ -113,7 +113,7 @@ Locked decisions that resolve conflicts (later decisions win):
 | SET-09 | FIXES_UI 11 | Print/PDF report dialog (Admin): range checkboxes + All-entries (mutually exclusive), dynamic user columns + Days Left, no draft/`+`/Actions/group/deleted, DKS header + generated time + range summary + ascending Days Left + page numbers + DD/MM/YYYY; [Cancel][Print][Export PDF]. | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
 | SET-10 | FIXES_UI 11 | Import dialog (Admin): select file, preview first 20 rows, map to actual columns, confirm; preserve leading zeroes; DD/MM/YYYY parse; row-level problems; no premature cloud-success. | UI+Functional | CONFIRMED_BY_USER |
 | SET-11 | FIXES_UI 12 | Confirmation dialogs: row delete / restore / permanent delete / empty-column delete / admin populated-column delete (with N count) / Office-denied; destructive = red button; Cancel safe default; Esc closes; prevent duplicate submits; processing/failure state; server determines count/authorization. | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
-| SET-12 | FIXES_UI 13 | Login: keep working; remove obsolete developer placeholder text; no social/signup/passwordless/guest; no auth bypass; keep visual identity; no invented logo/fonts/palette. | UI | NOT_STARTED |
+| SET-12 | FIXES_UI 13 | Login: keep working; remove obsolete developer placeholder text; no social/signup/passwordless/guest; no auth bypass; keep visual identity; no invented logo/fonts/palette. | UI | IMPLEMENTED_AWAITING_CONFIRMATION
 
 ## 8. Sync, persistence, and security
 
@@ -128,7 +128,7 @@ Locked decisions that resolve conflicts (later decisions win):
 | SYNC-07 | HANDOFF | Honest limitation: Office read access cannot distinguish view from export; Admin-only export is app policy (state this, don't overclaim). | Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
 | SYNC-08 | task | Failed sync keeps local row + sanitized reason; successful sync removes exact outbox item; retries idempotent (no duplicates). | Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
 | SYNC-09 | RESUME B6 | `npm run dev` should show/focus the Electron window (main-process logging, no hidden/tray-only startup). | Functional | NOT_STARTED |
-| SYNC-10 | FIXES_UI 4/3.2 | Sync state + sidebar collapse state persist across restart. | UI+Functional | NOT_STARTED |
+| SYNC-10 | FIXES_UI 4/3.2 | Sync state + sidebar collapse state persist across restart. | UI+Functional | IMPLEMENTED_AWAITING_CONFIRMATION
 
 ## 9. Packaging and verification
 

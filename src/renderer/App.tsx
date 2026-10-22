@@ -545,6 +545,32 @@ export function App({
     };
   }, [authService, authStatus, isWorkspaceVisible, profile?.id]);
 
+  // SYNC-10: restore the persisted sync state on restart so the top bar shows
+  // the real outbox (pending count / last sync / error) immediately instead of
+  // flashing the default offline/0 state before the first background tick.
+  // Demo mode has no real outbox, so it is left untouched.
+  useEffect(() => {
+    if (!isWorkspaceVisible || authStatus === 'demo') {
+      return undefined;
+    }
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    if (!local?.getSnapshot) {
+      return undefined;
+    }
+    let cancelled = false;
+    void local
+      .getSnapshot()
+      .then((snapshot) => {
+        if (!cancelled && snapshot.syncStatus) {
+          setSyncStatus(snapshot.syncStatus);
+        }
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [authStatus, isWorkspaceVisible]);
+
   // Pending outbox details for the sync status (Blocker 3): surface WHAT is
   // stuck and WHY (sanitised) — the count itself comes from syncStatus and
   // is never hidden.

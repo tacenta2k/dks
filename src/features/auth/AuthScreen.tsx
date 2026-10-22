@@ -111,10 +111,6 @@ export function AuthScreen({
 
         {safeDemoAvailable && onDemoContinue ? (
           <>
-            <div className="placeholder-callout" role="note">
-              <span className="placeholder-callout__dot" aria-hidden="true" />
-              <span>Authentication will be connected in STEP 2 for configured workspaces.</span>
-            </div>
             <button className="button button--wide" type="button" onClick={onDemoContinue}>
               Continue to workspace (offline demo)
               <span aria-hidden="true">→</span>

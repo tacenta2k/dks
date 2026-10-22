@@ -107,6 +107,16 @@ const STATUS_COLOR_FIELDS: ReadonlyArray<{
   { key: 'Expired', label: 'Expired status color' },
 ];
 
+/** FIXES_UI §9.1: approved inner navigation (one section at a time). */
+export type SettingsSectionId = 'expiry' | 'notifications' | 'workspace' | 'about';
+
+export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSectionId; label: string }> = [
+  { id: 'expiry', label: 'Expiry rules' },
+  { id: 'notifications', label: 'Notifications' },
+  { id: 'workspace', label: 'Workspace' },
+  { id: 'about', label: 'About & updates' },
+];
+
 interface ResolvedSettingsInput extends PartialSettings {
   primaryExpiryColumnId?: string;
 }
@@ -220,6 +230,7 @@ export function SettingsPage({
     resolveSettings(providedSettings ?? initialSettings, providedColumns ?? [])
   ));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [activeSection, setActiveSection] = useState<SettingsSectionId>('expiry');
   const mountedRef = useRef(false);
 
   useEffect(() => {
@@ -337,218 +348,243 @@ export function SettingsPage({
 
   return (
     <div className="settings-page">
-      <div className="settings-page__header">
-        <div>
-          <p className="settings-eyebrow">Administration</p>
-          <h2>Settings</h2>
-          <p className="settings-page__description">Keep expiry rules, office preferences, and local maintenance controls in one place.</p>
-        </div>
-        {onClose ? <button className="button" type="button" onClick={onClose}>Close settings</button> : null}
-      </div>
-
-      {statusMessage ? <div className="settings-alert" role="status">{statusMessage}</div> : null}
-      {settingsError ? <div className="settings-alert settings-alert--error" role="alert">{settingsError}</div> : null}
-
-      <section className="settings-section" aria-labelledby="expiry-settings-title">
-        <div className="settings-section__heading">
-          <div>
-            <p className="settings-eyebrow">Expiry rules</p>
-            <h3 id="expiry-settings-title">Thresholds and alerts</h3>
-          </div>
-          <span className="settings-section__hint">Applied locally first</span>
-        </div>
-        <div className="settings-field-grid settings-field-grid--four">
-          {STATUS_COLOR_FIELDS.map(({ key, label }) => (
-            <label className="settings-field" key={key}>
-              <span>{label}</span>
-              <input
-                aria-label={label}
-                type="color"
-                value={settings.thresholds.colors[key]}
-                onChange={(event) => updateColor(key, event.target.value)}
-              />
-            </label>
+      <div className="settings-layout">
+        <nav className="settings-nav" aria-label="Settings sections">
+          {SETTINGS_SECTIONS.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={`settings-nav__item${activeSection === item.id ? ' settings-nav__item--active' : ''}`}
+              aria-current={activeSection === item.id ? 'page' : undefined}
+              onClick={() => setActiveSection(item.id)}
+            >
+              {item.label}
+            </button>
           ))}
-        </div>
-        <div className="settings-field-grid settings-field-grid--four settings-field-grid--spaced">
-          <label className="settings-field">
-            <span>Green above days</span>
-            <input aria-label="Green above days" type="number" value={settings.thresholds.validAbove ?? ''} onChange={(event) => updateThreshold('validAbove', event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Yellow from days</span>
-            <input aria-label="Yellow from days" type="number" value={settings.thresholds.expiringSoonFrom ?? ''} onChange={(event) => updateThreshold('expiringSoonFrom', event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Urgent from days</span>
-            <input aria-label="Urgent from days" type="number" value={settings.thresholds.urgentFrom ?? ''} onChange={(event) => updateThreshold('urgentFrom', event.target.value)} />
-          </label>
-          <label className="settings-field">
-            <span>Expired at days</span>
-            <input aria-label="Expired at days" type="number" value={settings.thresholds.expiredAt ?? ''} onChange={(event) => updateThreshold('expiredAt', event.target.value)} />
-          </label>
-        </div>
-        <div className="settings-alert-options">
-          <fieldset className="settings-fieldset">
-            <legend>Notification days before expiry</legend>
-            <div className="settings-notification-list">
-              {settings.notificationDays.map((day, index) => (
-                <div className="settings-notification-row" key={`${index}-${day}`}>
-                  <label className="settings-field settings-field--inline">
-                    <span className="visually-hidden">Notification day {index + 1}</span>
+        </nav>
+        <div className="settings-content">
+          {statusMessage ? <div className="settings-alert" role="status">{statusMessage}</div> : null}
+          {settingsError ? <div className="settings-alert settings-alert--error" role="alert">{settingsError}</div> : null}
+
+          {activeSection === 'expiry' ? (
+            <section className="settings-section" aria-labelledby="expiry-settings-title">
+              <div className="settings-section__heading">
+                <div>
+                  <p className="settings-eyebrow">Expiry rules</p>
+                  <h2 id="expiry-settings-title">Thresholds and alerts</h2>
+                </div>
+                <span className="settings-section__hint">Applied locally first</span>
+              </div>
+              <div className="settings-field-grid settings-field-grid--four">
+                {STATUS_COLOR_FIELDS.map(({ key, label }) => (
+                  <label className="settings-field" key={key}>
+                    <span>{label}</span>
                     <input
-                      aria-label={`Notification day ${index + 1}`}
-                      type="number"
-                      min="0"
-                      value={day}
-                      onChange={(event) => updateNotificationDay(index, event.target.value)}
+                      aria-label={label}
+                      type="color"
+                      value={settings.thresholds.colors[key]}
+                      onChange={(event) => updateColor(key, event.target.value)}
                     />
                   </label>
-                  <span>days before</span>
+                ))}
+              </div>
+              <div className="settings-field-grid settings-field-grid--four settings-field-grid--spaced">
+                <label className="settings-field">
+                  <span>Green above days</span>
+                  <input aria-label="Green above days" type="number" value={settings.thresholds.validAbove ?? ''} onChange={(event) => updateThreshold('validAbove', event.target.value)} />
+                </label>
+                <label className="settings-field">
+                  <span>Yellow from days</span>
+                  <input aria-label="Yellow from days" type="number" value={settings.thresholds.expiringSoonFrom ?? ''} onChange={(event) => updateThreshold('expiringSoonFrom', event.target.value)} />
+                </label>
+                <label className="settings-field">
+                  <span>Urgent from days</span>
+                  <input aria-label="Urgent from days" type="number" value={settings.thresholds.urgentFrom ?? ''} onChange={(event) => updateThreshold('urgentFrom', event.target.value)} />
+                </label>
+                <label className="settings-field">
+                  <span>Expired at days</span>
+                  <input aria-label="Expired at days" type="number" value={settings.thresholds.expiredAt ?? ''} onChange={(event) => updateThreshold('expiredAt', event.target.value)} />
+                </label>
+              </div>
+            </section>
+          ) : null}
+
+          {activeSection === 'notifications' ? (
+            <section className="settings-section" aria-labelledby="notifications-settings-title">
+              <div className="settings-section__heading">
+                <div>
+                  <p className="settings-eyebrow">Notifications</p>
+                  <h2 id="notifications-settings-title">Reminders and summaries</h2>
+                </div>
+              </div>
+              <div className="settings-alert-options">
+                <fieldset className="settings-fieldset">
+                  <legend>Notification days before expiry</legend>
+                  <div className="settings-notification-list">
+                    {settings.notificationDays.map((day, index) => (
+                      <div className="settings-notification-row" key={`${index}-${day}`}>
+                        <label className="settings-field settings-field--inline">
+                          <span className="visually-hidden">Notification day {index + 1}</span>
+                          <input
+                            aria-label={`Notification day ${index + 1}`}
+                            type="number"
+                            min="0"
+                            value={day}
+                            onChange={(event) => updateNotificationDay(index, event.target.value)}
+                          />
+                        </label>
+                        <span>days before</span>
+                        <button
+                          className="settings-remove-button"
+                          type="button"
+                          aria-label={`Remove notification day ${index + 1}`}
+                          onClick={() => updateSettings((current) => ({
+                            ...current,
+                            notificationDays: current.notificationDays.filter((_, currentIndex) => currentIndex !== index),
+                          }))}
+                        >
+                          Remove
+                        </button>
+                      </div>
+                    ))}
+                  </div>
                   <button
-                    className="settings-remove-button"
+                    className="button button--quiet"
                     type="button"
-                    aria-label={`Remove notification day ${index + 1}`}
                     onClick={() => updateSettings((current) => ({
                       ...current,
-                      notificationDays: current.notificationDays.filter((_, currentIndex) => currentIndex !== index),
+                      notificationDays: [...current.notificationDays, 0],
                     }))}
                   >
-                    Remove
+                    Add notification day
                   </button>
+                </fieldset>
+                <div className="settings-summary-options" role="group" aria-label="Summary schedules">
+                  <label className="settings-toggle">
+                    <input
+                      aria-label="Daily summary"
+                      type="checkbox"
+                      checked={settings.dailySummaryEnabled}
+                      onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryEnabled: event.target.checked }))}
+                    />
+                    <span>
+                      <strong>Daily summary</strong>
+                      <small>Send a daily digest when summary delivery is configured.</small>
+                    </span>
+                  </label>
+                  <label className="settings-toggle">
+                    <input
+                      aria-label="Weekly summary"
+                      type="checkbox"
+                      checked={settings.weeklySummaryEnabled}
+                      onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryEnabled: event.target.checked }))}
+                    />
+                    <span>
+                      <strong>Weekly summary</strong>
+                      <small>Send one digest a week on the chosen day.</small>
+                    </span>
+                  </label>
+                  <div className="settings-field-grid settings-field-grid--three settings-field-grid--spaced">
+                    <label className="settings-field">
+                      <span>Weekly summary day</span>
+                      <select
+                        aria-label="Weekly summary day"
+                        value={settings.weeklySummaryDay}
+                        onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryDay: Number(event.target.value) }))}
+                      >
+                        {WEEKDAY_LABELS.map(([label, value]) => (
+                          <option key={label} value={value}>{label}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <label className="settings-field">
+                      <span>Weekly summary time</span>
+                      <input
+                        aria-label="Weekly summary time"
+                        type="time"
+                        value={settings.weeklySummaryTime}
+                        onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryTime: event.target.value || DEFAULT_SETTINGS.weeklySummaryTime }))}
+                      />
+                    </label>
+                    <label className="settings-field">
+                      <span>Daily summary time</span>
+                      <input
+                        aria-label="Daily summary time"
+                        type="time"
+                        value={settings.dailySummaryTime}
+                        onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryTime: event.target.value || DEFAULT_SETTINGS.dailySummaryTime }))}
+                      />
+                    </label>
+                  </div>
+                  <p className="settings-muted">Day and time use this device&apos;s local time zone.</p>
                 </div>
-              ))}
-            </div>
-            <button
-              className="button button--quiet"
-              type="button"
-              onClick={() => updateSettings((current) => ({
-                ...current,
-                notificationDays: [...current.notificationDays, 0],
-              }))}
-            >
-              Add notification day
-            </button>
-          </fieldset>
-          <div className="settings-summary-options" role="group" aria-label="Summary schedules">
-            <label className="settings-toggle">
-              <input
-                aria-label="Daily summary"
-                type="checkbox"
-                checked={settings.dailySummaryEnabled}
-                onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryEnabled: event.target.checked }))}
-              />
-              <span>
-                <strong>Daily summary</strong>
-                <small>Send a daily digest when summary delivery is configured.</small>
-              </span>
-            </label>
-            <label className="settings-toggle">
-              <input
-                aria-label="Weekly summary"
-                type="checkbox"
-                checked={settings.weeklySummaryEnabled}
-                onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryEnabled: event.target.checked }))}
-              />
-              <span>
-                <strong>Weekly summary</strong>
-                <small>Send one digest a week on the chosen day.</small>
-              </span>
-            </label>
-            <div className="settings-field-grid settings-field-grid--three settings-field-grid--spaced">
-              <label className="settings-field">
-                <span>Weekly summary day</span>
-                <select
-                  aria-label="Weekly summary day"
-                  value={settings.weeklySummaryDay}
-                  onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryDay: Number(event.target.value) }))}
-                >
-                  {WEEKDAY_LABELS.map(([label, value]) => (
-                    <option key={label} value={value}>{label}</option>
-                  ))}
+              </div>
+            </section>
+          ) : null}
+
+          {activeSection === 'workspace' ? (
+            <section className="settings-section" aria-labelledby="workspace-settings-title">
+              <div className="settings-section__heading">
+                <div>
+                  <p className="settings-eyebrow">Workspace</p>
+                  <h2 id="workspace-settings-title">Display and currency</h2>
+                </div>
+              </div>
+              <div className="settings-field-grid settings-field-grid--four">
+                <label className="settings-field">
+                  <span>Currency code</span>
+                  <input aria-label="Currency code" type="text" value={settings.currency.code} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, code: event.target.value.toUpperCase() } }))} />
+                </label>
+                <label className="settings-field">
+                  <span>Currency symbol</span>
+                  <input aria-label="Currency symbol" type="text" value={settings.currency.symbol} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, symbol: event.target.value } }))} />
+                </label>
+                <label className="settings-field">
+                  <span>Currency decimals</span>
+                  <input aria-label="Currency decimals" type="number" min="0" max="6" value={settings.currency.decimals} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, decimals: Math.max(0, Math.min(6, Number(event.target.value) || 0)) } }))} />
+                </label>
+                <label className="settings-field">
+                  <span>Theme default</span>
+                  <select aria-label="Theme default" value={settings.theme} onChange={(event) => updateSettings((current) => ({ ...current, theme: event.target.value as ThemePreference }))}>
+                    <option value="system">System</option>
+                    <option value="light">Light</option>
+                    <option value="dark">Dark</option>
+                  </select>
+                </label>
+              </div>
+              <label className="settings-field settings-field--primary-expiry">
+                <span>Primary expiry column</span>
+                <select aria-label="Primary expiry column" value={settings.primaryExpiryColumnId} onChange={(event) => updateSettings((current) => ({ ...current, primaryExpiryColumnId: event.target.value }))}>
+                  <option value="">No primary expiry column</option>
+                  {activeExpiryColumns.map((column) => <option value={column.id} key={column.id}>{column.name}</option>)}
                 </select>
               </label>
-              <label className="settings-field">
-                <span>Weekly summary time</span>
-                <input
-                  aria-label="Weekly summary time"
-                  type="time"
-                  value={settings.weeklySummaryTime}
-                  onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryTime: event.target.value || DEFAULT_SETTINGS.weeklySummaryTime }))}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Daily summary time</span>
-                <input
-                  aria-label="Daily summary time"
-                  type="time"
-                  value={settings.dailySummaryTime}
-                  onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryTime: event.target.value || DEFAULT_SETTINGS.dailySummaryTime }))}
-                />
-              </label>
-            </div>
-            <p className="settings-muted">Day and time use this device&apos;s local time zone.</p>
-          </div>
-        </div>
-      </section>
+            </section>
+          ) : null}
 
-      <section className="settings-section" aria-labelledby="display-settings-title">
-        <div className="settings-section__heading">
-          <div>
-            <p className="settings-eyebrow">Workspace defaults</p>
-            <h3 id="display-settings-title">Display and currency</h3>
-          </div>
+          {activeSection === 'about' ? (
+            <section className="settings-section settings-maintenance" aria-labelledby="about-settings-title">
+              <div className="settings-section__heading">
+                <div>
+                  <p className="settings-eyebrow">About &amp; updates</p>
+                  <h2 id="about-settings-title">Application updates</h2>
+                </div>
+              </div>
+              <div className="settings-maintenance__grid">
+                <div className="settings-maintenance__card">
+                  <div>
+                    <strong>Application update</strong>
+                    <p aria-label={`Version ${resolvedVersion}`}>Version {resolvedVersion}</p>
+                    <p className="settings-muted">Updates are checked without changing local records.</p>
+                  </div>
+                  <button className="button" type="button" onClick={() => invokeAction(updateHandler, 'Update check requested.', 'Update check could not be started.')}>Check for updates</button>
+                </div>
+              </div>
+              <p className="settings-resend-note"><strong>Resend:</strong> {resendNote}</p>
+            </section>
+          ) : null}
         </div>
-        <div className="settings-field-grid settings-field-grid--four">
-          <label className="settings-field">
-            <span>Currency code</span>
-            <input aria-label="Currency code" type="text" value={settings.currency.code} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, code: event.target.value.toUpperCase() } }))} />
-          </label>
-          <label className="settings-field">
-            <span>Currency symbol</span>
-            <input aria-label="Currency symbol" type="text" value={settings.currency.symbol} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, symbol: event.target.value } }))} />
-          </label>
-          <label className="settings-field">
-            <span>Currency decimals</span>
-            <input aria-label="Currency decimals" type="number" min="0" max="6" value={settings.currency.decimals} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, decimals: Math.max(0, Math.min(6, Number(event.target.value) || 0)) } }))} />
-          </label>
-          <label className="settings-field">
-            <span>Theme default</span>
-            <select aria-label="Theme default" value={settings.theme} onChange={(event) => updateSettings((current) => ({ ...current, theme: event.target.value as ThemePreference }))}>
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-        </div>
-        <label className="settings-field settings-field--primary-expiry">
-          <span>Primary expiry column</span>
-          <select aria-label="Primary expiry column" value={settings.primaryExpiryColumnId} onChange={(event) => updateSettings((current) => ({ ...current, primaryExpiryColumnId: event.target.value }))}>
-            <option value="">No primary expiry column</option>
-            {activeExpiryColumns.map((column) => <option value={column.id} key={column.id}>{column.name}</option>)}
-          </select>
-        </label>
-      </section>
-
-      <section className="settings-section settings-maintenance" aria-labelledby="maintenance-settings-title">
-        <div className="settings-section__heading">
-          <div>
-            <p className="settings-eyebrow">Maintenance</p>
-            <h3 id="maintenance-settings-title">Application updates</h3>
-          </div>
-        </div>
-        <div className="settings-maintenance__grid">
-          <div className="settings-maintenance__card">
-            <div>
-              <strong>Application update</strong>
-              <p aria-label={`Version ${resolvedVersion}`}>Version {resolvedVersion}</p>
-              <p className="settings-muted">Updates are checked without changing local records.</p>
-            </div>
-            <button className="button" type="button" onClick={() => invokeAction(updateHandler, 'Update check requested.', 'Update check could not be started.')}>Check for updates</button>
-          </div>
-        </div>
-        <p className="settings-resend-note"><strong>Resend:</strong> {resendNote}</p>
-      </section>
+      </div>
     </div>
   );
 }
