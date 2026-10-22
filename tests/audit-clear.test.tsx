@@ -7,9 +7,11 @@ import { describe, expect, it, vi } from 'vitest';
 import { AdminAuditLogPanel } from '../src/features/admin/AdminTools';
 import {
   AUDIT_CLEAR_CONFIRMATION,
+  AUDIT_CLEAR_SQL_FILE,
   auditClearMessage,
   clearRemoteAuditLog,
   isAuditClearConfirmation,
+  isMissingAuditClearFunction,
 } from '../src/features/audit/audit-service';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 import { createSqliteStore } from '../electron/main/sqlite';
@@ -51,7 +53,27 @@ describe('audit clear service', () => {
     )).rejects.toThrow('Not allowed');
 
     // Offline: refuse rather than clearing only the local copy.
-    await expect(clearRemoteAuditLog(null, 'x')).rejects.toThrow(/connection/i);
+    await expect(clearRemoteAuditLog(null, 'x')).rejects.toThrow(/only be cleared while connected/i);
+  });
+
+  it('never falls back to an unfiltered REST delete (the R3 "DELETE requires a WHERE clause" shape)', async () => {
+    const deleteSpy = vi.fn();
+    const client = {
+      from: vi.fn(() => ({ delete: deleteSpy })),
+      rpc: vi.fn().mockResolvedValue({ data: null, error: null }),
+    } as unknown as Parameters<typeof clearRemoteAuditLog>[0];
+
+    await clearRemoteAuditLog(client, 'Audit log cleared by Admin on 04/03/2026 09:05');
+    // Only the RPC is used; no table DELETE is ever built by the clear path.
+    expect((client as unknown as { from: ReturnType<typeof vi.fn> }).from).not.toHaveBeenCalled();
+    expect(deleteSpy).not.toHaveBeenCalled();
+
+    // A client without rpc is refused rather than degraded to a bulk delete.
+    await expect(clearRemoteAuditLog(
+      { from: () => ({ delete: deleteSpy }) } as unknown as Parameters<typeof clearRemoteAuditLog>[0],
+      'x',
+    )).rejects.toThrow(/only be cleared while connected/i);
+    expect(deleteSpy).not.toHaveBeenCalled();
   });
 });
 
@@ -166,6 +188,24 @@ describe('Clear audit log control', () => {
     await waitFor(() => expect(screen.getAllByText('Cleared the audit log').length).toBeGreaterThan(0));
     // The single surviving entry carries the exact human sentence.
     expect(screen.getAllByText(/Audit log cleared by Admin on/).length).toBeGreaterThan(0);
+  });
+
+  it('names the migration when the server has not got the RPC yet', async () => {
+    const missing = 'Could not find the function public.clear_audit_log(p_message) in the schema cache';
+    expect(isMissingAuditClearFunction(missing)).toBe(true);
+    expect(isMissingAuditClearFunction('Only administrators may clear the audit log')).toBe(false);
+
+    await expect(clearRemoteAuditLog(
+      { rpc: vi.fn().mockResolvedValue({ data: null, error: { message: missing } }) },
+      'x',
+    )).rejects.toThrow(new RegExp(AUDIT_CLEAR_SQL_FILE.replace(/[.*+?^\${}()|[\]\\]/g, '\\$&')));
+  });
+
+  it('reports the server refusal verbatim and promises nothing was removed', async () => {
+    await expect(clearRemoteAuditLog(
+      { rpc: vi.fn().mockResolvedValue({ data: null, error: { message: 'Only administrators may clear the audit log' } }) },
+      'x',
+    )).rejects.toThrow(/Only administrators may clear the audit log.*Nothing was removed/s);
   });
 
   it('keeps the local mirror when the remote clear fails', async () => {

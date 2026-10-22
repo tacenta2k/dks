@@ -1427,15 +1427,23 @@ export class SqliteStore {
   }
 
   /**
-   * R2-10: administrator-only clear of the local audit mirror.  The whole log
-   * is removed (for every account on this PC) and exactly one entry is written
-   * so the clear itself stays visible.
+   * R2-10 / R3 batch C: administrator-only clear of the local audit mirror.
+   *
+   * This is the ONLY place in DKS that removes audit rows, and it is
+   * deliberately narrow:
+   *   - one transaction, one statement, an explicit predicate (an unfiltered
+   *     `DELETE` is what servers with a "DELETE requires a WHERE clause" guard
+   *     reject, and it also reads as an accident in a code review);
+   *   - a single `clear_audit` entry is written afterwards, in the same call,
+   *     so the clear itself is always traceable;
+   *   - the caller's role is checked by the IPC layer and the RPC, so Office
+   *     cannot reach this method.
    */
   public clearAuditLog(input: { message: string; actor?: string | null }): AuditRecord {
     this.ensureOpen();
     const timestamp = this.now();
     const clear = this.database.transaction(() => {
-      this.database.prepare('DELETE FROM audit_log').run();
+      this.database.prepare('DELETE FROM audit_log WHERE id IS NOT NULL').run();
     });
     clear();
     return this.recordAudit({

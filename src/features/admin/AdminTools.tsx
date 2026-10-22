@@ -874,10 +874,21 @@ export function AdminAuditLogPanel({
     setClearing(true);
     setError(null);
     setStatus(null);
+    let remoteCleared = false;
     try {
-      // Remote first: if the server refuses (Office, offline), nothing is
-      // removed locally and the mirror keeps matching the server.
+      // R3 batch C: remote first, and only through the admin RPC. If the
+      // server refuses (Office caller, offline, migration not run) nothing is
+      // removed locally, so the mirror keeps matching the server and a retry
+      // cannot erase history that was already cleared.
       await clearRemoteAuditLog(remoteClient ?? null, message);
+      remoteCleared = true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to clear the audit log.');
+      setClearing(false);
+      return;
+    }
+
+    try {
       if (repository.clearAuditLog) {
         setEntries(await repository.clearAuditLog(message));
       } else {
@@ -887,7 +898,14 @@ export function AdminAuditLogPanel({
       setConfirmingClear(false);
       setConfirmation('');
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to clear the audit log.');
+      const reason = caught instanceof Error ? caught.message : 'unknown error';
+      // Be explicit about the half-done state instead of implying nothing
+      // happened: the server log is gone, only this PC's copy is stale.
+      setError(
+        remoteCleared
+          ? `The server audit log was cleared, but this PC's copy could not be updated (${reason}). Sync again to refresh it.`
+          : reason,
+      );
     } finally {
       setClearing(false);
     }
@@ -922,8 +940,14 @@ export function AdminAuditLogPanel({
           <div className="admin-dialog" role="dialog" aria-modal="true" aria-label="Clear audit log">
             <h2>Clear the audit log?</h2>
             <p>
-              Every audit entry is permanently removed for every PC. One entry
-              recording this clear stays in the log. This cannot be undone.
+              {entries.length > 0
+                ? `All ${entries.length} recorded ${entries.length === 1 ? 'action' : 'actions'} will be permanently removed for every PC.`
+                : 'The audit log is cleared for every PC.'} One entry recording
+              this clear stays in the log. This cannot be undone.
+            </p>
+            <p className="admin-dialog__hint">
+              Clearing happens on the server first, in one transaction, so a
+              failure leaves the log untouched.
             </p>
             <p className="admin-dialog__hint">
               Type <strong>{AUDIT_CLEAR_CONFIRMATION}</strong> to confirm.

@@ -742,3 +742,44 @@ versions with a readable reason, missing RPC names the SQL file, lookup failure
 is reported, shared columns are pulled before pushing, local same-name columns
 are flagged, and both SQL files are asserted to ship the scoped read-only
 resolver with the constraint intact.
+
+## 14. Round 3 — Batch C: "Clear audit log" → `DELETE requires a WHERE clause`
+
+Where that error came from (traced):
+
+- It is **not** produced by SQLite, better-sqlite3 or the `clear_audit_log()`
+  RPC. SQLite accepts `DELETE FROM audit_log`; better-sqlite3 ships no such
+  guard (checked `node_modules/better-sqlite3`, including its bundled
+  `sqlite3.h`), and the RPC runs as one transactional function.
+- The exact wording is a **REST-layer** safety error for a DELETE request with
+  no filter — the shape produced by `supabase.from('audit_log').delete()` with
+  no `.eq()`. DKS must never build that request.
+- The local mirror clear was the only unfiltered `DELETE` statement in the
+  codebase (`SqliteStore.clearAuditLog`). It is now explicitly scoped
+  (`DELETE FROM audit_log WHERE id IS NOT NULL`), inside one transaction, with
+  a comment stating that it is the only audit-deleting statement in DKS.
+
+Hardened so this cannot reappear through any layer:
+
+- `clearRemoteAuditLog()` refuses to run without an `rpc()` — it will never
+  degrade to a table DELETE. A test asserts `from()` / `.delete()` are never
+  called on the clear path, and that a client exposing only `.delete()` is
+  rejected.
+- Missing migration → actionable message naming
+  `ARENA/sql/fix-entries-rls.sql`; other refusals are surfaced verbatim with
+  “Nothing was removed.” appended.
+- Order of operations (server first, one transaction) is explained in the
+  dialog; the dialog now states how many recorded actions will be removed, so
+  an admin re-confirming after a failure can see whether the log still holds
+  history. A remote success followed by a local failure is reported as exactly
+  that ("the server audit log was cleared, but this PC's copy could not be
+  updated"), never as a silent half-clear.
+- Office never reaches this code: the panel is not rendered for Office, the IPC
+  channel re-checks `role === 'admin'`, and the SQL function raises `42501`
+  for a non-admin caller.
+
+Tests: `tests/audit-clear.test.tsx` (12) — RPC-only path, no-`.delete()`
+assertion, missing-function message, verbatim server refusal, remote-before-local
+ordering, local mirror preserved on failure, one surviving `clear_audit` entry,
+Office rejection. SQL already shipped in `ARENA/sql/fix-entries-rls.sql`
+(section 7) + `supabase/schema.sql`.
