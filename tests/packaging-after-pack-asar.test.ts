@@ -77,11 +77,52 @@ interface InspectApi {
 
 interface AsarLib {
   createPackage(src: string, dest: string): Promise<void>;
+  listPackage(archive: string): string[];
+  extractFile(archive: string, entry: string): Buffer;
 }
 
 const afterPack = require2(join(ROOT, 'scripts', 'after-pack.cjs')) as (context: unknown) => Promise<void>;
 const inspect = require2(join(ROOT, 'scripts', 'lib', 'app-asar-inspect.cjs')) as InspectApi;
 const asar = require2('@electron/asar') as AsarLib;
+
+/** Canonical comparison form — the stateless normalisation every side must use. */
+function normaliseKey(entry: string): string {
+  return String(entry).replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+/**
+ * Runs `fn` with @electron/asar behaving the way it does on Windows: header
+ * keys carry a leading separator and HOST separators (`\node_modules\bindings`
+ * — confirmed by the user on the real packaged archive), and entry lookups
+ * split on the host separator, so a hand-built forward-slash request cannot
+ * be found. The buggy inspector handed exactly such requests to extractFile
+ * and misreported a healthy archive; the fixed one derives requests from the
+ * library's own keys and survives.
+ */
+async function withWindowsAsarSemantics<T>(fn: (windowsAsar: AsarLib) => Promise<T> | T): Promise<T> {
+  const cacheKey = require2.resolve('@electron/asar');
+  const mod = require2.cache[cacheKey];
+  if (!mod) {
+    throw new Error('expected @electron/asar to be present in require.cache');
+  }
+  const originalExports = mod.exports;
+  const windowsShaped: AsarLib = {
+    ...asar,
+    listPackage: (archive: string) => asar.listPackage(archive).map((p) => p.replace(/\//g, '\\')),
+    extractFile: (archive: string, entry: string) => {
+      if (entry.includes('/')) {
+        throw new Error(`"${entry}" was not found in this archive`);
+      }
+      return asar.extractFile(archive, entry.replace(/\\/g, '/'));
+    },
+  };
+  mod.exports = windowsShaped;
+  try {
+    return await fn(windowsShaped);
+  } finally {
+    mod.exports = originalExports;
+  }
+}
 
 /** CRLF-safe read: a Windows checkout must not change the result. */
 function readNormalised(file: string): string {
@@ -331,6 +372,75 @@ describe('packaged app.asar archive layout (R8)', () => {
       const entries = inspect.listAsarEntries(layout.appAsar);
       expect(entries).not.toContain('node_modules/bindings/bindings.js');
       expect(inspect.findMissingPackagedEntries(layout.appAsar, layout.resources)).toEqual([]);
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('treats the raw @electron/asar listing as the source of truth for header keys', async () => {
+    // Regression for the confirmed Windows misreport: header keys come with a
+    // leading separator in the host shape (`/node_modules/…` POSIX,
+    // `\node_modules\…` Windows). The inspector's view must be exactly the
+    // raw listing normalised on BOTH sides — nothing missing from an archive
+    // whose raw listing contains the entries.
+    const layout = await makePackagedLayout();
+    try {
+      const raw = asar.listPackage(layout.appAsar);
+      expect(raw.length).toBeGreaterThan(0);
+      // Real shape contract: every key starts with a leading separator.
+      expect(raw.every((key) => key.startsWith('/') || key.startsWith('\\'))).toBe(true);
+      const truth = raw.map(normaliseKey).filter((key) => key.length > 0);
+      for (const required of [
+        'package.json',
+        'node_modules/better-sqlite3/package.json',
+        'node_modules/better-sqlite3/lib/index.js',
+        'node_modules/bindings/package.json',
+        'node_modules/bindings/bindings.js',
+        'node_modules/file-uri-to-path/package.json',
+        'node_modules/file-uri-to-path/index.js',
+      ]) {
+        expect(truth).toContain(required);
+      }
+      // The inspector exposes exactly the normalised raw listing…
+      expect(inspect.listAsarEntries(layout.appAsar)).toEqual(truth);
+      // …and never reports entries missing that the raw listing contains.
+      expect(inspect.findMissingPackagedEntries(layout.appAsar, layout.resources)).toEqual([]);
+    } finally {
+      layout.cleanup();
+    }
+  });
+
+  it('survives Windows host path semantics (regression for the healthy-archive misreport)', async () => {
+    // Locks the exact failure confirmed on Windows: backslash-shaped header
+    // keys plus host-separator lookups made every archive query reject a
+    // hand-built forward-slash request. The raw listing is asserted FIRST…
+    const layout = await makePackagedLayout();
+    try {
+      await withWindowsAsarSemantics((winAsar) => {
+        const rawWindows = winAsar.listPackage(layout.appAsar);
+        // …the same shape the user observed (`\node_modules\bindings\…`).
+        expect(rawWindows.some((key) => key.startsWith('\\'))).toBe(true);
+        expect(rawWindows.some((key) => key.includes('\\node_modules\\bindings\\bindings.js'))).toBe(true);
+        expect(rawWindows.some((key) => key.includes('bindings.js'))).toBe(true);
+        // The Windows driver rejects a hand-built forward-slash request —
+        // this is why the lookup previously failed for every dependency.
+        expect(() => winAsar.extractFile(layout.appAsar, 'node_modules/bindings/package.json'))
+          .toThrow(/was not found in this archive/);
+        // …while the host-shaped key (what the fixed inspector derives from
+        // the listing) resolves just fine.
+        expect(
+          JSON.parse(
+            winAsar.extractFile(layout.appAsar, 'node_modules\\bindings\\package.json').toString('utf8'),
+          ).name,
+        ).toBe('bindings');
+
+        // The inspector still finds everything — it reads keys exactly as
+        // reported, normalises both sides for comparison, and derives
+        // extraction requests from the library's own keys.
+        const truth = rawWindows.map(normaliseKey).filter((key) => key.length > 0);
+        expect(inspect.listAsarEntries(layout.appAsar)).toEqual(truth);
+        expect(inspect.findMissingPackagedEntries(layout.appAsar, layout.resources)).toEqual([]);
+      });
     } finally {
       layout.cleanup();
     }

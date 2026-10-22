@@ -103,51 +103,50 @@ function loadAsar() {
 }
 
 /**
- * Normalised `/`-separated archive entry names without a leading slash.
- * Throws when the file is not a readable archive at all.
+ * Canonical inspector form for asar header keys.
+ *
+ * @electron/asar reports header keys HOST-SHAPED: `path.join` over base '/'
+ * means POSIX keys look like `/node_modules/bindings/bindings.js` and Windows
+ * keys look like `\node_modules\bindings\bindings.js` (leading separator and
+ * backslashes — confirmed on the real packaged Windows archive). Lookups
+ * (`searchNodeFromPath`) then split by the host `path.sep`, so a key built
+ * with the wrong separator or an extra leading separator may not resolve.
+ *
+ * The inspector therefore NEVER compares or constructs host-shaped keys:
+ * every reported key is reduced to this forward-slash form without a leading
+ * separator, all comparisons happen in canonical form on both sides, and
+ * extraction requests are derived from the library's own raw keys (see
+ * findMissingPackagedEntries) rather than assembled with path.join/path.sep.
  */
-function listAsarEntries(appAsarPath) {
-  const asar = loadAsar();
-  let raw;
+function normaliseAsarEntry(entry) {
+  return String(entry).replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+/**
+ * The library's raw `listPackage` output (host-shaped keys), wrapped so an
+ * unreadable/corrupt archive fails with a named error. Keys are returned
+ * exactly as @electron/asar reports them — the source of truth.
+ */
+function readRawEntries(asar, appAsarPath) {
   try {
-    raw = asar.listPackage(appAsarPath);
+    return asar.listPackage(appAsarPath);
   } catch (error) {
     throw new Error(
       `[dks] resources/app.asar is not a readable asar archive: ${error.message}. `
       + 'The staged output is corrupt — re-run `npm run dist`.',
     );
   }
-  return raw
-    .map((entry) => String(entry).replace(/\\/g, '/').replace(/^\/+/, ''))
+}
+
+/**
+ * Normalised `/`-separated archive entry names without a leading separator.
+ * Throws when the file is not a readable archive at all.
+ */
+function listAsarEntries(appAsarPath) {
+  const asar = loadAsar();
+  return readRawEntries(asar, appAsarPath)
+    .map((entry) => normaliseAsarEntry(entry))
     .filter((entry) => entry.length > 0);
-}
-
-function readAsarJson(asar, appAsarPath, entry) {
-  let raw;
-  try {
-    raw = asar.extractFile(appAsarPath, entry);
-  } catch {
-    return null;
-  }
-  try {
-    return JSON.parse(raw.toString('utf8'));
-  } catch {
-    return null;
-  }
-}
-
-/** Package manifest from the archive, falling back to the unpack mirror. */
-function readPackagedJson(asar, appAsarPath, unpackedDir, entry) {
-  const fromArchive = readAsarJson(asar, appAsarPath, entry);
-  if (fromArchive !== null) {
-    return fromArchive;
-  }
-  try {
-    const mirrorPath = path.join(unpackedDir, ...entry.split('/'));
-    return JSON.parse(readFileSync(mirrorPath, 'utf8'));
-  } catch {
-    return null;
-  }
 }
 
 /** `package.json#main` of an archive package, `/`-joined, `./` stripped. */
@@ -171,13 +170,57 @@ function archiveMain(pkg, base) {
 function findMissingPackagedEntries(appAsarPath, resourcesDir) {
   const asar = loadAsar();
   const unpackedDir = path.join(resourcesDir, 'app.asar.unpacked');
-  const entries = new Set(listAsarEntries(appAsarPath));
+
+  // Read header keys exactly as @electron/asar reports them, then index them
+  // by canonical form. Presence checks compare canonical keys only; extra­c­tion
+  // reuses the library's own key (leading separator stripped, exactly the
+  // shape `extractAll` itself hands back to the driver) so lookups work with
+  // either host's separator conventions.
+  const entries = new Set();
+  const requestKeys = new Map();
+  for (const raw of readRawEntries(asar, appAsarPath)) {
+    const canonical = normaliseAsarEntry(raw);
+    if (canonical.length === 0 || entries.has(canonical)) {
+      continue;
+    }
+    entries.add(canonical);
+    requestKeys.set(canonical, String(raw).replace(/^[\\/]+/, ''));
+  }
   const problems = [];
 
+  const extractJson = (rel) => {
+    const requestKey = requestKeys.get(rel);
+    if (requestKey == null) {
+      return null;
+    }
+    let raw;
+    try {
+      raw = asar.extractFile(appAsarPath, requestKey);
+    } catch {
+      return null;
+    }
+    try {
+      return JSON.parse(raw.toString('utf8'));
+    } catch {
+      return null;
+    }
+  };
+  /** Package manifest from the archive, falling back to the unpack mirror. */
+  const readPackagedJson = (rel) => {
+    const fromArchive = extractJson(rel);
+    if (fromArchive !== null) {
+      return fromArchive;
+    }
+    try {
+      const mirrorPath = path.join(unpackedDir, ...rel.split('/'));
+      return JSON.parse(readFileSync(mirrorPath, 'utf8'));
+    } catch {
+      return null;
+    }
+  };
+
   const present = (rel) => entries.has(rel);
-  const unpackMirrored = (rel) => (
-    existsSync(path.join(resourcesDir, 'app.asar.unpacked', ...rel.split('/')))
-  );
+  const unpackMirrored = (rel) => existsSync(path.join(unpackedDir, ...rel.split('/')));
 
   const need = (rel, label, { allowUnpackMirror = true } = {}) => {
     if (present(rel)) {
@@ -190,15 +233,14 @@ function findMissingPackagedEntries(appAsarPath, resourcesDir) {
   };
 
   // The application manifest is the anchor the probe passes to createRequire.
-  const appManifest = readAsarJson(asar, appAsarPath, 'package.json');
-  if (!present('package.json') || appManifest === null) {
+  if (!present('package.json') || extractJson('package.json') === null) {
     problems.push({ entry: 'package.json', label: 'the app manifest' });
   }
 
   // better-sqlite3's own JS (whole tree is under the asarUnpack glob, so the
   // app.asar.unpacked mirror is an equivalent layout for it).
   const moduleBase = `node_modules/${MODULE_NAME}`;
-  const modulePkg = readPackagedJson(asar, appAsarPath, unpackedDir, `${moduleBase}/package.json`);
+  const modulePkg = readPackagedJson(`${moduleBase}/package.json`);
   if (modulePkg === null) {
     problems.push({ entry: `${moduleBase}/package.json`, label: 'the better-sqlite3 package' });
   } else {
@@ -211,7 +253,7 @@ function findMissingPackagedEntries(appAsarPath, resourcesDir) {
   // (an unpacked mirror is still accepted — Electron resolves both).
   for (const dep of JS_DEPENDENCIES) {
     const depBase = `node_modules/${dep.name}`;
-    const depPkg = readPackagedJson(asar, appAsarPath, unpackedDir, `${depBase}/package.json`);
+    const depPkg = readPackagedJson(`${depBase}/package.json`);
     if (depPkg === null) {
       problems.push({
         entry: `${depBase}/package.json`,

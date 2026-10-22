@@ -1707,3 +1707,102 @@ Expected: `verify:native` prints `better-sqlite3 loads under Electron
 line. The NSIS step itself still requires the elevated terminal / Developer
 Mode documented in §5 (winCodeSign symlinks) and remains **unverified until
 the user builds and installs it**.
+## 25. Fix — the archive inspector itself misread header keys on Windows (R8b)
+
+User report after `fb42712`: on the real packaged Windows archive, afterPack
+(and three of the new tests) misreported a **healthy** archive as missing
+`bindings`/`file-uri-to-path`/better-sqlite3 package files.
+
+### 25.1 Root cause (host path semantics in @electron/asar)
+
+The user ran, on Windows against `release\win-unpacked\resources\app.asar`:
+
+```
+node -e "const a=require('@electron/asar');
+         const f=a.listPackage('release/win-unpacked/resources/app.asar')
+                   .filter(x=>/bindings|file-uri/i.test(x))"
+```
+
+and got keys WITH A LEADING SEPARATOR AND HOST SEPARATORS:
+
+```
+\node_modules\bindings
+\node_modules\bindings\bindings.js
+\node_modules\bindings\package.json
+\node_modules\file-uri-to-path\index.js
+...
+```
+
+Verified against the installed `@electron/asar` 3.4.1 source
+(`lib/filesystem.js`, `lib/asar.js`):
+
+- `listFiles` builds keys with the HOST `path.join` starting from base `'/'`
+  → `/node_modules/…` on POSIX, `\node_modules\…` on Windows.
+- `getFile`/`searchNodeFromPath` resolve lookups with `p.split(path.sep)` —
+  on Windows a request written with forward slashes never matches, so
+  `extractFile(archive, 'node_modules/bindings/package.json')` throws
+  `"…" was not found in this archive`; the inspector's `readAsarJson` caught
+  the throw, treated the manifest as absent, and reported *every* dependency
+  as missing.
+- The library's own `extractAll` strips the leading separator (`substr(1)`)
+  and passes the host-shaped key back — that is the one request shape proven
+  to work on every host.
+
+So: the archive was correct, the probe/Electron side was correct — only the
+plain-Node inspector compared and requested keys with host-naive semantics.
+
+### 25.2 Fix (`scripts/lib/app-asar-inspect.cjs` only)
+
+- Header keys are read **exactly as reported** (`readRawEntries`, the source
+  of truth).
+- Every key is normalised on BOTH sides before ANY comparison
+  (`normaliseAsarEntry`: backslashes → forward slashes, leading separator
+  stripped). Presence checks compare canonical keys only.
+- Extraction requests are **derived from the library's own raw keys**
+  (leading separator stripped — the shape `extractAll` itself uses) instead
+  of being assembled with `path.join`/`path.sep`. No host-shaped key is ever
+  constructed.
+- No guard behavior changed: verify:native, afterPack archive checks,
+  packaged-Electron probe, `asar: true`, `asarUnpack` untouched.
+
+### 25.3 Regression tests (suite now 18 tests; the previous 16 unmodified)
+
+1. **Raw listing as source of truth**: builds a real archive, asserts every
+   raw key starts with a leading separator, asserts the raw listing contains
+   all required entries after both-side normalisation, asserts
+   `inspect.listAsarEntries` equals the normalised raw listing exactly, and
+   asserts `findMissingPackagedEntries` reports nothing for it.
+2. **Windows host path semantics simulation**: swaps `@electron/asar` exports
+   in `require.cache` so `listPackage` returns the user-observed
+   `\node_modules\bindings\…` keys and `extractFile` rejects forward-slash
+   requests like the real Windows driver. Asserts the simulated shape,
+   asserts the driver rejects a hand-built forward-slash request (the old
+   bug), and asserts the inspector still finds everything — including parsing
+   `bindings/package.json` from inside the archive — then restores the cache.
+
+CRLF re-verified for the three guard scripts; suites passed afterwards too.
+
+### 25.4 Gate results (Linux sandbox, Node v22.22.3)
+
+- `npm rebuild better-sqlite3` ok (offline source build), binding loads.
+- `npm test`: **62 files / 408 passed / 3 skipped = 411** (new file now has
+  18 tests: 15 executed + 3 real-Electron skipped here — they run on the
+  Windows build machine).
+- `npm run typecheck` clean; `npm run build` clean.
+
+### 25.5 Exact Windows command order (user)
+
+```bat
+cd /d <repo>
+npm rebuild better-sqlite3
+npm test
+npm run typecheck
+npm run build
+npm run verify:native
+npm run dist      rem elevated / Developer Mode for winCodeSign symlinks
+```
+
+Expectation documented, not claimed: afterPack passes and electron-builder
+proceeds to `target=nsis file=release\DKS-0.1.0-win-x64.exe`. The NSIS
+installer itself remains **unverified until the user builds and installs
+it**.
