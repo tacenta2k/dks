@@ -54,6 +54,8 @@ export interface DksLocalSnapshot {
   activeRows?: DksLocalRow[];
   deletedRows: DksLocalRow[];
   columns: DksLocalColumn[];
+  /** Soft-deleted columns, exposed so sync can push their deletion upstream. */
+  deletedColumns?: DksLocalColumn[];
   settings?: Record<string, unknown>;
   syncStatus: DksLocalSyncState;
 }
@@ -168,6 +170,24 @@ export interface DksLocalCloseResult {
   flushed: boolean;
 }
 
+/** Metadata for one queued local mutation; payloads stay in the main process. */
+export interface DksLocalOutboxItem {
+  id: number | string;
+  idempotencyKey?: string;
+  idempotency_key?: string;
+  operation: string;
+  entityType?: string;
+  entity_type?: string;
+  entityId?: string;
+  entity_id?: string;
+  status?: string;
+  attempts?: number;
+  lastError?: string | null;
+  last_error?: string | null;
+  createdAt?: string;
+  created_at?: string;
+}
+
 export interface DksLocalApi {
   getSnapshot: () => Promise<DksLocalSnapshot>;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
@@ -190,6 +210,10 @@ export interface DksLocalApi {
   applyRemoteSnapshot?: (input: DksLocalRemoteSnapshot) => Promise<DksLocalSnapshot>;
   acknowledgeOutbox?: () => Promise<DksLocalSyncState>;
   acknowledgeSettings?: () => Promise<DksLocalSyncState>;
+  listOutbox?: (input?: { status?: string }) => Promise<DksLocalOutboxItem[]>;
+  markOutboxSynced?: (input: { id: number | string }) => Promise<{ ok: boolean }>;
+  markOutboxFailed?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
+  retryFailedOutbox?: () => Promise<{ requeued: number }>;
   getSettings?: () => Promise<Record<string, unknown>>;
   setSettings?: (input: { settings: Record<string, unknown> }) => Promise<Record<string, unknown>>;
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => Promise<DksLocalSyncState>;

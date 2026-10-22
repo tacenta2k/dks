@@ -5,11 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { DashboardPage } from '../src/features/dashboard/DashboardPage';
 import { getDashboardSummary } from '../src/features/dashboard/selectors';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { seedFixtureColumns } from './fixtures/sheet-columns';
 
 describe('dashboard page', () => {
   it('renders expiry cards, status pie, and the next twelve month chart from repository rows', async () => {
     const repository = createInMemorySheetRepository();
-    await repository.loadTemplate('visa');
+    await seedFixtureColumns(repository);
     await repository.createRow({ visa_expiry: '2026-01-01' });
     await repository.createRow({ visa_expiry: '2026-01-07' });
     await repository.createRow({ visa_expiry: '2026-01-20' });
@@ -25,16 +26,18 @@ describe('dashboard page', () => {
     expect(await screen.findByTestId('dashboard-card-total')).toHaveTextContent('9');
     expect(screen.getByTestId('dashboard-card-today')).toHaveTextContent('1');
     expect(screen.getByTestId('dashboard-card-week')).toHaveTextContent('1');
-    expect(screen.getByTestId('dashboard-card-expired')).toHaveTextContent('2');
+    // "Expires today" is distinct from "Expired": only the past date counts.
+    expect(screen.getByTestId('dashboard-card-expired')).toHaveTextContent('1');
     expect(screen.getByRole('img', { name: 'Status breakdown' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Expiries over the next 12 months' })).toBeInTheDocument();
     expect(screen.getByText('Valid')).toBeInTheDocument();
     expect(screen.getAllByText('Expired').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('Expires today')).toBeInTheDocument();
   });
 
   it('calls the injected filter callback when an expiry card is selected', async () => {
     const repository = createInMemorySheetRepository();
-    await repository.loadTemplate('visa');
+    await seedFixtureColumns(repository);
     await repository.createRow({ visa_expiry: '2026-01-03' });
     const onFilter = vi.fn();
 

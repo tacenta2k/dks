@@ -27,9 +27,19 @@ import {
   SettingsPage,
   type PartialSettings,
 } from '../../features/settings/SettingsPage';
+import type { AuditProfile } from '../../features/audit/AuditLogPage';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
+
+/** One queued local change shown under the sync status (Blocker 3). */
+export interface SyncPendingItem {
+  id: number | string;
+  entityType: string;
+  operation: string;
+  attempts: number;
+  lastError: string | null;
+}
 
 export interface AppShellProps {
   activeView?: ShellView;
@@ -41,6 +51,8 @@ export interface AppShellProps {
   userEmail?: string | null;
   health?: SupabaseHealth;
   syncStatus?: DksLocalSyncState;
+  /** Per-item pending outbox details (sanitised) for the sync status panel. */
+  pendingOutbox?: readonly SyncPendingItem[];
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
   repositoryRevision?: number;
@@ -55,6 +67,7 @@ export interface AppShellProps {
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
   resendNote?: string;
   settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
+  auditProfiles?: readonly AuditProfile[];
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
@@ -139,6 +152,7 @@ export function AppShell({
     lastError: null,
     pendingCount: 0,
   },
+  pendingOutbox = [],
   isDemoMode = false,
   sheetRepository,
   repositoryRevision = 0,
@@ -153,6 +167,7 @@ export function AppShell({
   onCheckForUpdates,
   resendNote,
   settingsError,
+  auditProfiles = [],
   onSaveExport,
   onSavePdf,
   onPrint,
@@ -168,6 +183,9 @@ export function AppShell({
   const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
   const [adminView, setAdminView] = useState<AdminView | null>(null);
   const [sheetRevision, setSheetRevision] = useState(0);
+  // Both counters drive IN-PLACE re-fetches of the visible page (no remount):
+  // sheetRevision = local mutation, repositoryRevision = sync landed data.
+  const pageRefreshToken = sheetRevision * 100_000 + repositoryRevision;
   const effectiveView: ShellView = adminView
     ?? (isSettingsOpen || activeView === 'settings' ? 'settings' : activeView);
   const copy = effectiveView === 'settings'
@@ -310,6 +328,24 @@ export function AppShell({
             <div>
               <p className="sync-status__title">Workspace health</p>
               <p className="sync-status__detail">{syncDetail}</p>
+              {(syncStatus.lastError !== null || pendingOutbox.length > 0) ? (
+                <details className="sync-status__issues">
+                  <summary className="sync-status__error">
+                    {syncStatus.lastError
+                      ?? `${pendingOutbox.length} pending change${pendingOutbox.length === 1 ? '' : 's'}`}
+                  </summary>
+                  {pendingOutbox.length > 0 ? (
+                    <ul className="sync-status__list">
+                      {pendingOutbox.map((item) => (
+                        <li key={item.id}>
+                          {item.entityType} · {item.operation} · attempted {item.attempts}×
+                          {item.lastError ? ` · ${item.lastError}` : ' · waiting for sync'}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+                </details>
+              ) : null}
             </div>
           </div>
           <p className="sidebar__version">STEP 2 · Role-gated workspace</p>
@@ -319,8 +355,8 @@ export function AppShell({
       <div className="app-shell__body">
         <header className="top-bar" role="banner" aria-label="DKS top bar">
           <div className="top-bar__heading">
-             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.eyebrow}</p>
-            <p className="top-bar__context">A focused space for your team&apos;s records</p>
+             <p className="breadcrumb">DKS <span aria-hidden="true">/</span> {copy.title}</p>
+            <p className="top-bar__context">{copy.eyebrow}</p>
           </div>
           <div className="top-bar__actions">
             <NotificationBell
@@ -426,13 +462,15 @@ export function AppShell({
           </div> : null}
 
            {effectiveView === 'dashboard' ? (
+             // No revision in the key: remounting on every sync destroyed
+             // in-progress input focus. The token below re-fetches in place.
              <DashboardPage
-                key={`dashboard-${repositoryRevision}`}
                 repository={sheetRepository}
                thresholds={dashboardThresholds}
-               colors={dashboardColors}
-               onFilter={onDashboardFilter}
-             />
+                colors={dashboardColors}
+                onFilter={onDashboardFilter}
+                refreshToken={pageRefreshToken}
+              />
            ) : effectiveView === 'sheet' ? (
              <div className="admin-integrated-sheet">
                <AdminSheetActions
@@ -445,22 +483,22 @@ export function AppShell({
                  onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
                />
                 <SheetPage
-                   key={`${sheetRevision}-${repositoryRevision}`}
                   repository={sheetRepository}
                   hideAdminActions
                   role={role}
+                  refreshToken={pageRefreshToken}
                 />
-             </div>
+              </div>
            ) : effectiveView === 'recycle-bin' ? (
-             <AdminRecycleBinPanel
-                key={`recycle-bin-${sheetRevision}-${repositoryRevision}`}
-               repository={sheetRepository}
-               role={role}
-               actor={actor}
-               onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
-             />
+              <AdminRecycleBinPanel
+                repository={sheetRepository}
+                role={role}
+                actor={actor}
+                onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
+                refreshToken={pageRefreshToken}
+              />
            ) : effectiveView === 'audit-log' ? (
-             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} />
+             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} profiles={auditProfiles} />
            ) : (
              <SettingsPage
                role={role}

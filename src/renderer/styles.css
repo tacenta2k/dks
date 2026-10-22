@@ -271,6 +271,30 @@ button:focus-visible {
   font-size: 11px;
 }
 
+/* Blocker 3: expandable pending-change details under the sync status. */
+.sync-status__issues {
+  margin-top: 6px;
+}
+
+.sync-status__issues summary {
+  color: var(--color-text);
+  cursor: pointer;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.sync-status__list {
+  margin: 6px 0 0;
+  padding-left: 14px;
+  color: var(--color-text-muted);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.sync-status__list li {
+  overflow-wrap: anywhere;
+}
+
 .sidebar__version {
   padding-top: 17px;
   color: var(--color-text-subtle);

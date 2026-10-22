@@ -44,4 +44,41 @@ describe('recycle bin page', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/administrator/i);
     expect(screen.queryByRole('button', { name: /Restore/i })).not.toBeInTheDocument();
   });
+
+  it('shows human labels, local DD/MM/YYYY HH:mm deletion time and who deleted (S2)', () => {
+    render(
+      <RecycleBinPage
+        role="admin"
+        rows={[
+          {
+            id: 'row-7ce65046-aaaa-bbbb-cccc-000000000000',
+            data: { name: 'Ahmed', passport_no: 'A1234567' },
+            deleted: true,
+            deletedAt: '2026-01-02T09:30:00.000Z',
+            updatedBy: 'Ahmed K',
+          },
+          {
+            id: 'row-02b75364-aaaa-bbbb-cccc-000000000000',
+            data: {},
+            deleted: true,
+            deletedAt: '2026-01-03T10:00:00.000Z',
+          },
+        ]}
+        columns={[{ id: 'name', name: 'Name', type: 'text' }]}
+        onRestore={vi.fn()}
+        onPermanentDelete={vi.fn()}
+      />,
+    );
+
+    // Human label — never a raw row id.
+    expect(screen.getAllByText('Ahmed').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByText('Unnamed record')).toBeInTheDocument();
+    expect(screen.queryByText(/row-7ce65046/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/row-02b75364/)).not.toBeInTheDocument();
+    // Local DD/MM/YYYY HH:mm (never the raw ISO value).
+    expect(screen.getAllByText(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/).length).toBe(2);
+    expect(screen.queryByText('2026-01-02T09:30:00.000Z')).not.toBeInTheDocument();
+    // Who deleted it, when that information exists.
+    expect(screen.getByText('Ahmed K')).toBeInTheDocument();
+  });
 });

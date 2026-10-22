@@ -21,7 +21,6 @@ export const QUICK_FILTERS: ReadonlyArray<{ id: QuickFilter; label: string }> = 
 export interface SheetFilterOptions {
   search?: string;
   quickFilter?: QuickFilter;
-  category?: string;
   status?: ExpiryStatus | 'No expiry' | '';
   today?: string | Date;
 }
@@ -59,25 +58,6 @@ export function statusForRow(
   return statusForDays(daysLeftForRow(row, columns, today));
 }
 
-export function categoryForRow(
-  row: SheetRow,
-  columns: readonly ColumnDefinition[],
-): string {
-  if (typeof row.category === 'string' && row.category.trim()) {
-    return row.category.trim();
-  }
-
-  const categoryColumn = columns.find((column) => (
-    column.id.toLowerCase() === 'category' || column.name.toLowerCase() === 'category'
-  ));
-  if (!categoryColumn) {
-    return '';
-  }
-
-  const value = valueForColumn(row, categoryColumn);
-  return value === null || value === undefined ? '' : String(value).trim();
-}
-
 function matchesQuickFilter(daysLeft: number | null, filter: QuickFilter): boolean {
   if (filter === 'all') {
     return true;
@@ -89,11 +69,12 @@ function matchesQuickFilter(daysLeft: number | null, filter: QuickFilter): boole
     return false;
   }
   if (filter === 'expired') {
-    return daysLeft <= 0;
+    // "Today" (Days Left = 0) is never Expired; Expired is strictly past dates.
+    return daysLeft < 0;
   }
 
   const upperBound = Number(filter);
-  return daysLeft > 0 && daysLeft <= upperBound;
+  return daysLeft >= 0 && daysLeft <= upperBound;
 }
 
 export { matchesQuickFilter };
@@ -124,34 +105,9 @@ export function filterRows(
 
     const daysLeft = daysLeftForRow(row, columns, options.today);
     const status = statusForDays(daysLeft);
-    const category = categoryForRow(row, columns);
 
     return (!search || searchableText(row, columns).includes(search))
       && matchesQuickFilter(daysLeft, quickFilter)
-      && (!options.category || category === options.category)
       && (!options.status || (options.status === 'No expiry' ? status === null : status === options.status));
   });
-}
-
-export function categoryValues(
-  rows: readonly SheetRow[],
-  columns: readonly ColumnDefinition[],
-): string[] {
-  return Array.from(new Set(rows
-    .filter((row) => row.deleted !== true)
-    .map((row) => categoryForRow(row, columns))
-    .filter(Boolean))).sort((left, right) => left.localeCompare(right));
-}
-
-export function groupRowsByCategory(
-  rows: readonly SheetRow[],
-  columns: readonly ColumnDefinition[],
-): Map<string, SheetRow[]> {
-  const groups = new Map<string, SheetRow[]>();
-  rows.forEach((row) => {
-    const category = categoryForRow(row, columns) || 'Uncategorized';
-    const current = groups.get(category) ?? [];
-    groups.set(category, [...current, row]);
-  });
-  return groups;
 }

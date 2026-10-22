@@ -22,6 +22,7 @@ export interface StatusColors {
   Valid: string;
   'Expiring Soon': string;
   Urgent: string;
+  'Expires today': string;
   Expired: string;
 }
 
@@ -29,7 +30,8 @@ export const DEFAULT_STATUS_COLORS: Readonly<StatusColors> = Object.freeze({
   Valid: '#16a34a',
   'Expiring Soon': '#eab308',
   Urgent: '#f97316',
-  Expired: '#dc2626',
+  'Expires today': '#dc2626',
+  Expired: '#7f1d1d',
 });
 
 export interface StatusPresentation {
@@ -49,7 +51,10 @@ function normaliseStatusColorKey(value: string): ExpiryStatus | null {
   if (compact === 'urgent' || compact === 'orange') {
     return 'Urgent';
   }
-  if (compact === 'expired' || compact === 'red') {
+  if (compact === 'expirestoday' || compact === 'today' || compact === 'red') {
+    return 'Expires today';
+  }
+  if (compact === 'expired' || compact === 'darkred' || compact === 'gray' || compact === 'grey') {
     return 'Expired';
   }
 

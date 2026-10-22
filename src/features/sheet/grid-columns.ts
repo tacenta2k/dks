@@ -12,7 +12,9 @@ import {
   type ColumnDefinition,
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
+import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
 import { findDuplicatePassportValues, validateCell } from '../../lib/validation';
+import { DateCellEditor } from './date-editor';
 import { RowActionsCell, type RowActionsContext, type SheetGridRendererData } from './row-actions';
 import type { SheetRow } from './types';
 
@@ -136,6 +138,26 @@ export function buildGridColumns(
         definition.cellEditor = 'agSelectCellEditor';
         definition.cellEditorParams = { values: [...dropdownValues(column.options)] };
       }
+      if (column.type === 'date_start' || column.type === 'date_expiry') {
+        // Dates display and type as DD/MM/YYYY while storage stays YYYY-MM-DD.
+        definition.cellEditor = DateCellEditor;
+        definition.valueFormatter = (params) => {
+          const value = params.value;
+          if (value === null || value === undefined || value === '') {
+            return '';
+          }
+          return formatDisplayDate(String(value));
+        };
+        definition.valueParser = (params) => {
+          const value = params.newValue;
+          if (value === null || value === undefined || value === '') {
+            return value;
+          }
+          // Impossible dates keep the typed text (warned by diagnostics);
+          // never silently change it to empty or another date.
+          return toStorableDateValue(value) ?? String(value);
+        };
+      }
       if (column.type === 'number' || column.type === 'price') {
         definition.type = 'numericColumn';
       }
@@ -193,6 +215,8 @@ export function rowClassForStatus(status: string | null): string {
   switch (status) {
     case 'Expired':
       return 'sheet-row--expired';
+    case 'Expires today':
+      return 'sheet-row--today';
     case 'Urgent':
       return 'sheet-row--urgent';
     case 'Expiring Soon':

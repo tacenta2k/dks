@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from 'zustand';
 
 import { createAuthService, AuthService } from '../features/auth/auth-service';
@@ -9,12 +9,15 @@ import {
   saveThemePreference,
 } from '../lib/theme';
 import type { AppView, DksLocalSyncState, ThemePreference } from '../lib/types';
+import { sanitizeSyncError } from '../lib/sync-error';
+import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
-import { AppShell } from './components/AppShell';
+import { AppShell, type SyncPendingItem } from './components/AppShell';
 import { createAppStore } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
 import type { DksSettings, PartialSettings } from '../features/settings/SettingsPage';
+import type { AuditProfile } from '../features/audit/AuditLogPage';
 import {
   loadWorkspaceSettings,
   partialSettingsToRecord,
@@ -78,8 +81,27 @@ export function App({
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [appStore] = useState(() => createAppStore(authService));
-  const [sheetRepository] = useState<SheetRepository>(
+  const [baseSheetRepository] = useState<SheetRepository>(
     () => providedSheetRepository ?? createElectronSheetRepository({ role: 'office' }),
+  );
+  // Local-mutation -> sync flush (Blocker 3): every successful local write
+  // schedules an immediate sync instead of waiting for the 60s timer.
+  const requestSyncRef = useRef<(() => void) | null>(null);
+  const syncFlushTimerRef = useRef<number | null>(null);
+  const requestSync = useCallback(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+    if (syncFlushTimerRef.current !== null) {
+      window.clearTimeout(syncFlushTimerRef.current);
+    }
+    syncFlushTimerRef.current = window.setTimeout(() => {
+      syncFlushTimerRef.current = null;
+      requestSyncRef.current?.();
+    }, 1_500);
+  }, []);
+  const [sheetRepository] = useState<SheetRepository>(() =>
+    createSyncingRepositoryProxy(baseSheetRepository, requestSync),
   );
   const [activeView, setActiveView] = useState<AppView>(initialView);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
@@ -95,7 +117,9 @@ export function App({
     lastError: null,
     pendingCount: 0,
   });
+  const [pendingOutbox, setPendingOutbox] = useState<readonly SyncPendingItem[]>([]);
   const [workspaceSettings, setWorkspaceSettings] = useState<PartialSettings | undefined>(undefined);
+  const [auditProfiles, setAuditProfiles] = useState<AuditProfile[]>([]);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
   const lastSettingsSignature = useRef('');
   const resolvedTheme = resolveTheme(themePreference, systemDark);
@@ -214,6 +238,36 @@ export function App({
       cancelled = true;
     };
   }, [appStore, authService, authStatus, isWorkspaceVisible, profile?.id]);
+
+  // S3: resolve audit actors by joining `profiles` so the Audit Log shows a
+  // real person (or "Office (shared account)") instead of "Unknown".
+  useEffect(() => {
+    if (!isWorkspaceVisible || authStatus === 'demo' || profile?.role !== 'admin') {
+      setAuditProfiles([]);
+      return undefined;
+    }
+    const client = authService.authClient;
+    if (!client) {
+      return undefined;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const result = await client.from('profiles').select('id,email,full_name,role') as unknown as {
+          data?: AuditProfile[] | null;
+        };
+        if (!cancelled && Array.isArray(result?.data)) {
+          setAuditProfiles(result.data);
+        }
+      } catch {
+        // Profile lookup is best-effort; the audit log falls back to the
+        // recorded actor names and neutral labels.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [authService, authStatus, isWorkspaceVisible, profile?.id, profile?.role]);
 
   const persistWorkspaceSettings = async (settings: DksSettings): Promise<void> => {
     const signature = JSON.stringify(settings);
@@ -392,6 +446,7 @@ export function App({
 
     let stopped = false;
     let running = false;
+    let runStartedAt = 0;
     const syncLocal: SupabaseSyncLocal = {
       getSnapshot: () => local.getSnapshot(),
       setSyncStatus: async (state) => {
@@ -411,6 +466,14 @@ export function App({
         setSyncStatus(next);
         return next;
       },
+      listOutbox: async (input) => local.listOutbox?.(input) ?? [],
+      markOutboxSynced: async (id) => {
+        await local.markOutboxSynced?.({ id });
+      },
+      markOutboxFailed: async (id, message) => {
+        await local.markOutboxFailed?.({ id, message });
+      },
+      retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
     };
     const syncClient = client as unknown as SupabaseDataClient;
 
@@ -419,15 +482,37 @@ export function App({
         return;
       }
       running = true;
-      const result = await runSupabaseSync({ client: syncClient, local: syncLocal });
-      running = false;
-      if (!stopped && result.status === 'healthy') {
-        setRepositoryRevision((revision) => revision + 1);
+      runStartedAt = Date.now();
+      try {
+        const result = await runSupabaseSync({
+          client: syncClient,
+          local: syncLocal,
+          userId: profile?.id ?? null,
+        });
+        if (!stopped && result.status === 'healthy') {
+          setRepositoryRevision((revision) => revision + 1);
+        }
+      } finally {
+        running = false;
       }
     };
 
+    // Proxy-triggered flushes (local mutations) land here.
+    requestSyncRef.current = () => void run();
     void run();
-    const interval = window.setInterval(() => void run(), 60_000);
+    const interval = window.setInterval(() => {
+      // Hang guard: a sync stuck for more than 5 minutes (e.g. a network
+      // socket that never resolves) releases the lock and surfaces the
+      // timeout. The outbox is never cleared — the next tick retries.
+      if (running && Date.now() - runStartedAt > 5 * 60_000) {
+        running = false;
+        void syncLocal.setSyncStatus({
+          status: 'error',
+          lastError: 'Sync timed out after 5 minutes; retrying.',
+        }).catch(() => undefined);
+      }
+      void run();
+    }, 60_000);
 
     type RealtimeChannelLike = {
       on: (
@@ -452,12 +537,44 @@ export function App({
 
     return () => {
       stopped = true;
+      requestSyncRef.current = null;
       window.clearInterval(interval);
       if (channel) {
         void realtime.removeChannel?.(channel);
       }
     };
   }, [authService, authStatus, isWorkspaceVisible, profile?.id]);
+
+  // Pending outbox details for the sync status (Blocker 3): surface WHAT is
+  // stuck and WHY (sanitised) — the count itself comes from syncStatus and
+  // is never hidden.
+  useEffect(() => {
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    if (!local?.listOutbox) {
+      setPendingOutbox([]);
+      return undefined;
+    }
+    let cancelled = false;
+    local.listOutbox({ status: 'all' })
+      .then((items) => {
+        if (cancelled) {
+          return;
+        }
+        setPendingOutbox(items
+          .filter((item) => (item.status ?? 'pending') !== 'synced')
+          .map((item): SyncPendingItem => ({
+            id: item.id,
+            entityType: item.entityType ?? item.entity_type ?? 'entry',
+            operation: item.operation ?? 'change',
+            attempts: item.attempts ?? 0,
+            lastError: sanitizeSyncError(item.lastError ?? item.last_error ?? '') || null,
+          })));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [syncStatus]);
 
   const persistNotification = async (
     id: string,
@@ -578,11 +695,13 @@ export function App({
       userEmail={session?.user.email ?? null}
       health={health}
       syncStatus={syncStatus}
+      pendingOutbox={pendingOutbox}
       isDemoMode={authStatus === 'demo'}
       sheetRepository={sheetRepository}
       settings={workspaceSettings}
       onSettingsChange={persistWorkspaceSettings}
       settingsError={settingsLoadError}
+      auditProfiles={auditProfiles}
       repositoryRevision={repositoryRevision}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ChangeEvent } from 'react';
 import type { CellValueChangedEvent, ColDef } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
@@ -13,13 +13,11 @@ import {
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
 import { findDuplicatePassportValues } from '../../lib/validation';
-import type { ExpiryStatus } from '../../lib/date';
+import { formatDisplayDate, type ExpiryStatus } from '../../lib/date';
 import type { Role } from '../auth/auth-types';
 import { ColumnWizard } from './column-wizard';
 import {
-  categoryValues,
   filterRows,
-  groupRowsByCategory,
   QUICK_FILTERS,
   type QuickFilter,
 } from './filters';
@@ -40,6 +38,12 @@ export interface SheetPageProps {
   today?: string | Date;
   /** The host can render the richer administrator toolbar outside the grid. */
   hideAdminActions?: boolean;
+  /**
+   * Bumped by the shell after local mutations and after each successful sync.
+   * The page re-fetches IN PLACE (no remount, no loading overlay) so open cell
+   * editors, dialogs and input focus survive background refreshes.
+   */
+  refreshToken?: number;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -64,7 +68,13 @@ function selectedValue(event: ChangeEvent<HTMLSelectElement>): string {
 
 function accessibleCellValue(row: SheetRow, column: ColumnDefinition): string {
   const value = dataValue(row, column);
-  return value === null || value === undefined || value === '' ? '—' : String(value);
+  if (value === null || value === undefined || value === '') {
+    return '—';
+  }
+  if (column.type === 'date_start' || column.type === 'date_expiry') {
+    return formatDisplayDate(String(value));
+  }
+  return String(value);
 }
 
 export function SheetPage({
@@ -72,6 +82,7 @@ export function SheetPage({
   role = 'office',
   today,
   hideAdminActions = false,
+  refreshToken = 0,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -79,37 +90,39 @@ export function SheetPage({
   );
   const [columns, setColumns] = useState<ColumnDefinition[]>([]);
   const [rows, setRows] = useState<SheetRow[]>([]);
-  const [templates, setTemplates] = useState<Awaited<ReturnType<SheetRepository['getTemplates']>>>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
-  const [categoryFilter, setCategoryFilter] = useState('');
   const [statusFilter, setStatusFilter] = useState('');
-  const [groupByCategory, setGroupByCategory] = useState(false);
   const [wizardOpen, setWizardOpen] = useState(false);
   const [columnManagerOpen, setColumnManagerOpen] = useState(false);
   const [renewRow, setRenewRow] = useState<SheetRow | null>(null);
   // AG Grid needs real layout measurements; jsdom uses the deterministic table below.
   const isTestEnvironment = import.meta.env.MODE === 'test';
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
+  // `quiet` refreshes replace the data without unmounting the page: the
+  // loading overlay used to destroy open editors, dialogs and focused inputs
+  // on every background refresh (focus-delay regression).
+  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+    if (!options?.quiet) {
+      setLoading(true);
+    }
     try {
-      const [nextColumns, nextRows, nextTemplates] = await Promise.all([
+      const [nextColumns, nextRows] = await Promise.all([
         repository.getColumns(),
         repository.getRows(),
-        repository.getTemplates(),
       ]);
       setColumns(nextColumns);
       setRows(nextRows);
-      setTemplates(nextTemplates);
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load the sheet.');
     } finally {
-      setLoading(false);
+      if (!options?.quiet) {
+        setLoading(false);
+      }
     }
   }, [repository]);
 
@@ -117,19 +130,26 @@ export function SheetPage({
     void refresh();
   }, [refresh]);
 
+  const lastRefreshToken = useRef(refreshToken);
+  useEffect(() => {
+    if (lastRefreshToken.current === refreshToken) {
+      return;
+    }
+    lastRefreshToken.current = refreshToken;
+    void refresh({ quiet: true });
+  }, [refreshToken, refresh]);
+
   const activeColumns = useMemo(
     () => columns.filter((column) => column.deleted !== true && column.visible !== false),
     [columns],
   );
   const primaryExpiry = useMemo(() => getPrimaryExpiryColumn(activeColumns), [activeColumns]);
-  const categories = useMemo(() => categoryValues(rows, activeColumns), [rows, activeColumns]);
   const matchingRows = useMemo(() => filterRows(rows, activeColumns, {
     search,
     quickFilter,
-    category: categoryFilter,
     status: statusFilter as ExpiryStatus | 'No expiry' | '',
     today,
-  }), [rows, activeColumns, search, quickFilter, categoryFilter, statusFilter, today]);
+  }), [rows, activeColumns, search, quickFilter, statusFilter, today]);
   const matchingIds = useMemo(() => new Set(matchingRows.map((row) => row.id)), [matchingRows]);
   const builtRows = useMemo(() => buildGridRows(rows, activeColumns, { today }), [rows, activeColumns, today]);
   const gridRows = useMemo(
@@ -146,7 +166,7 @@ export function SheetPage({
   const handleDuplicate = useCallback(async (row: SheetRow) => {
     try {
       await repository.duplicateRow(row.id);
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Duplicated ${displayLabel(row, activeColumns)}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to duplicate the row.');
@@ -163,7 +183,7 @@ export function SheetPage({
 
     try {
       await repository.softDeleteRow(row.id);
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Moved ${displayLabel(row, activeColumns)} to the recycle bin.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to delete the row.');
@@ -181,18 +201,10 @@ export function SheetPage({
     onRenew: handleRenew,
   }), [handleDuplicate, handleDelete, handleRenew]);
 
-  const categoryColumn = activeColumns.find((column) => (
-    column.id.toLowerCase() === 'category' || column.name.toLowerCase() === 'category'
-  ));
-  const gridColumnDefs = useMemo(() => {
-    const base = buildGridColumns(activeColumns, gridContext, role ?? 'office');
-    if (!groupByCategory || !categoryColumn) {
-      return base;
-    }
-    return base.map((column) => column.colId === categoryColumn.id
-      ? { ...column, rowGroup: true, hide: true }
-      : column);
-  }, [activeColumns, gridContext, groupByCategory, categoryColumn, role]);
+  const gridColumnDefs = useMemo(
+    () => buildGridColumns(activeColumns, gridContext, role ?? 'office'),
+    [activeColumns, gridContext, role],
+  );
 
   const handleCellValueChanged = useCallback(async (
     event: CellValueChangedEvent<SheetGridRendererData>,
@@ -207,7 +219,7 @@ export function SheetPage({
     }
     try {
       await repository.updateRow(event.data.__rowId, { [field]: event.newValue });
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Saved ${column.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to save the cell.');
@@ -217,7 +229,7 @@ export function SheetPage({
   const addRow = async () => {
     try {
       await repository.createRow({});
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage('Added a new row.');
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add a row.');
@@ -227,24 +239,11 @@ export function SheetPage({
   const addColumn = async (column: ColumnDefinition) => {
     try {
       await repository.addColumn(column);
-      await refresh();
+      await refresh({ quiet: true });
       setWizardOpen(false);
       setStatusMessage(`Added ${column.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add the column.');
-    }
-  };
-
-  const loadTemplate = async (templateId: string) => {
-    try {
-      await repository.loadTemplate(templateId);
-      setQuickFilter('all');
-      setCategoryFilter('');
-      setStatusFilter('');
-      await refresh();
-      setStatusMessage('Visa Template loaded.');
-    } catch (caught) {
-      setError(caught instanceof Error ? caught.message : 'Unable to load the template.');
     }
   };
 
@@ -255,7 +254,7 @@ export function SheetPage({
     }
     try {
       await repository.softDeleteColumn(column.id, role ?? '');
-      await refresh();
+      await refresh({ quiet: true });
       setStatusMessage(`Removed ${column.name}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to remove the column.');
@@ -274,19 +273,13 @@ export function SheetPage({
         nextExpiry,
         typeof dataValue(renewRow, primaryExpiry) === 'string' ? dataValue(renewRow, primaryExpiry) as string : null,
       );
-      await refresh();
+      await refresh({ quiet: true });
       setRenewRow(null);
       setStatusMessage(`Renewed ${displayLabel(renewRow, activeColumns)}.`);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to save the renewal.');
     }
   };
-
-  const activeTemplate = templates.find((template) => template.id === 'visa') ?? templates[0];
-  const groupedRows = useMemo(
-    () => groupRowsByCategory(matchingRows, activeColumns),
-    [matchingRows, activeColumns],
-  );
 
   if (loading) {
     return <div className="sheet-page sheet-page--loading" aria-live="polite">Loading visa sheet…</div>;
@@ -302,14 +295,11 @@ export function SheetPage({
           <div className="sheet-empty-state__icon" aria-hidden="true">＋</div>
           <div>
             <p className="sheet-eyebrow">Start your workspace</p>
-            <h2>Add your first column</h2>
-            <p>Define the fields your office uses, or start with the Visa Template.</p>
+            <h2>Click + to add your first column</h2>
+            <p>Define the fields your office uses.</p>
             <div className="sheet-empty-state__actions">
               <button className="button button--primary" type="button" onClick={() => setWizardOpen(true)}>
                 Add your first column
-              </button>
-              <button className="button" type="button" onClick={() => void loadTemplate(activeTemplate?.id ?? 'visa')}>
-                Load Visa Template
               </button>
             </div>
           </div>
@@ -326,14 +316,6 @@ export function SheetPage({
               </button>
               <button className="button" type="button" onClick={() => setColumnManagerOpen((open) => !open)}>
                 Manage columns
-              </button>
-              <button
-                className="button"
-                type="button"
-                aria-pressed={groupByCategory}
-                onClick={() => setGroupByCategory((grouped) => !grouped)}
-              >
-                Group by Category
               </button>
             </div>
             {!hideAdminActions ? (
@@ -360,19 +342,13 @@ export function SheetPage({
               />
             </label>
             <label>
-              Category
-              <select aria-label="Filter by category" value={categoryFilter} onChange={(event) => setCategoryFilter(selectedValue(event))}>
-                <option value="">All categories</option>
-                {categories.map((category) => <option key={category} value={category}>{category}</option>)}
-              </select>
-            </label>
-            <label>
               Status
               <select aria-label="Filter by status" value={statusFilter} onChange={(event) => setStatusFilter(selectedValue(event))}>
                 <option value="">All statuses</option>
                 <option value="Valid">Valid</option>
                 <option value="Expiring Soon">Expiring Soon</option>
                 <option value="Urgent">Urgent</option>
+                <option value="Expires today">Expires today</option>
                 <option value="Expired">Expired</option>
                 <option value="No expiry">No expiry</option>
               </select>
@@ -436,14 +412,6 @@ export function SheetPage({
             </section>
           ) : null}
 
-          {groupByCategory ? (
-            <div className="sheet-group-summary" aria-label="Category groups">
-              {Array.from(groupedRows.entries()).map(([category, categoryRows]) => (
-                <span key={category} className="sheet-group-summary__item">{category} · {categoryRows.length}</span>
-              ))}
-            </div>
-          ) : null}
-
           {isTestEnvironment ? null : (
             <div className="sheet-grid ag-theme-quartz" data-testid="sheet-grid" aria-label="Visa records grid">
               <AgGridReact<SheetGridRendererData>
@@ -460,8 +428,6 @@ export function SheetPage({
                 getRowId={(params) => params.data.__rowId}
                 getRowClass={(params) => rowClassForStatus(params.data?.status ?? null)}
                 onCellValueChanged={(event) => void handleCellValueChanged(event)}
-                groupDisplayType="groupRows"
-                rowGroupPanelShow={groupByCategory ? 'always' : 'never'}
                 domLayout="autoHeight"
                 animateRows
                 enableCellTextSelection

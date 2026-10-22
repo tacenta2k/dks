@@ -5,11 +5,12 @@ import { describe, expect, it, vi } from 'vitest';
 import { SheetPage } from '../src/features/sheet/SheetPage';
 import { buildGridColumns } from '../src/features/sheet/grid-columns';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { seedFixtureColumns } from './fixtures/sheet-columns';
 import type { ColumnDefinition } from '../src/lib/columns';
 
 async function seededRepository() {
   const repository = createInMemorySheetRepository();
-  await repository.loadTemplate('visa');
+  await seedFixtureColumns(repository);
   await repository.createRow({
     category: 'Employee',
     passport_no: 'A1234567',

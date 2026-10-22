@@ -83,7 +83,6 @@ export function ColumnWizard({
   const [name, setName] = useState('');
   const [type, setType] = useState<ColumnType>('text');
   const [options, setOptions] = useState('');
-  const [isPassport, setIsPassport] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const optionValues = useMemo(() => Array.from(new Set(options
@@ -107,7 +106,6 @@ export function ColumnWizard({
       name: trimmedName,
       type,
       ...(type === 'dropdown' ? { options: optionValues } : {}),
-      ...(isPassport ? { isPassport: true } : {}),
     }, existingColumns);
     void onSubmit(column);
   };
@@ -153,14 +151,6 @@ export function ColumnWizard({
               />
             </label>
           ) : null}
-          <label className="sheet-form__check">
-            <input
-              type="checkbox"
-              checked={isPassport}
-              onChange={(event) => setIsPassport(event.target.checked)}
-            />
-            <span>Passport number column</span>
-          </label>
           {type === 'date_expiry' ? (
             <p className="sheet-form__hint">
               The first expiry column becomes the primary expiry used for Days Left.

@@ -5,6 +5,7 @@ import {
 } from 'electron';
 import type { IpcMainEvent } from 'electron';
 import * as path from 'node:path';
+import log from 'electron-log';
 
 import {
   createNotificationService,
@@ -110,13 +111,20 @@ function loadRenderer(window: BrowserWindow, options: CreateMainWindowOptions): 
 
   try {
     if (rendererUrl) {
-      void window.loadURL(rendererUrl).catch(() => undefined);
+      log.info(`[dks] loading renderer from dev URL ${rendererUrl}`);
+      void window.loadURL(rendererUrl).catch((error) => {
+        log.error('[dks] renderer dev URL failed to load', error);
+      });
       return;
     }
 
-    void window.loadFile(rendererFile).catch(() => undefined);
-  } catch {
+    log.info(`[dks] loading renderer from ${rendererFile}`);
+    void window.loadFile(rendererFile).catch((error) => {
+      log.error('[dks] renderer file failed to load', error);
+    });
+  } catch (error) {
     // A renderer load failure should leave the shell available for diagnostics.
+    log.error('[dks] renderer load threw', error);
   }
 }
 
@@ -170,12 +178,18 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
     return mainWindow;
   }
 
+  // `startHidden` (tray autostart / --hidden) must keep the window invisible;
+  // a normal development or desktop launch must show and focus it.  The show
+  // flag is therefore the negation of the hidden request.
+  const startHidden = options.startHidden ?? shouldStartHidden();
+  log.info(`[dks] createMainWindow (hidden=${String(startHidden)})`);
+
   const window = new BrowserWindow({
     width: 1_440,
     height: 920,
     minWidth: 1_020,
     minHeight: 680,
-    show: options.startHidden ?? shouldStartHidden(),
+    show: !startHidden,
     autoHideMenuBar: true,
     title: 'DKS',
     webPreferences: {
@@ -188,6 +202,13 @@ export function createMainWindow(options: CreateMainWindowOptions = {}): Browser
   });
 
   mainWindow = window;
+
+  if (!startHidden) {
+    safeInvoke(() => {
+      window.show();
+      window.focus();
+    });
+  }
 
   window.on('close', (event) => {
     if (quitting) {
@@ -288,9 +309,11 @@ function openLocalStore(): void {
       ipcMain: ipcMain as unknown as LocalIpcMain,
       store: localStore,
     });
-  } catch {
+    log.info('[dks] local SQLite store opened and IPC handlers registered');
+  } catch (error) {
     // The shell and cloud features can still start when local storage is not
     // available; the renderer simply observes an absent local bridge.
+    log.error('[dks] failed to open the local SQLite store', error);
     safeInvoke(() => opened?.close());
     localStore = undefined;
     unregisterLocalIpc = undefined;
@@ -396,6 +419,7 @@ export async function startMainProcess(): Promise<boolean> {
 
   const startHidden = shouldStartHidden();
   configureAutoLaunch(true);
+  log.info(`[dks] starting main process (version=${getAppVersion()}, hidden=${String(startHidden)}, packaged=${String(app.isPackaged)})`);
 
   openLocalStore();
   notificationService = createNotificationService();
@@ -415,4 +439,6 @@ export async function startMainProcess(): Promise<boolean> {
   return true;
 }
 
-void startMainProcess().catch(() => undefined);
+void startMainProcess().catch((error) => {
+  log.error('[dks] main process failed to start', error);
+});
