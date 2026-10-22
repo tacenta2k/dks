@@ -6,8 +6,12 @@ import {
   createXlsxExport,
 } from '../src/features/import-export/export-service';
 import {
+  convertColumnDateValues,
   importRows,
+  isDateLikeValue,
   previewImport,
+  sampleHeaderValues,
+  suggestImportColumnType,
 } from '../src/features/import-export/import-service';
 import type { ColumnDefinition } from '../src/lib/columns';
 import type { SheetRow } from '../src/features/sheet/types';
@@ -208,5 +212,116 @@ describe('admin import and export workflows', () => {
 
     expect(result.records[0]?.data).toEqual({ name: 'Ada' });
     expect(result.unmappedHeaders).toEqual(['Unknown']);
+  });
+
+  describe('imported date columns (Blocker 2)', () => {
+    it('detects date-like values without flagging passport numbers', () => {
+      expect(isDateLikeValue('10/01/2004')).toBe(true);
+      expect(isDateLikeValue('10012004')).toBe(true);
+      expect(isDateLikeValue('2004-01-10')).toBe(true);
+      expect(isDateLikeValue('2004/1/10')).toBe(true);
+      expect(isDateLikeValue(45000)).toBe(true); // Excel date serial
+      // Impossible calendar dates still LOOK like dates (resolved later, never here).
+      expect(isDateLikeValue('31/02/2004')).toBe(true);
+      expect(isDateLikeValue('1234567')).toBe(false); // passport-style
+      expect(isDateLikeValue('Ada')).toBe(false);
+      expect(isDateLikeValue('')).toBe(false);
+      expect(isDateLikeValue(12)).toBe(false);
+    });
+
+    it('suggests date types from header hints and value samples', () => {
+      expect(suggestImportColumnType('Visa Expiry', [])).toBe('date_expiry');
+      expect(suggestImportColumnType('Expiry Date', ['x'])).toBe('date_expiry');
+      expect(suggestImportColumnType('Start date', ['x'])).toBe('date_start');
+      expect(suggestImportColumnType('Issued', ['x'])).toBe('date_start');
+      expect(suggestImportColumnType('Date', [])).toBe('date_expiry');
+      // Majority of date-like values makes an unknown header a date column.
+      expect(suggestImportColumnType('Misc', ['10/01/2004', '11/02/2005', '12/03/2006'])).toBe('date_expiry');
+      // Non-date headers with non-date values stay text.
+      expect(suggestImportColumnType('Notes', ['hello', 'world'])).toBeNull();
+      expect(suggestImportColumnType('Passport No', ['A-1', 'B-2'])).toBeNull();
+    });
+
+    it('sampleHeaderValues returns the first 20 non-empty values under a header', () => {
+      const rawRows = [
+        ['a', '10/01/2004', ''],
+        ['b', '', '11/02/2005'],
+      ];
+      expect(sampleHeaderValues(rawRows, 1)).toEqual(['10/01/2004']);
+      expect(sampleHeaderValues(rawRows, 2)).toEqual(['11/02/2005']);
+    });
+
+    it('preview suggests a Date type for unmapped date-like headers', async () => {
+      const csv = 'Name,Expiry Date\nAda,10/01/2004\nGrace,11/02/2005';
+      const preview = await previewImport(csv, { role: 'admin', columns, fileName: 'rows.csv' });
+
+      expect(preview.unmappedHeaders).toEqual(['Expiry Date']);
+      expect(preview.suggestedColumnTypes).toEqual([{ header: 'Expiry Date', type: 'date_expiry' }]);
+    });
+
+    it('preview flags date-like values mapped onto an existing TEXT column', async () => {
+      const textColumns: ColumnDefinition[] = [
+        { id: 'name', name: 'Name', type: 'text', position: 0 },
+        { id: 'start_date', name: 'Start date', type: 'text', position: 1 },
+      ];
+      const csv = 'Name,Start date\nAda,10/01/2004\nGrace,11/02/2005';
+      const preview = await previewImport(csv, { role: 'admin', columns: textColumns, fileName: 'rows.csv' });
+
+      expect(preview.dateMappedToText).toEqual([
+        { header: 'Start date', columnId: 'start_date', columnName: 'Start date' },
+      ]);
+      // Mapped onto a real date column: no warning.
+      const datePreview = await previewImport(csv, {
+        role: 'admin',
+        columns: textColumns.map((column) => (column.id === 'start_date' ? { ...column, type: 'date_start' } : column)),
+        fileName: 'rows.csv',
+      });
+      expect(datePreview.dateMappedToText).toEqual([]);
+    });
+
+    it('creates an unmapped date column as date_expiry and stores ISO values (user choice)', async () => {
+      const result = await importRows('Name,Expiry Date\nAda,10/01/2004\nGrace,11/02/2005', {
+        role: 'admin',
+        columns,
+        fileName: 'rows.csv',
+        newColumnTypes: { 'Expiry Date': 'date_expiry' },
+        createColumn: (header, suggested) => ({ id: 'expiry_date', name: header, type: suggested.type }),
+      });
+
+      const created = result.columns.find((column) => column.id === 'expiry_date');
+      expect(created?.type).toBe('date_expiry');
+      expect(result.records.map((record) => record.data.expiry_date)).toEqual(['2004-01-10', '2005-02-11']);
+    });
+
+    it('auto-suggests a date type for date-like unmapped headers when the user picks none', async () => {
+      const suggestedTypes: string[] = [];
+      const result = await importRows('Name,Visa Expiry\nAda,10/01/2004', {
+        role: 'admin',
+        columns: [{ id: 'name', name: 'Name', type: 'text', position: 0 }],
+        fileName: 'rows.csv',
+        createColumn: (header, suggested) => {
+          suggestedTypes.push(suggested.type);
+          return { id: 'visa_expiry', name: header, type: suggested.type };
+        },
+      });
+
+      // The header hint alone must yield a date column — never silent text.
+      expect(suggestedTypes).toEqual(['date_expiry']);
+      expect(result.columns.find((column) => column.id === 'visa_expiry')?.type).toBe('date_expiry');
+      expect(result.records[0]?.data).toEqual({ name: 'Ada', visa_expiry: '2004-01-10' });
+    });
+
+    it('convertColumnDateValues converts valid dates to ISO and keeps the rest untouched', () => {
+      const { converted, kept, nextValues } = convertColumnDateValues([
+        '10/01/2004',
+        '31/02/2004', // impossible: kept, warned by the cell, never dropped
+        'not a date',
+        '',
+        '02/01/2027',
+      ]);
+      expect(converted).toBe(2);
+      expect(kept).toBe(3);
+      expect(nextValues).toEqual(['2004-01-10', '31/02/2004', 'not a date', '', '2027-01-02']);
+    });
   });
 });

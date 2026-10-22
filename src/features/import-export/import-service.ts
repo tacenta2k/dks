@@ -27,6 +27,20 @@ export interface ImportMapping {
   columnName: string;
 }
 
+export type ImportColumnType = 'text' | 'date_start' | 'date_expiry';
+
+export interface ImportDateSuggestion {
+  header: string;
+  type: 'date_start' | 'date_expiry';
+}
+
+/** A header is mapped onto an existing non-date column that holds date-like values. */
+export interface ImportDateMappedToText {
+  header: string;
+  columnId: string;
+  columnName: string;
+}
+
 export interface ImportPreview {
   fileName: string;
   headers: string[];
@@ -36,6 +50,10 @@ export interface ImportPreview {
   rawRows: unknown[][];
   mappings: ImportMapping[];
   unmappedHeaders: string[];
+  /** Unmapped headers whose header or values look date-like, with a suggested date type. */
+  suggestedColumnTypes: ImportDateSuggestion[];
+  /** Mapped headers whose target column is plain text but whose values look date-like. */
+  dateMappedToText: ImportDateMappedToText[];
   totalRows: number;
   truncated: boolean;
 }
@@ -61,6 +79,12 @@ export interface ImportOptions {
   repository?: Pick<SheetRepository, 'addColumn'>;
   /** Set false to surface unmapped headers as an error instead of ignoring them. */
   ignoreUnmapped?: boolean;
+  /**
+   * User-chosen types for UNMAPPED headers (from the import preview dialog),
+   * keyed by header. Without an explicit choice the service falls back to
+   * `suggestImportColumnType` so date-like data never silently becomes text.
+   */
+  newColumnTypes?: Record<string, ImportColumnType>;
 }
 
 export interface ImportResult {
@@ -227,6 +251,121 @@ function excelSerialToDisplay(value: number): string {
   return iso ? formatDisplayDate(iso) : String(value);
 }
 
+/**
+ * Date-likeness detection for import (NOT a validity check): 31/02/2004 still
+ * counts as "looks like a date" so the preview can offer a date column; the
+ * impossible value is only resolved later by toStorableDateValue.
+ */
+const DATE_VALUE_PATTERNS = [
+  /^\d{1,2}\/\d{1,2}\/\d{4}$/, // DD/MM/YYYY (and D/M/YYYY)
+  /^\d{4}-\d{1,2}-\d{1,2}$/, // YYYY-MM-DD
+  /^\d{4}\/\d{1,2}\/\d{1,2}$/, // YYYY/MM/DD
+  /^\d{8}$/, // DDMMYYYY compact (10012004)
+] as const;
+
+function plausibleCalendarParts(day: number, month: number, year: number): boolean {
+  return day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 1900 && year <= 2199;
+}
+
+export function isDateLikeValue(value: unknown): boolean {
+  if (typeof value === 'number' && isExcelDateSerial(value)) {
+    return true;
+  }
+  if (typeof value !== 'string') {
+    return false;
+  }
+  const text = value.trim();
+  if (!text || text.length > 11) {
+    return false;
+  }
+  const dashIso = /^(\d{4})-(\d{1,2})-(\d{1,2})$/.exec(text);
+  if (dashIso) {
+    return plausibleCalendarParts(Number(dashIso[3]), Number(dashIso[2]), Number(dashIso[1]));
+  }
+  const slashIso = /^(\d{4})\/(\d{1,2})\/(\d{1,2})$/.exec(text);
+  if (slashIso) {
+    return plausibleCalendarParts(Number(slashIso[3]), Number(slashIso[2]), Number(slashIso[1]));
+  }
+  const ddMmYyyy = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(text);
+  if (ddMmYyyy) {
+    return plausibleCalendarParts(Number(ddMmYyyy[1]), Number(ddMmYyyy[2]), Number(ddMmYyyy[3]));
+  }
+  const compact = /^(\d{2})(\d{2})(\d{4})$/.exec(text);
+  if (compact) {
+    return plausibleCalendarParts(Number(compact[1]), Number(compact[2]), Number(compact[3]));
+  }
+  return DATE_VALUE_PATTERNS.some((pattern) => pattern.test(text));
+}
+
+/** Sample values under one source header (first 20 data rows, non-empty). */
+export function sampleHeaderValues(
+  rawRows: readonly unknown[][],
+  sourceIndex: number,
+): unknown[] {
+  return rawRows.slice(0, 20)
+    .map((row) => row[sourceIndex])
+    .filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+}
+
+/**
+ * Suggest a column type for an UNMAPPED import header.
+ * Header hints win (Expiry/Expiration → date_expiry, Start/Issued → date_start);
+ * otherwise a majority of date-like sample values yields a date column
+ * (default date_expiry — the preview dialog lets the user pick either).
+ * Returns null when neither header nor values look date-like.
+ */
+export function suggestImportColumnType(
+  header: string,
+  sampleValues: readonly unknown[],
+): 'date_start' | 'date_expiry' | null {
+  const normalized = header.trim().toLowerCase();
+  const headerExpiry = /expir|expiration|lapse|valid.*until|due\s*date/.test(normalized);
+  const headerStart = /start|issu|join|hire|arrival|onboard|commenc|valid.*from|birth|dob/.test(normalized);
+  if (headerExpiry) {
+    return 'date_expiry';
+  }
+  if (headerStart) {
+    return 'date_start';
+  }
+  const nonEmpty = sampleValues.filter((value) => value !== null && value !== undefined && String(value).trim() !== '');
+  if (nonEmpty.length === 0) {
+    return /date|day\b/.test(normalized) ? 'date_expiry' : null;
+  }
+  const dateCount = nonEmpty.filter((value) => isDateLikeValue(value)).length;
+  const dateRatio = dateCount / nonEmpty.length;
+  const valueLike = nonEmpty.length >= 2 ? dateRatio >= 0.6 : dateCount === 1;
+  if (valueLike || /date|day\b/.test(normalized)) {
+    return 'date_expiry';
+  }
+  return null;
+}
+
+/**
+ * Safe conversion of an EXISTING text column's values to a date column.
+ * Valid dates become ISO (YYYY-MM-DD); impossible or non-date text is kept
+ * exactly as typed — never silently dropped or rewritten.
+ */
+export function convertColumnDateValues(
+  values: readonly unknown[],
+): { converted: number; kept: number; nextValues: unknown[] } {
+  let converted = 0;
+  let kept = 0;
+  const nextValues = values.map((value) => {
+    if (typeof value !== 'string' || !value.trim()) {
+      kept += 1;
+      return value;
+    }
+    const next = toStorableDateValue(value);
+    if (typeof next === 'string' && next !== value && /^\d{4}-\d{2}-\d{2}$/.test(next)) {
+      converted += 1;
+      return next;
+    }
+    kept += 1;
+    return value;
+  });
+  return { converted, kept, nextValues };
+}
+
 /** Display form used by the import preview table. */
 function previewCell(value: unknown, columnType: string | undefined): unknown {
   if (columnType === 'date_start' || columnType === 'date_expiry') {
@@ -308,6 +447,37 @@ function makePreview(parsed: ParsedSource, columns: readonly ColumnDefinition[])
   const headers = headerRow.map((value) => String(value ?? '').trim());
   const dataRows = parsed.matrix.slice(1);
   const { mappings, unmappedHeaders } = mappingsForHeaders(headers, columns);
+
+  const suggestedColumnTypes: ImportDateSuggestion[] = [];
+  const dateMappedToText: ImportDateMappedToText[] = [];
+  headers.forEach((header, sourceIndex) => {
+    if (!header.trim()) {
+      return;
+    }
+    const samples = sampleHeaderValues(dataRows, sourceIndex);
+    const mapped = mappings.find((mapping) => mapping.header === header);
+    if (mapped) {
+      // A header mapped onto an existing NON-DATE column with date-like values
+      // must not be silently treated as a date column — surface it instead.
+      const target = columns.find((column) => column.id === mapped.columnId);
+      const isDateColumn = target?.type === 'date_start' || target?.type === 'date_expiry';
+      if (!isDateColumn && samples.some((value) => isDateLikeValue(value))) {
+        dateMappedToText.push({
+          header,
+          columnId: mapped.columnId,
+          columnName: mapped.columnName,
+        });
+      }
+      return;
+    }
+    const suggested = unmappedHeaders.includes(header)
+      ? suggestImportColumnType(header, samples)
+      : null;
+    if (suggested) {
+      suggestedColumnTypes.push({ header, type: suggested });
+    }
+  });
+
   return {
     fileName: parsed.fileName,
     headers,
@@ -315,6 +485,8 @@ function makePreview(parsed: ParsedSource, columns: readonly ColumnDefinition[])
     rawRows: dataRows.slice(0, 20).map((row) => [...row]),
     mappings,
     unmappedHeaders,
+    suggestedColumnTypes,
+    dateMappedToText,
     totalRows: dataRows.length,
     truncated: dataRows.length > 20,
   };
@@ -378,10 +550,19 @@ export async function importRows(source: ImportSource, options: ImportOptions): 
   for (const header of sourcePreview.unmappedHeaders) {
     let created: ColumnDefinition | ColumnInput | null | undefined;
     if (options.createColumn) {
+      // User choice from the preview dialog wins; otherwise the detection
+      // fallback applies so date-like data never silently becomes text.
+      const samples = sampleHeaderValues(
+        parsed.matrix.slice(1),
+        sourcePreview.headers.findIndex((candidate) => candidate === header),
+      );
+      const chosenType: ImportColumnType = options.newColumnTypes?.[header]
+        ?? suggestImportColumnType(header, samples)
+        ?? 'text';
       const suggested: ColumnInput = {
         id: uniqueColumnId(header, columns),
         name: header,
-        type: 'text',
+        type: chosenType,
       };
       created = await options.createColumn(header, suggested);
       if (created && options.repository && !('position' in created) && created.id) {

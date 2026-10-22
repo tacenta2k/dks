@@ -11,9 +11,11 @@ import {
   type ExportSaveCallback,
 } from '../import-export/export-service';
 import {
+  convertColumnDateValues,
   importRows as parseImportRows,
   previewImport,
   type ImportActor,
+  type ImportColumnType,
   type ImportPreview,
   type ImportSource,
 } from '../import-export/import-service';
@@ -30,6 +32,7 @@ import {
   type SheetRepository,
 } from '../sheet/repository';
 import type {
+  ColumnInput,
   SheetAuditEntry,
   SheetImportRecord,
   SheetRow,
@@ -174,11 +177,21 @@ function ImportPreviewDialog({
   onClose,
   onImport,
   importing,
+  columnTypes,
+  onColumnTypeChange,
+  conversions,
+  onConversionChange,
 }: {
   preview: ImportPreview;
   onClose: () => void;
   onImport: () => void;
   importing: boolean;
+  /** User-chosen type per unmapped header (new column creation). */
+  columnTypes: Record<string, ImportColumnType>;
+  onColumnTypeChange: (header: string, type: ImportColumnType) => void;
+  /** User choice per mapped-to-text date column: 'keep' | 'date_start' | 'date_expiry'. */
+  conversions: Record<string, 'keep' | 'date_start' | 'date_expiry'>;
+  onConversionChange: (columnId: string, choice: 'keep' | 'date_start' | 'date_expiry') => void;
 }) {
   return (
     <div className="admin-dialog-backdrop">
@@ -196,6 +209,51 @@ function ImportPreviewDialog({
           <p className="admin-dialog__warning" role="status">
             New columns will be created for: {preview.unmappedHeaders.join(', ')}
           </p>
+        ) : null}
+
+        {preview.suggestedColumnTypes.length > 0 ? (
+          <div className="admin-dialog__types" aria-label="New column types">
+            <p className="admin-dialog__types-title">Column types</p>
+            {preview.suggestedColumnTypes.map((suggestion) => (
+              <label key={`${suggestion.header}-type`} className="admin-dialog__type-row">
+                <span>
+                  {suggestion.header}
+                  {' — '}
+                  looks like dates
+                </span>
+                <select
+                  aria-label={`Type for ${suggestion.header}`}
+                  value={columnTypes[suggestion.header] ?? suggestion.type}
+                  onChange={(event) => onColumnTypeChange(suggestion.header, event.target.value as ImportColumnType)}
+                >
+                  <option value="date_expiry">Date (expiry)</option>
+                  <option value="date_start">Date (start)</option>
+                  <option value="text">Text</option>
+                </select>
+              </label>
+            ))}
+          </div>
+        ) : null}
+
+        {preview.dateMappedToText.length > 0 ? (
+          <div className="admin-dialog__types" aria-label="Date columns mapped to text">
+            {preview.dateMappedToText.map((warning) => (
+              <label key={`${warning.columnId}-convert`} className="admin-dialog__type-row admin-dialog__type-row--warning">
+                <span>
+                  “{warning.header}” is mapped to the text column “{warning.columnName}” but contains date-like values.
+                </span>
+                <select
+                  aria-label={`Date handling for ${warning.columnName}`}
+                  value={conversions[warning.columnId] ?? 'keep'}
+                  onChange={(event) => onConversionChange(warning.columnId, event.target.value as 'keep' | 'date_start' | 'date_expiry')}
+                >
+                  <option value="keep">Keep as text</option>
+                  <option value="date_expiry">Convert to Date (expiry)</option>
+                  <option value="date_start">Convert to Date (start)</option>
+                </select>
+              </label>
+            ))}
+          </div>
         ) : null}
 
         <div className="admin-dialog__table-wrap">
@@ -246,6 +304,10 @@ export function AdminSheetActions({
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [sourceFile, setSourceFile] = useState<ImportSource | null>(null);
   const [sourceFileName, setSourceFileName] = useState<string | null>(null);
+  // User choices in the import preview: new column types (per unmapped
+  // header) and safe conversions of text columns that hold date-like values.
+  const [importColumnTypes, setImportColumnTypes] = useState<Record<string, ImportColumnType>>({});
+  const [importConversions, setImportConversions] = useState<Record<string, 'keep' | 'date_start' | 'date_expiry'>>({});
   const [reportOpen, setReportOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -304,8 +366,18 @@ export function AdminSheetActions({
     try {
       const source = await importSourceForFile(file);
       const nextPreview = await previewImport(source, { role, columns, fileName: file.name });
+      const initialTypes: Record<string, ImportColumnType> = {};
+      for (const header of nextPreview.unmappedHeaders) {
+        initialTypes[header] = nextPreview.suggestedColumnTypes.find((s) => s.header === header)?.type ?? 'text';
+      }
+      const initialConversions: Record<string, 'keep' | 'date_start' | 'date_expiry'> = {};
+      for (const warning of nextPreview.dateMappedToText) {
+        initialConversions[warning.columnId] = 'keep';
+      }
       setSourceFile(source);
       setSourceFileName(file.name);
+      setImportColumnTypes(initialTypes);
+      setImportConversions(initialConversions);
       setPreview(nextPreview);
       setStatus(null);
     } catch (caught) {
@@ -315,13 +387,16 @@ export function AdminSheetActions({
     }
   };
 
-  const createColumn = useCallback(async (header: string) => {
+  const createColumn = useCallback(async (header: string, suggested: ColumnInput) => {
     try {
-      return await repository.addColumn({ name: header, type: 'text' });
+      // The service suggests date types for date-like headers/values; the
+      // preview dialog can override either choice before import.
+      const type = importColumnTypes[header] ?? suggested.type ?? 'text';
+      return await repository.addColumn({ name: suggested.name, type });
     } catch {
       return null;
     }
-  }, [repository]);
+  }, [repository, importColumnTypes]);
 
   const confirmImport = async () => {
     if (!sourceFile || !preview || !can(role, 'import')) {
@@ -331,12 +406,56 @@ export function AdminSheetActions({
     setBusy(true);
     setError(null);
     try {
+      // Safe conversions chosen in the preview: an existing TEXT column that
+      // holds date-like values may be converted to a date column. Valid values
+      // become ISO (YYYY-MM-DD); impossible/non-date text is kept exactly as
+      // typed — nothing is silently rewritten or dropped.
+      const conversionNotes: string[] = [];
+      for (const [columnId, choice] of Object.entries(importConversions)) {
+        if (choice === 'keep') {
+          continue;
+        }
+        const target = columns.find((column) => column.id === columnId);
+        if (!target) {
+          continue;
+        }
+        await repository.updateColumn(columnId, { type: choice });
+        const currentRows = (await repository.getRows()).filter((row) => row.deleted !== true);
+        const values = currentRows.map((row) => row.data[columnId]);
+        const { nextValues } = convertColumnDateValues(values);
+        let index = 0;
+        for (const row of currentRows) {
+          const next = nextValues[index];
+          index += 1;
+          if (next !== row.data[columnId]) {
+            await repository.updateRow(row.id, { [columnId]: next });
+          }
+        }
+        // Report only over non-empty cells: empty cells are not "kept as
+        // text", they simply have no value.
+        const report = convertColumnDateValues(values.filter((value) => value !== '' && value != null));
+        if (report.converted > 0) {
+          conversionNotes.push(
+            `Converted ${report.converted} of ${report.nextValues.length} values in “${target.name}” to dates`
+            + (report.kept > 0 ? ` (${report.kept} kept as text)` : ''),
+          );
+        }
+      }
+
+      // The in-memory `columns` list still carries the pre-conversion types;
+      // pass the updated list so imported values for converted columns are
+      // normalised to ISO exactly like any other date column.
+      const importColumns = columns.map((column) => {
+        const choice = importConversions[column.id];
+        return choice && choice !== 'keep' ? { ...column, type: choice } : column;
+      });
       const result = await parseImportRows(sourceFile, {
         role,
-        columns,
+        columns: importColumns,
         fileName: sourceFileName ?? preview.fileName,
         actor: actor ? { id: actor.id, name: actor.name ?? actor.email } : undefined,
         createColumn,
+        newColumnTypes: importColumnTypes,
       });
       const records: SheetImportRecord[] = result.records.map((record) => ({
         data: record.data,
@@ -356,9 +475,12 @@ export function AdminSheetActions({
       setPreview(null);
       setSourceFile(null);
       setSourceFileName(null);
+      setImportColumnTypes({});
+      setImportConversions({});
       await refresh();
       onRepositoryChanged?.();
-      setStatus(`Imported ${records.length} mapped ${records.length === 1 ? 'record' : 'records'}.`);
+      const importedMessage = `Imported ${records.length} mapped ${records.length === 1 ? 'record' : 'records'}.`;
+      setStatus(conversionNotes.length > 0 ? `${importedMessage} ${conversionNotes.join(' ')}` : importedMessage);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to import records.');
     } finally {
@@ -451,6 +573,10 @@ export function AdminSheetActions({
             setSourceFileName(null);
           }}
           onImport={() => void confirmImport()}
+          columnTypes={importColumnTypes}
+          onColumnTypeChange={(header, type) => setImportColumnTypes((current) => ({ ...current, [header]: type }))}
+          conversions={importConversions}
+          onConversionChange={(columnId, choice) => setImportConversions((current) => ({ ...current, [columnId]: choice }))}
         />
       ) : null}
 
