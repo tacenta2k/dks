@@ -783,3 +783,49 @@ assertion, missing-function message, verbatim server refusal, remote-before-loca
 ordering, local mirror preserved on failure, one surviving `clear_audit` entry,
 Office rejection. SQL already shipped in `ARENA/sql/fix-entries-rls.sql`
 (section 7) + `supabase/schema.sql`.
+
+## 15. Round 3 — Batch D: Windows startup registration
+
+Findings:
+
+- DKS already used Electron's native `app.setLoginItemSettings`, **and** shipped
+  the unused `auto-launch` dependency (declared in `package.json`, never
+  imported). Two possible writers for the same Windows Run key is exactly how a
+  PC accumulates several startup entries for one app.
+- The uninstall/identity side was already correct: `app.setName('DKS')` +
+  `app.setAppUserModelId('com.dks.tracker')` run at module load, so a
+  registration is named `DKS`, not `electron`.
+- A development run used to call `setLoginItemSettings({openAtLogin:true})`,
+  which registers `node_modules\electron\dist\electron.exe` — a stale launch
+  target as soon as the folder moves.
+
+What changed:
+
+- `startupRegistration()` in `electron/main/startup.ts` decides whether to
+  register: **packaged builds only** (and only on Windows/macOS), always with
+  the explicit `process.execPath`, `openAsHidden: false`, and an inert marker
+  argument `--dks-startup=DKS` so a DKS entry is identifiable in the Startup
+  list. It never passes `--hidden`/`--autostart`.
+- `configureAutoLaunch()` in the main process now:
+  - writes nothing in a development run (it would either register
+    `electron.exe` or, with `openAtLogin:false`, silently delete the installed
+    app's autostart) and logs that decision instead;
+  - logs the resolved registration (`appName`, `execPath`, `openAtLogin`,
+    `willLaunchAtLogin`) so support can compare it with the Windows list
+    without touching the registry.
+- `auto-launch` removed from `package.json`; `package-lock.json` regenerated
+  and `npm ci --dry-run` verified in sync.
+- `ARENA/WINDOWS_STARTUP.md` documents the single mechanism, read-only
+  PowerShell inspection commands, how to identify a DKS entry from its command
+  path, and safe manual removal steps.
+
+Honest limits: the two `Aswin` entries cannot be attributed to DKS from this
+environment — their command paths must be read on the user's PC (see the
+read-only commands in `ARENA/WINDOWS_STARTUP.md`). The separate `utweb`
+registry entry is unrelated and is not touched. No registry entry, startup
+setting or shortcut is modified by the app or by this work.
+
+Tests: `tests/startup.test.ts` (6) — packaged registration points at the real
+exe and never hides the window, a development run registers nothing, an
+unsupported platform is not faked, and the tree keeps exactly one mechanism
+(no `auto-launch` dependency or client).

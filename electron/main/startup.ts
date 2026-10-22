@@ -1,12 +1,13 @@
-export interface StartHiddenContext {
-  /** `app.getLoginItemSettings()` result, injectable for tests/diagnostics. */
-  loginSettings?: LoginItemSettings;
-}
-
 export interface LoginItemSettings {
   wasOpenedAtLogin?: boolean;
   wasOpenedAsHidden?: boolean;
   openAtLogin?: boolean;
+  launchItems?: unknown[];
+}
+
+export interface StartHiddenContext {
+  /** `app.getLoginItemSettings()` result, injectable for tests/diagnostics. */
+  loginSettings?: LoginItemSettings;
 }
 
 /**
@@ -29,4 +30,70 @@ export function shouldStartHidden(
   _context: StartHiddenContext = {},
 ): boolean {
   return argv.some((argument) => ['--hidden', '--autostart', '--startup'].includes(argument));
+}
+
+export interface StartupRegistrationInput {
+  /** `app.isPackaged`. A development run must never register itself. */
+  isPackaged: boolean;
+  platform?: string;
+  /** `process.execPath` — the executable Windows will launch at sign-in. */
+  execPath: string;
+  /** `app.getName()`; must be DKS so the registry value is `DKS`. */
+  appName?: string;
+}
+
+export interface StartupRegistration {
+  /** Value for `app.setLoginItemSettings`. */
+  settings: {
+    openAtLogin: boolean;
+    openAsHidden: boolean;
+    path?: string;
+    args?: string[];
+  };
+  /** Why this decision was made (logged once at startup). */
+  reason: 'packaged' | 'development';
+}
+
+/**
+ * R3 batch D — one startup-registration mechanism, one identity.
+ *
+ * DKS registers itself with Electron's native `app.setLoginItemSettings`
+ * (which writes `HKCU\Software\Microsoft\Windows\CurrentVersion\Run\<app
+ * name>` on Windows). The `auto-launch` package is no longer a dependency: two
+ * mechanisms writing the same place is how a PC ends up with several "DKS"
+ * startup entries, and it also left an unused module in the shipped app.
+ *
+ * Rules:
+ *   - only a packaged build may register — `npm run dev` used to write a
+ *     registry entry pointing at `node_modules/electron/dist/electron.exe`,
+ *     which is a stale launch target the moment the repo moves;
+ *   - the registration always names the current executable explicitly;
+ *   - no `--hidden` argument: autostart opens the window normally.
+ */
+export function startupRegistration({
+  isPackaged,
+  platform = process.platform,
+  execPath,
+  appName = 'DKS',
+}: StartupRegistrationInput): StartupRegistration {
+  // Electron only implements login items on macOS and Windows. Anywhere else
+  // the call is a silent no-op, so do not pretend it was registered.
+  const supported = platform === 'win32' || platform === 'darwin';
+  if (!isPackaged || !supported) {
+    return {
+      settings: { openAtLogin: false, openAsHidden: false },
+      reason: 'development',
+    };
+  }
+
+  return {
+    settings: {
+      openAtLogin: true,
+      openAsHidden: false,
+      path: execPath,
+      // Some Electron/Windows combinations need the app name here as well.
+      args: [`--dks-startup=${encodeURIComponent(appName)}`],
+    },
+    reason: 'packaged',
+  };
 }

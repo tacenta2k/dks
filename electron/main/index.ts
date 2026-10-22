@@ -24,7 +24,7 @@ import {
   type UpdaterScheduler,
 } from './updater';
 import { createTray, destroyTray, type TrayActions } from './tray';
-import { shouldStartHidden } from './startup';
+import { shouldStartHidden, startupRegistration } from './startup';
 import type { Tray } from 'electron';
 import { createSqliteStore, type SqliteStore } from './sqlite';
 import {
@@ -177,17 +177,56 @@ function loadRenderer(window: BrowserWindow, options: CreateMainWindowOptions): 
   }
 }
 
+/**
+ * R3 batch D — startup registration.
+ *
+ * Exactly one mechanism is used: Electron's native `app.setLoginItemSettings`
+ * (Windows: the `HKCU\…\CurrentVersion\Run` value named after the app, i.e.
+ * `DKS`). The unused `auto-launch` dependency was removed from package.json so
+ * a second writer can never produce a duplicate startup entry.
+ *
+ * A development run does not write anything: `npm run dev` used to register
+ * `electron.exe`, which is a stale target the moment the checkout moves, and
+ * calling `setLoginItemSettings` with `openAtLogin: false` would silently
+ * remove the installed app's autostart. It only logs what it found.
+ */
 function configureAutoLaunch(enabled = true): AutoLaunchStatus {
+  const registration = startupRegistration({
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    execPath: process.execPath,
+    appName: app.getName(),
+  });
+
+  if (registration.reason === 'development') {
+    log.info('[dks] startup registration skipped (not a packaged build)', {
+      execPath: process.execPath,
+      appName: app.getName(),
+    });
+    return { supported: false, enabled: false };
+  }
+
   try {
     if (typeof app.setLoginItemSettings !== 'function') {
       return { supported: false, enabled: false };
     }
 
-    // SYNC-09: autostart opens the window; a hidden/tray-only startup made the
-    // app look like it never launched.
     app.setLoginItemSettings({
+      ...registration.settings,
       openAtLogin: enabled,
-      openAsHidden: false,
+    });
+
+    // Read-only diagnostic: this is the value Windows will run at sign-in for
+    // this executable. Written to the log so support can compare it with the
+    // Startup list without touching the registry.
+    const current = typeof app.getLoginItemSettings === 'function'
+      ? app.getLoginItemSettings({ path: process.execPath } as never)
+      : null;
+    log.info('[dks] startup registration', {
+      appName: app.getName(),
+      execPath: process.execPath,
+      openAtLogin: current?.openAtLogin ?? enabled,
+      willLaunchAtLogin: current?.executableWillLaunchAtLogin ?? null,
     });
 
     return { supported: true, enabled };
