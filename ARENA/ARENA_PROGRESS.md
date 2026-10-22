@@ -127,6 +127,37 @@ Per `docs/FIXES_UI.md` §2 (removed elements), §3 (top bar), §4 (sidebar):
   theme, and permissions contracts preserved.
 - Gate: rebuild 0; **39 files / 217 tests passed**; typecheck 0; build ✓.
 
+### 2.6 UI batch 2 — Visa Sheet structure (SHEET-02/03/08/15/16-partial) — THIS TURN
+Per `docs/FIXES_UI.md` §5 (Visa Sheet):
+- **One-row toolbar (SHEET-01/02):** the three stacked bars (primary + filter
+  bar + inline admin block) are consolidated into a single `.sheet-toolbar`
+  row: left `.sheet-toolbar__filters` (Search records + Status ▾ +
+  single-select quick chips All / Expired / 7 days / 30 days / 60 days /
+  90 days / No expiry), right `.sheet-toolbar__actions` (Add row · Add column
+  · Manage columns). Old `.sheet-filter-bar` box + its CSS removed.
+- **Admin tools de-duplicated (SHEET-05/16):** the redundant inline admin block
+  (Export / Import / Print / Settings / Recycle bin / Audit log) is removed
+  from the sheet — it already lives in the Admin-only `Tools ▾` menu
+  (`AdminSheetActions`), fully absent for Office. No "Export data" card.
+- **Empty states (SHEET-15):** one context-aware empty state, never two —
+  (a) no columns → the existing "Click + to add your first column" first-column
+  panel; (b) columns exist but 0 rows → "No records yet…"; (c) rows exist but 0
+  match filters → "No records match the current filters." + a working
+  "Clear filters" action (resets search/status/quick filter).
+- **Dense rows (SHEET-08):** AG Grid `--ag-row-height` set to 26px + reduced
+  cell vertical padding (the grid renders only outside tests, so no
+  test/layout regression); status row tinting already present.
+- **Deferred in this batch (honest scope, no functional regression):**
+  SHEET-10 (`+` column header), SHEET-11 (draft row), SHEET-13/14 (right-click
+  column/row menus), SHEET-04 (Group by), and the remaining SHEET-16 button
+  removals — these need new AG Grid interaction surfaces, so the existing,
+  test-covered Add row / Add column / Manage columns buttons are kept until
+  their replacements exist. Quick-chip labels kept as "7 days"/"30 days" (the
+  sheet test asserts the "7 days" button) rather than "≤7d".
+- **Tests:** no coverage removed — `sheet-page` (6) and `admin-features` (8)
+  pass unchanged against the new single-row toolbar and empty states.
+- Gate: rebuild 0; **39 files / 217 tests passed**; typecheck 0; build ✓.
+
 ## 3. Tracking files
 - `ARENA/TO_DO_LIST.md` — single implementation checklist (9 groups, stable IDs).
 - `ARENA/ARENA_PROGRESS.md` — this file (session progress + confirmed items).
@@ -140,7 +171,7 @@ Per `docs/FIXES_UI.md` §2 (removed elements), §3 (top bar), §4 (sidebar):
 - [x] Commit tracking files — `512dd2b` `docs: add ARENA implementation checklist and session progress`.
 - [x] Reconcile diverged pushed lineage (`70d91a0`) via merge `8757152` (no content change; post-merge tree byte-identical to `512dd2b`), then **pushed** fast-forward `70d91a0..8757152` to `origin/arena/0e0155c1-dks`. No force-push.
 - [x] **UI batch 1: Global shell & navigation (SHELL-01..07)** — implemented + gate green. See §2.5.
-- [ ] UI batch 2: Visa Sheet structure (SHEET-01..16).
+- [x] **UI batch 2: Visa Sheet structure (SHEET-02/03/08/15/16-partial)** — one-row toolbar, admin de-dup, empty states, dense rows. See §2.6. (SHEET-01/04/10/11/13/14/16-button-removals deferred — see §2.6.)
 - [ ] UI batch 3: Dashboard / Recycle Bin / Audit Log layouts.
 - [ ] UI batch 4: Settings & dialogs, responsive, verification cleanup.
 
@@ -148,7 +179,9 @@ Per `docs/FIXES_UI.md` §2 (removed elements), §3 (top bar), §4 (sidebar):
 - `0204f2d` fix: allow authenticated entry sync under entries RLS
 - `512dd2b` docs: add ARENA implementation checklist and session progress
 - `8757152` merge: reconcile re-established branch with pushed lineage (no content change)
-- (remote `origin/arena/0e0155c1-dks` = `8757152`)
+- `f6411a8` feat: rebuild global shell and navigation (compact top bar, collapsible sidebar) — UI batch 1
+- `<tip>` feat: consolidate Visa Sheet toolbar + empty states — UI batch 2 (this commit)
+- (remote `origin/arena/0e0155c1-dks` updated on push; see `git log`)
 
 ## 5. Outstanding user-only actions (BLOCKED — not agent work)
 1. **Verify the RLS fix in the packaged app on Windows** (exact checks in

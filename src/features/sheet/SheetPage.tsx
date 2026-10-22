@@ -4,7 +4,6 @@ import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 
-import { can } from '../../lib/permissions';
 import {
   DAYS_LEFT_COLUMN_ID,
   canDeleteColumn,
@@ -306,8 +305,48 @@ export function SheetPage({
         </section>
       ) : (
         <section className="sheet-workbench" aria-label="Visa records">
+          {/* FIXES_UI §5.2: one compact toolbar — search, status, quick chips,
+              and the record actions. The admin Export/Import/Print/Settings
+              buttons live in the Tools menu (AdminSheetActions), not here. */}
           <div className="sheet-toolbar">
-            <div className="sheet-toolbar__primary">
+            <div className="sheet-toolbar__filters">
+              <label className="sheet-search">
+                <span className="sheet-filter__label">Search</span>
+                <input
+                  aria-label="Search records"
+                  type="search"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="Search records"
+                />
+              </label>
+              <label className="sheet-status">
+                <span className="sheet-filter__label">Status</span>
+                <select aria-label="Filter by status" value={statusFilter} onChange={(event) => setStatusFilter(selectedValue(event))}>
+                  <option value="">All statuses</option>
+                  <option value="Valid">Valid</option>
+                  <option value="Expiring Soon">Expiring Soon</option>
+                  <option value="Urgent">Urgent</option>
+                  <option value="Expires today">Expires today</option>
+                  <option value="Expired">Expired</option>
+                  <option value="No expiry">No expiry</option>
+                </select>
+              </label>
+              <div className="sheet-quick-filters" role="group" aria-label="Quick filters">
+                {QUICK_FILTERS.filter((filter) => filter.id !== 'all').map((filter) => (
+                  <button
+                    key={filter.id}
+                    className={`sheet-filter-chip${quickFilter === filter.id ? ' sheet-filter-chip--active' : ''}`}
+                    type="button"
+                    aria-pressed={quickFilter === filter.id}
+                    onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="sheet-toolbar__actions">
               <button className="button button--primary" type="button" onClick={() => void addRow()}>
                 Add row
               </button>
@@ -318,55 +357,6 @@ export function SheetPage({
                 Manage columns
               </button>
             </div>
-            {!hideAdminActions ? (
-              <div className="sheet-toolbar__admin" aria-label="Admin sheet actions">
-                {can(role, 'export') ? <button className="button button--quiet" type="button">Export</button> : null}
-                {can(role, 'import') ? <button className="button button--quiet" type="button">Import</button> : null}
-                {can(role, 'print') ? <button className="button button--quiet" type="button">Print</button> : null}
-                {can(role, 'settings') ? <button className="button button--quiet" type="button">Settings</button> : null}
-                {can(role, 'recycleBin') ? <button className="button button--quiet" type="button">Recycle bin</button> : null}
-                {can(role, 'auditLog') ? <button className="button button--quiet" type="button">Audit log</button> : null}
-              </div>
-            ) : null}
-          </div>
-
-          <div className="sheet-filter-bar">
-            <label className="sheet-search">
-              <span>Search</span>
-              <input
-                aria-label="Search records"
-                type="search"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                placeholder="Search records"
-              />
-            </label>
-            <label>
-              Status
-              <select aria-label="Filter by status" value={statusFilter} onChange={(event) => setStatusFilter(selectedValue(event))}>
-                <option value="">All statuses</option>
-                <option value="Valid">Valid</option>
-                <option value="Expiring Soon">Expiring Soon</option>
-                <option value="Urgent">Urgent</option>
-                <option value="Expires today">Expires today</option>
-                <option value="Expired">Expired</option>
-                <option value="No expiry">No expiry</option>
-              </select>
-            </label>
-          </div>
-
-          <div className="sheet-quick-filters" aria-label="Quick filters">
-            {QUICK_FILTERS.filter((filter) => filter.id !== 'all').map((filter) => (
-              <button
-                key={filter.id}
-                className={`sheet-filter-chip${quickFilter === filter.id ? ' sheet-filter-chip--active' : ''}`}
-                type="button"
-                aria-pressed={quickFilter === filter.id}
-                onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
-              >
-                {filter.label}
-              </button>
-            ))}
           </div>
 
           {duplicatePassportValues.size > 0 ? (
@@ -482,7 +472,28 @@ export function SheetPage({
               </tbody>
             </table>
           </div>
-          {gridRows.length === 0 ? <p className="sheet-grid__empty">No records match the current filters.</p> : null}
+          {/* FIXES_UI §5.9: one context-aware empty state (no records yet vs
+              no filter match) — never two, and never covering the grid header. */}
+          {rows.length === 0 ? (
+            <div className="sheet-grid__empty" role="status">
+              <p>No records yet. Add your first row to start tracking.</p>
+            </div>
+          ) : gridRows.length === 0 ? (
+            <div className="sheet-grid__empty" role="status">
+              <p>No records match the current filters.</p>
+              <button
+                className="button button--quiet"
+                type="button"
+                onClick={() => {
+                  setSearch('');
+                  setStatusFilter('');
+                  setQuickFilter('all');
+                }}
+              >
+                Clear filters
+              </button>
+            </div>
+          ) : null}
         </section>
       )}
 
