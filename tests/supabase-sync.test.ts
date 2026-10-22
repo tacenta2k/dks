@@ -857,3 +857,187 @@ describe('sync failure surfacing (Blocker 3)', () => {
     expect(out).toContain('upsert failed');
   });
 });
+
+/**
+ * Entries INSERT RLS regression.
+ *
+ * Windows sync failed with:
+ *   "new row violates row-level security policy for table 'entries'"
+ *
+ * Root cause: local rows never persist `created_by` and the sync payload
+ * omitted it, so a fresh remote INSERT relied on the `created_by default
+ * auth.uid()` column default. When that default did not resolve to the
+ * session's UID, the entries INSERT policy (`created_by = auth.uid()`)
+ * rejected the row.
+ *
+ * Fix under test: `toRemoteEntry` stamps `created_by` from the authenticated
+ * session for FRESH inserts and omits it on updates (preserving the original
+ * creator). These tests run the real store + sync against a remote double that
+ * captures the exact entries payload, and evaluate it against a faithful copy
+ * of the policy in supabase/schema.sql.
+ */
+describe('entries insert authorization (RLS regression)', () => {
+  const ADMIN_UID = '846536af-f3c6-47c1-8559-d13442c1490a';
+  const OFFICE_UID = '2a959122-d789-4f2e-8fdf-958260c2e3f9';
+
+  function createSqliteLocal() {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    const snapshot = () => ({
+      rows: store.listRows(true).map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      deletedRows: store.listRows(true).filter((row) => row.deleted === true)
+        .map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      columns: store.listColumns(false).map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      deletedColumns: store.listColumns(true).filter((column) => column.deleted === true)
+        .map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      settings: store.getSettings(),
+      syncStatus: store.getSyncStatus() as unknown as DksLocalSnapshot['syncStatus'],
+    });
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => store.setSyncStatus(state as never) as unknown as DksLocalSnapshot['syncStatus'],
+      applyRemoteSnapshot: async (input) => {
+        for (const row of input.rows) store.applyRemoteEntry(row as never);
+        for (const column of input.columns) store.applyRemoteColumn(column as never);
+        return snapshot();
+      },
+      acknowledgeOutbox: async () => store.acknowledgeOutbox() as unknown as DksLocalSnapshot['syncStatus'],
+      recordConflict: async (conflict) => {
+        store.recordConflict({ ...conflict, resolved: false } as never);
+      },
+      listOutbox: async (input) => store.listOutbox(input?.status ?? 'all') as unknown as SupabaseOutboxItem[],
+      markOutboxSynced: (id) => {
+        store.markOutboxSynced(id);
+      },
+      markOutboxFailed: (id, message) => {
+        store.markOutboxFailed(id, message);
+      },
+      retryFailedOutbox: async () => store.retryFailedOutbox(),
+    };
+    return { store, local };
+  }
+
+  /** Remote double that returns seeded rows and captures the entries upsert payload. */
+  function capturingRemote(initial: Record<string, Record<string, unknown>[]> = {}) {
+    const tables: Record<string, Record<string, unknown>[]> = {};
+    for (const [table, rows] of Object.entries(initial)) {
+      tables[table] = rows.map((row) => ({ ...row }));
+    }
+    const entriesUpserts: Record<string, unknown>[] = [];
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({ data: tables[table] ?? [], error: null }),
+        upsert: async (values) => {
+          if (table === 'entries') {
+            for (const value of values) entriesUpserts.push({ ...value });
+            const rows = tables[table] ?? (tables[table] = []);
+            for (const value of values) {
+              const index = rows.findIndex((row) => row.id === value.id);
+              if (index >= 0) rows[index] = { ...rows[index], ...value };
+              else rows.push({ ...value });
+            }
+          }
+          return { data: values, error: null };
+        },
+      }),
+    };
+    return { client, entriesUpserts };
+  }
+
+  /**
+   * Faithful copy of the entries INSERT policy in supabase/schema.sql:
+   *   with check ((is_admin() or is_office()) and created_by = auth.uid() and not deleted)
+   */
+  function entriesInsertPolicyPasses(
+    payload: Record<string, unknown>,
+    authUid: string,
+    role: 'admin' | 'office',
+  ): boolean {
+    const isAdmin = role === 'admin';
+    const isOffice = role === 'office';
+    return (
+      (isAdmin || isOffice) &&
+      payload.created_by === authUid &&
+      payload.deleted === false
+    );
+  }
+
+  it('stamps created_by with the authenticated uid so an Admin insert passes the policy', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.createEntry({
+        id: 'aaaaaaaa-1111-4111-8111-000000000001',
+        data: { name: 'Ahmed' },
+        category: 'Employee',
+      });
+      const { client, entriesUpserts } = capturingRemote();
+      const result = await runSupabaseSync({ client, local, userId: ADMIN_UID });
+
+      expect(result.status).toBe('healthy');
+      expect(entriesUpserts.length).toBe(1);
+      const payload = entriesUpserts[0];
+      expect(payload.created_by).toBe(ADMIN_UID);
+      expect(payload.deleted).toBe(false);
+      expect(entriesInsertPolicyPasses(payload, ADMIN_UID, 'admin')).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('stamps created_by with the authenticated uid so an Office insert passes the policy', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.createEntry({
+        id: 'aaaaaaaa-2222-4222-8222-000000000002',
+        data: { name: 'Priya' },
+        category: 'Family',
+      });
+      const { client, entriesUpserts } = capturingRemote();
+      const result = await runSupabaseSync({ client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('healthy');
+      expect(entriesUpserts.length).toBe(1);
+      const payload = entriesUpserts[0];
+      expect(payload.created_by).toBe(OFFICE_UID);
+      expect(entriesInsertPolicyPasses(payload, OFFICE_UID, 'office')).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('does NOT re-stamp created_by when updating an existing remote row', async () => {
+    const rowId = 'aaaaaaaa-3333-4333-8333-000000000003';
+    const { store, local } = createSqliteLocal();
+    try {
+      // Remote already has the row, created earlier by the Admin.
+      const remoteSeed = {
+        entries: [{
+          id: rowId,
+          data: { name: 'Original' },
+          category: 'Employee',
+          deleted: false,
+          created_by: ADMIN_UID,
+          version: 1,
+          created_at: '2026-01-01T00:00:00.000Z',
+          updated_at: '2026-01-01T00:00:00.000Z',
+        }],
+      };
+      // Local copy edited later (newer updated_at) -> local wins -> UPDATE.
+      store.createEntry({ id: rowId, data: { name: 'Edited' }, category: 'Employee' });
+
+      const { client, entriesUpserts } = capturingRemote(remoteSeed);
+      await runSupabaseSync({ client, local, userId: OFFICE_UID });
+
+      expect(entriesUpserts.length).toBe(1);
+      const payload = entriesUpserts[0];
+      // created_by is omitted on updates so the original creator is preserved.
+      expect('created_by' in payload).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('policy simulator rejects a mismatched created_by (sanity check)', () => {
+    expect(entriesInsertPolicyPasses({ created_by: OFFICE_UID, deleted: false }, ADMIN_UID, 'admin')).toBe(false);
+    expect(entriesInsertPolicyPasses({ created_by: ADMIN_UID, deleted: true }, ADMIN_UID, 'admin')).toBe(false);
+  });
+});

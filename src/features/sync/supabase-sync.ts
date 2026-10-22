@@ -248,14 +248,14 @@ function outboxItemParts(item: SupabaseOutboxItem): {
 function toRemoteEntry(
   row: DksLocalRow,
   now: string,
-  options: { forceActive?: boolean; userId?: string | null } = {},
+  options: { forceActive?: boolean; forInsert?: boolean; userId?: string | null } = {},
 ): Record<string, unknown> {
   const source = row as unknown as Record<string, unknown>;
   const updated = stringValue(source.updated_at ?? source.updatedAt, now);
   const created = stringValue(source.created_at ?? source.createdAt, updated);
   const deleted = options.forceActive ? false : row.deleted === true;
   const deletedAtRaw = source.deleted_at ?? source.deletedAt ?? null;
-  return {
+  const payload: Record<string, unknown> = {
     id: row.id,
     data: row.data,
     // The remote schema still constrains category to its seeded values until
@@ -272,6 +272,16 @@ function toRemoteEntry(
     updated_at: updated,
     updated_by: uuidOrNull(source.updated_by ?? source.updatedBy ?? options.userId),
   };
+  // The entries INSERT policy requires `created_by = auth.uid()`. Local rows
+  // never persist created_by, so on a FRESH insert we stamp the authenticated
+  // session explicitly instead of relying on the column default — relying on
+  // the default is what left the insert failing RLS with "new row violates
+  // row-level security policy". On updates we omit created_by entirely so the
+  // upsert never reassigns an existing row's original creator.
+  if (options.forInsert) {
+    payload.created_by = uuidOrNull(options.userId);
+  }
+  return payload;
 }
 
 function toLocalEntry(remote: Record<string, unknown>): Record<string, unknown> {
@@ -525,15 +535,23 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
           payload: toRemoteEntry(local, now(), {
             userId: options.userId ?? null,
             forceActive: requiresActiveInsert,
+            // A row the remote has never seen is an INSERT (created_by must be
+            // stamped); a row that already exists is an UPDATE (preserve it).
+            forInsert: !remote,
           }),
           softDeleted,
           requiresActiveInsert,
         });
         if (requiresActiveInsert) {
           // Follow-up pass: apply the deletion on the now-existing remote row.
+          // This is an UPDATE (the active insert above just created it), so do
+          // not re-stamp created_by.
           entryPushes.push({
             id,
-            payload: toRemoteEntry(local, now(), { userId: options.userId ?? null }),
+            payload: toRemoteEntry(local, now(), {
+              userId: options.userId ?? null,
+              forInsert: false,
+            }),
             softDeleted: true,
             requiresActiveInsert: false,
           });
