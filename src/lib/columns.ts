@@ -65,16 +65,50 @@ export function isSupportedColumnType(value: unknown): value is ColumnType {
   return typeof value === 'string' && (COLUMN_TYPES as readonly string[]).includes(value);
 }
 
+/**
+ * Is this column the generated, read-only "Days Left" SYSTEM column?
+ *
+ * Protection is strictly by column id (`col.id === 'daysLeft'`) — NEVER by
+ * name. A previously persisted user column that happens to be NAMED "Days
+ * Left" (e.g. `days_left` from an older import/layout) must stay deletable;
+ * matching on the name blocked its deletion forever.
+ */
 export function isDaysLeftColumn(
   column: Pick<ColumnDefinition, 'id' | 'name'> | null | undefined,
 ): boolean {
-  if (!column) {
-    return false;
-  }
+  return column?.id === DAYS_LEFT_COLUMN_ID;
+}
 
-  const id = normaliseIdentity(column.id).replace(/[ _-]/g, '');
-  const name = normaliseIdentity(column.name).replace(/[ _-]/g, '');
-  return id === 'daysleft' || name === 'daysleft';
+/** Exact-id protection; clearer name for new call sites. */
+export const isSystemDaysLeftColumn = isDaysLeftColumn;
+
+/**
+ * "Days Left" as a NAME is reserved for the generated system column: the
+ * column wizard must refuse it and imports must never persist an incoming
+ * "Days Left" header as a user column. Used for NAME checks only — never for
+ * delete protection (that is id-exact, see above).
+ */
+export function isReservedSystemColumnName(value: unknown): boolean {
+  return typeof value === 'string'
+    && normaliseIdentity(value).replace(/[ _-]/g, '') === 'daysleft';
+}
+
+/**
+ * A LIVE primary-expiry is the only primary flag allowed to block deletion:
+ * the column must still be active (not soft-deleted) and of type date_expiry.
+ * Stale `is_primary_expiry` marks on deleted or non-expiry columns are junk
+ * (auto-healed elsewhere) and must never block a delete.
+ */
+export function isLivePrimaryExpiryColumn(
+  column: Pick<ColumnDefinition, 'type' | 'deleted'> & {
+    isPrimaryExpiry?: boolean;
+    is_primary_expiry?: boolean;
+  } | null | undefined,
+): boolean {
+  return !!column
+    && column.type === 'date_expiry'
+    && column.deleted !== true
+    && (column.isPrimaryExpiry === true || column.is_primary_expiry === true);
 }
 
 /**
@@ -193,20 +227,38 @@ export function activeRowHasColumnValue(
   });
 }
 
+/**
+ * Why a column currently cannot be deleted, or null when it can.
+ *   - 'system'      → the generated Days Left column (id `daysLeft`)
+ *   - 'primary'     → the LIVE date_expiry primary
+ *   - 'office-data' → an office role asked to delete a populated column
+ */
+export function columnDeleteBlockReason(
+  column: ColumnDefinition,
+  role: 'admin' | 'office' | string,
+  rows: readonly GridRowLike[] = [],
+): 'system' | 'primary' | 'office-data' | null {
+  if (isDaysLeftColumn(column)) {
+    return 'system';
+  }
+  if (isLivePrimaryExpiryColumn(column)) {
+    return 'primary';
+  }
+  if (role === 'admin') {
+    return null;
+  }
+  if (role === 'office') {
+    return activeRowHasColumnValue(rows, column) ? 'office-data' : null;
+  }
+  return 'office-data';
+}
+
 /** Office users may soft-delete only empty, non-protected user columns. */
 export function canDeleteColumnForOffice(
   column: ColumnDefinition,
   activeRows: readonly GridRowLike[],
 ): boolean {
-  if (
-    isDaysLeftColumn(column)
-    || column.isPrimaryExpiry === true
-    || column.is_primary_expiry === true
-  ) {
-    return false;
-  }
-
-  return !activeRowHasColumnValue(activeRows, column);
+  return columnDeleteBlockReason(column, 'office', activeRows) === null;
 }
 
 export function canDeleteColumn(
@@ -214,15 +266,7 @@ export function canDeleteColumn(
   role: 'admin' | 'office' | string,
   rows: readonly GridRowLike[] = [],
 ): boolean {
-  if (
-    isDaysLeftColumn(column)
-    || column.isPrimaryExpiry === true
-    || column.is_primary_expiry === true
-  ) {
-    return false;
-  }
-
-  return role === 'admin' || (role === 'office' && canDeleteColumnForOffice(column, rows));
+  return columnDeleteBlockReason(column, role, rows) === null;
 }
 
 export const canOfficeDeleteColumn = canDeleteColumnForOffice;

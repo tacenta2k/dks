@@ -393,9 +393,28 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * The generated "Days Left" system column is protected by ID only
+ * (`col.id === 'daysLeft'`), never by name: a legacy persisted user column
+ * NAMED "Days Left" (e.g. id `days_left`) must remain deletable.
+ */
+const SYSTEM_DAYS_LEFT_COLUMN_ID = 'daysLeft';
+
 function isDaysLeftColumn(column: Pick<LocalColumnDefinition, 'id' | 'name'>): boolean {
-  const normalize = (value: string) => value.trim().toLowerCase().replace(/[ _-]/g, '');
-  return normalize(column.id) === 'daysleft' || normalize(column.name) === 'daysleft';
+  return column.id === SYSTEM_DAYS_LEFT_COLUMN_ID;
+}
+
+/**
+ * Only a LIVE primary expiry (active date_expiry column flagged primary) may
+ * block deletion; stale marks on deleted or non-expiry columns are healed,
+ * never honoured.
+ */
+function isLivePrimaryExpiryColumn(
+  column: Pick<LocalColumnDefinition, 'type' | 'deleted' | 'isPrimaryExpiry'>,
+): boolean {
+  return column.type === 'date_expiry'
+    && column.deleted !== true
+    && column.isPrimaryExpiry === true;
 }
 
 function hasColumnValue(value: unknown): boolean {
@@ -404,10 +423,10 @@ function hasColumnValue(value: unknown): boolean {
 }
 
 function canDeleteColumnForOffice(
-  column: Pick<LocalColumnDefinition, 'id' | 'name' | 'isPrimaryExpiry'>,
+  column: Pick<LocalColumnDefinition, 'id' | 'name' | 'type' | 'deleted' | 'isPrimaryExpiry'>,
   rows: readonly GridRowLike[],
 ): boolean {
-  if (isDaysLeftColumn(column) || column.isPrimaryExpiry === true) {
+  if (isDaysLeftColumn(column) || isLivePrimaryExpiryColumn(column)) {
     return false;
   }
 
@@ -450,6 +469,14 @@ export class SqliteStore {
     this.idFactory = normalizedOptions.idFactory ?? normalizedOptions.idGenerator ?? randomUUID;
     this.bindInstanceMethods();
     this.applyMigrations();
+    // Startup self-heal: stale primary-expiry marks (deleted/non-expiry
+    // columns, "no expiry column but something still flagged") are repaired
+    // before any read or delete guard can trip over them.
+    try {
+      this.repairPrimaryExpiry(this.now());
+    } catch {
+      // Healing is best effort; the per-operation repair still runs.
+    }
   }
 
   /**
@@ -1086,12 +1113,34 @@ export class SqliteStore {
     return result;
   }
 
+  /**
+   * Self-heal the primary-expiry invariant in the LOCAL data:
+   *   1. clear every stale mark (deleted columns and non-date_expiry columns
+   *      may never carry is_primary_expiry — those marks used to block the
+   *      column's own deletion with the misleading "primary expiry" error);
+   *   2. when no live date_expiry column exists, NO column may stay marked
+   *      primary (returns "none" instead of leaving the junk flag);
+   *   3. otherwise exactly one live date_expiry column is primary — the first
+   *      by position when the current marks are zero or ambiguous.
+   * Runs on startup and after every column change, including before delete
+   * checks, so a guard can never be fooled by the state it is healing.
+   */
   private repairPrimaryExpiry(timestamp: string): void {
+    this.database.prepare(
+      `UPDATE columns
+          SET is_primary_expiry = 0, updated_at = ?
+        WHERE is_primary_expiry = 1
+          AND (deleted = 1 OR type <> 'date_expiry')`,
+    ).run(timestamp);
+
     const activeExpiry = this.database.prepare(
       'SELECT id FROM columns WHERE deleted = 0 AND type = \'date_expiry\' ORDER BY position, id',
     ).all() as { id: string }[];
 
     if (activeExpiry.length === 0) {
+      this.database.prepare(
+        'UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE is_primary_expiry = 1',
+      ).run(timestamp);
       return;
     }
 
@@ -1102,7 +1151,8 @@ export class SqliteStore {
       return;
     }
 
-    this.database.prepare('UPDATE columns SET is_primary_expiry = 0 WHERE deleted = 0 AND type = \'date_expiry\'').run();
+    this.database.prepare('UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE deleted = 0 AND type = \'date_expiry\'')
+      .run(timestamp);
     this.database.prepare('UPDATE columns SET is_primary_expiry = 1, updated_at = ? WHERE id = ?')
       .run(timestamp, activeExpiry[0].id);
   }
@@ -1119,8 +1169,12 @@ export class SqliteStore {
     id: string,
     role: 'admin' | 'office' | string,
   ): boolean {
+    this.ensureOpen();
+    // Self-heal before judging: stale primary marks (deleted/non-expiry
+    // columns, no live expiry) must never block this deletion.
+    this.repairPrimaryExpiry(this.now());
     const column = this.getColumn(id);
-    if (!column || isDaysLeftColumn(column) || column.isPrimaryExpiry === true) {
+    if (!column || isDaysLeftColumn(column) || isLivePrimaryExpiryColumn(column)) {
       return false;
     }
     if (role === 'admin') {
@@ -1487,37 +1541,49 @@ export class SqliteStore {
   public updateNotification(id: number | string, patch: NotificationPatch): NotificationRecord | null {
     this.ensureOpen();
     const requested = String(id);
-    const current = this.listNotifications().find((notification) => (
+    // A logical alert can be persisted by several physical rows (historical
+    // duplicate inserts). State patches (read / dismissed / payload) must
+    // land on EVERY matching row, or an untouched duplicate resurrects the
+    // alert on the next load.
+    const matches = this.listNotifications().filter((notification) => (
       String(notification.id) === requested
       || notification.payload.id === id
       || notification.payload.id === requested
       || notification.payload.dedupeKey === requested
     ));
+    const current = matches[0];
     if (!current) {
       return null;
     }
 
-    const nextPayload = patch.payload ? { ...current.payload, ...patch.payload } : current.payload;
-    const nextRead = patch.read ?? current.read;
-    const nextDismissed = patch.dismissed ?? current.dismissed;
     const updatedAt = this.now();
-    this.database.prepare(`
+    const update = this.database.prepare(`
       UPDATE notifications
          SET payload = ?, read = ?, dismissed = ?, updated_at = ?
        WHERE id = ?
-    `).run(
-      encode(nextPayload),
-      nextRead ? 1 : 0,
-      nextDismissed ? 1 : 0,
-      updatedAt,
-      current.id,
-    );
+    `);
+    const apply = this.database.transaction(() => {
+      for (const match of matches) {
+        const nextPayload = patch.payload
+          ? { ...match.payload, ...patch.payload }
+          : match.payload;
+        update.run(
+          encode(nextPayload),
+          (patch.read ?? match.read) ? 1 : 0,
+          (patch.dismissed ?? match.dismissed) ? 1 : 0,
+          updatedAt,
+          match.id,
+        );
+      }
+    });
+    apply();
 
+    const nextPayload = patch.payload ? { ...current.payload, ...patch.payload } : current.payload;
     return {
       ...current,
       payload: nextPayload,
-      read: nextRead,
-      dismissed: nextDismissed,
+      read: patch.read ?? current.read,
+      dismissed: patch.dismissed ?? current.dismissed,
       updatedAt,
     };
   }

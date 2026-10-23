@@ -29,8 +29,11 @@ import {
 } from '../features/settings/settings-service';
 import {
   createSnooze,
+  dedupeNotifications,
   evaluateAlerts,
   evaluateSummaryNotifications,
+  isNotificationSnoozed,
+  notificationStableKey,
   snoozeUntil,
   type AlertSnooze,
   type NotificationRecord,
@@ -296,7 +299,14 @@ export function App({
       column.isPrimaryExpiry === true || column.is_primary_expiry === true
     ));
     const selectedPrimary = columns.find((column) => column.id === settings.primaryExpiryColumnId);
-    if (selectedPrimary && currentPrimary?.id !== selectedPrimary.id) {
+    // Auto-heal a stale settings.primaryExpiryColumnId: only a live
+    // date_expiry column may become/stay primary. A settings value pointing
+    // at a deleted or non-expiry column must never write primary marks.
+    const selectedPrimaryIsLiveExpiry = !!selectedPrimary
+      && selectedPrimary.type === 'date_expiry'
+      && selectedPrimary.deleted !== true
+      && selectedPrimary.visible !== false;
+    if (selectedPrimaryIsLiveExpiry && currentPrimary?.id !== selectedPrimary.id) {
       for (const column of columns.filter((candidate) => candidate.type === 'date_expiry')) {
         const primary = column.id === selectedPrimary.id;
         await sheetRepository.updateColumn(column.id, {
@@ -649,17 +659,56 @@ export function App({
     }
   };
 
-  const handleNotificationDismiss = (id: string) => {
-    setNotifications((current) => current.map((record) => (
-      record.id === id ? { ...record, dismissed: true } : record
-    )));
-    void persistNotification(id, { dismissed: true, read: true });
-    if (id.startsWith('admin-notification-') && authService.authClient) {
-      void dismissAdminNotification(
-        authService.authClient as unknown as AdminNotificationClient,
-        id,
-      ).catch(() => undefined);
+  /**
+   * Dismiss is addressed by the alert's STABLE KEY (kind + rowId/entryId +
+   * milestone), not by one record id: every duplicate record of the same
+   * logical alert is dismissed together — in React state, in the local SQLite
+   * cache and, for admin notifications, on the server. (Passing a bare record
+   * id still works: ids match here too.)
+   */
+  const dismissNotificationRecords = (records: readonly NotificationRecord[]) => {
+    const dismissedAt = records.map((record) => ({ ...record, dismissed: true, read: true }));
+    setNotifications((current) => {
+      const dismissedIds = new Set(records.map((record) => record.id));
+      return current.map((record) => (
+        dismissedIds.has(record.id) ? { ...record, dismissed: true, read: true } : record
+      ));
+    });
+    for (const record of dismissedAt) {
+      void persistNotification(record.id, { dismissed: true, read: true });
+      if (record.id.startsWith('admin-notification-') && authService.authClient) {
+        void dismissAdminNotification(
+          authService.authClient as unknown as AdminNotificationClient,
+          record.id,
+        ).catch(() => undefined);
+      }
     }
+  };
+
+  const handleNotificationDismiss = (idOrKey: string) => {
+    const matches = notifications.filter((record) => (
+      record.id === idOrKey || notificationStableKey(record) === idOrKey
+    ));
+    if (matches.length === 0) {
+      return;
+    }
+    dismissNotificationRecords(matches);
+  };
+
+  // Clear all: every alert currently listed disappears at once; the popover
+  // shows "No notifications" immediately and the dismissal is durable.
+  const handleNotificationClearAll = () => {
+    const visible = dedupeNotifications(notifications).filter((record) => (
+      record.dismissed !== true && !isNotificationSnoozed(record)
+    ));
+    const keys = new Set(visible.map((record) => notificationStableKey(record)));
+    const matches = notifications.filter((record) => (
+      keys.has(notificationStableKey(record)) && record.dismissed !== true
+    ));
+    if (matches.length === 0) {
+      return;
+    }
+    dismissNotificationRecords(matches);
   };
 
   const handleNotificationView = (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => {
@@ -753,6 +802,7 @@ export function App({
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}
       onNotificationDismiss={handleNotificationDismiss}
+      onNotificationClearAll={handleNotificationClearAll}
       onNotificationView={handleNotificationView}
       onNotificationRestore={handleNotificationRestore}
       onNotificationSnooze={handleNotificationSnooze}

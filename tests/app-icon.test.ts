@@ -324,21 +324,35 @@ describe('app icon resolution rules (R3 batch H)', () => {
   });
 });
 
-describe('app branding surfaces (R3 batch H)', () => {
+describe('app branding surfaces (R3 batch H + final logo polish)', () => {
   const read = (file: string) => readFileSync(resolve(ROOT, file), 'utf8');
 
-  it('shows the real mark in the sidebar and on the sign-in card', () => {
+  it('shows the official full logo in the sidebar and on the sign-in card — never the cropped mark', () => {
     const shell = read('src/renderer/components/AppShell.tsx');
-    expect(shell).toContain("import dksMark from '../../assets/dks-mark.png'");
-    expect(shell).toContain('brand-mark--image');
-    expect(shell).toContain('<img src={dksMark}');
-    // The old letter tile is gone.
+    expect(shell).toContain("import dksLogo from '../../assets/dks-logo.png'");
+    expect(shell).toContain("import dksLogoDark from '../../assets/dks-logo-dark.png'");
+    expect(shell).toContain('brand-mark--logo');
+    expect(shell).toContain('brand-logo__img--on-light');
+    expect(shell).toContain('brand-logo__img--on-dark');
+    // Neither a generated "D" crop nor a letter tile powers the sidebar brand.
+    expect(shell).not.toContain('dks-mark');
     expect(shell).not.toContain('<span>D</span>');
 
     const auth = read('src/features/auth/AuthScreen.tsx');
-    expect(auth).toContain("import dksMark from '../../assets/dks-mark.png'");
-    expect(auth).toContain('brand-mark--image');
-    expect(auth).toContain('<img src={dksMark}');
+    expect(auth).toContain("import dksLogo from '../../assets/dks-logo.png'");
+    expect(auth).toContain("import dksLogoDark from '../../assets/dks-logo-dark.png'");
+    expect(auth).toContain('brand-logo--sign-in');
+    expect(auth).toContain('brand-logo__img--on-light');
+    expect(auth).toContain('brand-logo__img--on-dark');
+    expect(auth).not.toContain('dks-mark');
+
+    // Theme swap happens in CSS: dark mode uses the lightened variant, so the
+    // lockup never sits on a white rectangular plate in either theme.
+    const css = read('src/renderer/styles.css');
+    expect(css).toContain(":root[data-theme='dark'] .brand-logo__img--on-light");
+    expect(css).toContain(":root[data-theme='dark'] .brand-logo__img--on-dark");
+    // Collapsed ~56px rail: the same artwork scaled with object-contain.
+    expect(css).toContain(".sidebar[data-collapsed='true'] .brand-mark--logo");
   });
 
   it('uses the official logo in About, with a dark-mode variant', () => {

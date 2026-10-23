@@ -2,6 +2,7 @@ import { useMemo, useState, type FormEvent } from 'react';
 
 import {
   COLUMN_TYPES,
+  isReservedSystemColumnName,
   normalizeColumns,
   type ColumnDefinition,
   type ColumnType,
@@ -95,6 +96,13 @@ export function ColumnWizard({
     const trimmedName = name.trim();
     if (!trimmedName) {
       setError('Column name is required.');
+      return;
+    }
+    // "Days Left" is reserved for the generated, read-only system column —
+    // persisting a user column with that name/id produces a duplicate
+    // right-pinned column that can never be deleted.
+    if (isReservedSystemColumnName(trimmedName)) {
+      setError('"Days Left" is a generated system column and cannot be added. Choose a different name.');
       return;
     }
     if (type === 'dropdown' && optionValues.length === 0) {

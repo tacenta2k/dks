@@ -2,7 +2,8 @@ import { FormEvent, useRef, useState } from 'react';
 
 import { isSupabaseConfigured } from '../../lib/supabase';
 import type { AuthStatus, SupabaseHealth } from './auth-types';
-import dksMark from '../../assets/dks-mark.png';
+import dksLogo from '../../assets/dks-logo.png';
+import dksLogoDark from '../../assets/dks-logo-dark.png';
 
 export interface AuthScreenProps {
   onSignIn?: (email: string, password: string) => Promise<void> | void;
@@ -73,8 +74,27 @@ export function AuthScreen({
   return (
     <main className="login-page" aria-labelledby="login-title">
       <section className="login-card" data-auth-status={authStatus}>
-        <div className="brand-mark brand-mark--image brand-mark--large" aria-hidden="true">
-          <img src={dksMark} alt="" width={56} height={56} draggable={false} />
+        {/* The official DKS logo (full lockup from build/logo-source.png —
+            never the cropped mark). The dark variant is the same artwork
+            lightened, so no white plate shows behind it in dark mode. */}
+        <div className="brand-logo brand-logo--sign-in">
+          <img
+            className="brand-logo__img brand-logo__img--on-light"
+            src={dksLogo}
+            alt="DKS — Software for businesses"
+            width={196}
+            height={87}
+            draggable={false}
+          />
+          <img
+            className="brand-logo__img brand-logo__img--on-dark"
+            src={dksLogoDark}
+            alt=""
+            aria-hidden="true"
+            width={196}
+            height={87}
+            draggable={false}
+          />
         </div>
         <p className="eyebrow">DKS workspace</p>
         <h1 id="login-title">Sign in to DKS</h1>

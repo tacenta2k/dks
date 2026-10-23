@@ -50,3 +50,27 @@ describe('local notification serialization', () => {
     })).toBeNull();
   });
 });
+
+describe('SqliteStore duplicate-proof notification state', () => {
+  it('persists dismiss/read onto EVERY duplicate row of the same alert', async () => {
+    const { createSqliteStore } = await import('../electron/main/sqlite');
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      // Two physical rows for one logical alert (historical duplicate path).
+      const input = toLocalNotificationInput(record);
+      const first = store.addNotification(input);
+      const second = store.addNotification(input);
+
+      const updated = store.updateNotification(record.dedupeKey, { dismissed: true, read: true });
+      expect(updated?.dismissed).toBe(true);
+
+      const all = store.listNotifications();
+      expect(all).toHaveLength(2);
+      expect(all.map((row) => row.id).sort()).toEqual([first.id, second.id].sort());
+      // No untouched twin can resurrect the alert on the next load.
+      expect(all.every((row) => row.dismissed === true && row.read === true)).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+});

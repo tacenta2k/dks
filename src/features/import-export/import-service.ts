@@ -1,6 +1,6 @@
 import * as XLSX from 'xlsx';
 
-import type { ColumnDefinition } from '../../lib/columns';
+import { isReservedSystemColumnName, type ColumnDefinition } from '../../lib/columns';
 import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
 import { can } from '../../lib/permissions';
 import type { Role } from '../auth/auth-types';
@@ -414,6 +414,12 @@ function mappingsForHeaders(
     if (!header.trim()) {
       return;
     }
+    // The generated "Days Left" system column must never be persisted as a
+    // user column: an incoming "Days Left" header is skipped entirely — never
+    // mapped onto a legacy column of the same name and never auto-created.
+    if (isReservedSystemColumnName(header)) {
+      return;
+    }
     const column = columnForHeader(header, columns);
     if (column) {
       mappings.push({ header, sourceIndex, columnId: column.id, columnName: column.name });
@@ -435,7 +441,9 @@ function previewRows(
     columns.find((column) => column.id === mapping.columnId)?.type,
   ]));
   return rawRows.slice(0, 20).map((row) => headers.reduce<Record<string, unknown>>((record, header, index) => {
-    if (header.trim()) {
+    // Reserved system headers (the generated Days Left column) are neither
+    // imported nor previewed as importable data.
+    if (header.trim() && !isReservedSystemColumnName(header)) {
       record[header] = previewCell(row[index] ?? '', typeByHeader.get(header));
     }
     return record;
@@ -451,7 +459,7 @@ function makePreview(parsed: ParsedSource, columns: readonly ColumnDefinition[])
   const suggestedColumnTypes: ImportDateSuggestion[] = [];
   const dateMappedToText: ImportDateMappedToText[] = [];
   headers.forEach((header, sourceIndex) => {
-    if (!header.trim()) {
+    if (!header.trim() || isReservedSystemColumnName(header)) {
       return;
     }
     const samples = sampleHeaderValues(dataRows, sourceIndex);

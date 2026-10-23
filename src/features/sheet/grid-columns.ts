@@ -96,6 +96,21 @@ export function buildGridRows(
   };
 }
 
+/**
+ * Whether a data column is editable for the given role. Primary status
+ * controls which expiry drives derived values, not whether an office user may
+ * edit that expiry value. Shared by the grid definitions and the Tab
+ * navigation contract (both must agree on what is editable).
+ */
+export function isColumnEditableForRole(
+  column: ColumnDefinition,
+  role: 'admin' | 'office' | string,
+): boolean {
+  return column.type === 'date_expiry'
+    || !(column.isPrimaryExpiry === true || column.is_primary_expiry === true)
+    || role === 'admin';
+}
+
 function diagnosticClass(
   params: CellClassParams<SheetGridRendererData>,
   columnId: string,
@@ -120,9 +135,7 @@ export function buildGridColumns(
         headerTooltip: column.isPrimaryExpiry ? 'Primary expiry date' : column.name,
         // Primary status controls which expiry drives derived values, not whether
         // an office user may edit that expiry value.
-        editable: column.type === 'date_expiry'
-          || !(column.isPrimaryExpiry === true || column.is_primary_expiry === true)
-          || role === 'admin',
+        editable: isColumnEditableForRole(column, role),
         sortable: true,
         filter: true,
         resizable: true,

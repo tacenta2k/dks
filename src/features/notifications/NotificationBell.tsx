@@ -1,18 +1,23 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
 import { formatDisplayDate, formatLocalDateTime } from '../../lib/date';
-import type {
-  ExpiryNotificationRecord,
-  NotificationRecord,
-  OfficeDeleteNotificationRecord,
-  SnoozeDuration,
-  SummaryNotificationRecord,
+import {
+  dedupeNotifications,
+  isNotificationSnoozed,
+  notificationStableKey,
+  type ExpiryNotificationRecord,
+  type NotificationRecord,
+  type OfficeDeleteNotificationRecord,
+  type SnoozeDuration,
+  type SummaryNotificationRecord,
 } from './alert-service';
 
 export interface NotificationBellProps {
   notifications: readonly NotificationRecord[];
   onMarkRead?: (id: string) => void;
+  /** Called with the logical alert's STABLE KEY (every duplicate is dismissed). */
   onDismiss?: (id: string) => void;
+  onClearAll?: () => void;
   onView?: (record: OfficeDeleteNotificationRecord) => void;
   onRestore?: (record: OfficeDeleteNotificationRecord) => void;
   onSnooze?: (record: NotificationRecord, duration: SnoozeDuration) => void;
@@ -51,11 +56,7 @@ function expiryLabel(record: ExpiryNotificationRecord): string {
 }
 
 function isSnoozed(record: NotificationRecord): boolean {
-  return (
-    record.kind === 'expiry'
-    && typeof record.snoozedUntil === 'string'
-    && new Date(record.snoozedUntil).getTime() > Date.now()
-  );
+  return isNotificationSnoozed(record);
 }
 
 function primaryLine(record: NotificationRecord): string {
@@ -73,7 +74,8 @@ function secondaryLine(record: NotificationRecord): string {
 }
 
 export function unreadNotificationCount(notifications: readonly NotificationRecord[]): number {
-  return notifications.filter((notification) => (
+  // Logical alerts only: duplicate records of the same alert count once.
+  return dedupeNotifications(notifications).filter((notification) => (
     notification.read !== true && notification.dismissed !== true && !isSnoozed(notification)
   )).length;
 }
@@ -101,14 +103,17 @@ export function NotificationBell({
   notifications,
   onMarkRead,
   onDismiss,
+  onClearAll,
   onView,
   onRestore,
   onSnooze,
 }: NotificationBellProps) {
   const [open, setOpen] = useState(false);
   const unreadCount = unreadNotificationCount(notifications);
+  // Dedupe FIRST (one card per logical alert, newest state wins), then hide
+  // dismissed/snoozed — so the surviving representative decides visibility.
   const visible = useMemo(
-    () => notifications.filter((notification) => (
+    () => dedupeNotifications(notifications).filter((notification) => (
       notification.dismissed !== true && !isSnoozed(notification)
     )),
     [notifications],
@@ -166,6 +171,17 @@ export function NotificationBell({
             <span className="notification-bell__count">
               {unreadCount} unread
             </span>
+            {/* Compact one-tap clear: dismisses everything currently listed
+                (persisted via the same Dismiss plumbing per alert). */}
+            {visible.length > 0 && onClearAll ? (
+              <button
+                className="notification-bell__clear-all"
+                type="button"
+                onClick={onClearAll}
+              >
+                Clear all
+              </button>
+            ) : null}
           </header>
 
           {visible.length === 0 ? (
@@ -174,13 +190,16 @@ export function NotificationBell({
             <ul className="notification-bell__list">
               {visible.map((notification) => {
                 const unread = notification.read !== true;
+                // Dismiss always speaks the logical alert key: every duplicate
+                // record for the same alert disappears at once.
+                const stableKey = notificationStableKey(notification);
                 const snoozeOptions = notification.kind === 'expiry'
                   ? snoozeOptionsForDaysLeft(notification.daysLeft)
                   : [];
                 return (
                   <li
                     className={`notification-bell__item${unread ? ' notification-bell__item--unread' : ''}`}
-                    key={notification.id}
+                    key={stableKey}
                     data-kind={notification.kind}
                   >
                     <p className="notification-bell__message">{primaryLine(notification)}</p>
@@ -206,13 +225,6 @@ export function NotificationBell({
                               Restore
                             </button>
                           ) : null}
-                          <button
-                            className="notification-bell__action"
-                            type="button"
-                            onClick={() => onDismiss?.(notification.id)}
-                          >
-                            Dismiss
-                          </button>
                         </>
                       ) : (
                         <>
@@ -237,17 +249,17 @@ export function NotificationBell({
                               </button>
                             ))
                             : null}
-                          {notification.kind !== 'expiry' ? (
-                            <button
-                              className="notification-bell__action"
-                              type="button"
-                              onClick={() => onDismiss?.(notification.id)}
-                            >
-                              Dismiss
-                            </button>
-                          ) : null}
                         </>
                       )}
+                      {/* EVERY item keeps a compact Dismiss — including expiry
+                          alerts, read state and daysLeft <= 0 alike. */}
+                      <button
+                        className="notification-bell__action"
+                        type="button"
+                        onClick={() => onDismiss?.(stableKey)}
+                      >
+                        Dismiss
+                      </button>
                     </div>
                   </li>
                 );

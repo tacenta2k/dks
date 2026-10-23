@@ -5,6 +5,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
@@ -15,7 +16,7 @@ import 'ag-grid-community/styles/ag-theme-quartz.css';
 
 import {
   DAYS_LEFT_COLUMN_ID,
-  canDeleteColumn,
+  columnDeleteBlockReason,
   getPrimaryExpiryColumn,
   type ColumnDefinition,
 } from '../../lib/columns';
@@ -41,12 +42,15 @@ import {
 import {
   buildGridColumns,
   buildGridRows,
+  isColumnEditableForRole,
   rowClassForStatus,
 } from './grid-columns';
 import {
   DRAFT_ROW_ID,
   GRID_KEYBOARD_PROPS,
+  createTabToNextCell,
   isMeaningfulDraftValue,
+  nextTabbableColumnId,
   sheetGridThemeClass,
 } from './grid-behaviour';
 import { GroupHeaderCell } from './group-header';
@@ -83,6 +87,12 @@ export interface SheetPageProps {
    * editors, dialogs and input focus survive background refreshes.
    */
   refreshToken?: number;
+  /**
+   * Tests only: mount the REAL AG Grid alongside the accessible table
+   * (jsdom normally swaps the virtualised grid for the deterministic table,
+   * so keyboard-editing e2e coverage needs to opt in explicitly).
+   */
+  renderGridInTests?: boolean;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -124,6 +134,7 @@ export function SheetPage({
   theme = 'light',
   thresholds,
   refreshToken = 0,
+  renderGridInTests = false,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -153,8 +164,10 @@ export function SheetPage({
   const [renameValue, setRenameValue] = useState('');
   const menuRef = useRef<HTMLDivElement>(null);
   const gridApiRef = useRef<GridApi<SheetGridRendererData> | null>(null);
-  // AG Grid needs real layout measurements; jsdom uses the deterministic table below.
+  // AG Grid needs real layout measurements; jsdom uses the deterministic
+  // table below unless a keyboard-editing e2e test opts into the real grid.
   const isTestEnvironment = import.meta.env.MODE === 'test';
+  const renderRealGrid = !isTestEnvironment || renderGridInTests;
   // FIXES_UI §5.2 "Smaller windows": the last two chips move into a menu.
   const collapsedFilters = useCollapsedQuickFilters();
   const moreFiltersRef = useRef<HTMLDivElement>(null);
@@ -301,35 +314,94 @@ export function SheetPage({
     [activeColumns, gridContext, role],
   );
 
+  /**
+   * SHEET-12 Tab contract: the ordered editable user columns (system columns
+   * # / Actions / + / Days Left are never tab targets). The same predicate as
+   * buildGridColumns' editable flag keeps both sides in agreement.
+   */
+  const editableColumnIds = useMemo(
+    () => activeColumns
+      .filter((column) => isColumnEditableForRole(column, role ?? 'office'))
+      .map((column) => column.id),
+    [activeColumns, role],
+  );
+
+  // Tab/Shift+Tab while editing commits and moves to the next/previous
+  // editable column (createTabToNextCell: `true` = commit + stay).
+  const handleTabToNextCell = useMemo(
+    () => createTabToNextCell<SheetGridRendererData>(
+      (columnId) => gridApiRef.current?.getColumn(columnId) ?? null,
+      () => editableColumnIds,
+    ),
+    [editableColumnIds],
+  );
+
+  /**
+   * Which key committed the draft row (Tab vs Enter)? Captured BEFORE the
+   * grid consumes the key so the async create+refresh can restore focus with
+   * Excel semantics: Tab lands editing the next editable column of the NEW
+   * record; Enter keeps the continuous-entry focus on the fresh draft row.
+   */
+  const draftCommitIntentRef = useRef<'tab' | 'enter' | null>(null);
+  const rememberGridKeyIntent = useCallback((event: ReactKeyboardEvent) => {
+    if (event.key === 'Tab') {
+      draftCommitIntentRef.current = 'tab';
+    } else if (event.key === 'Enter') {
+      draftCommitIntentRef.current = 'enter';
+    } else if (event.key === 'Escape') {
+      draftCommitIntentRef.current = null;
+    }
+  }, []);
+
   const createFromDraft = useCallback(async (field: string, value: unknown) => {
     if (!field || field === DAYS_LEFT_COLUMN_ID || field === '__actions' || !isMeaningfulDraftValue(value)) {
       return;
     }
     try {
-      await repository.createRow({ [field]: value });
+      const created = await repository.createRow({ [field]: value });
       await refresh({ quiet: true });
       setStatusMessage('Added a new record.');
-      // SHEET-11 "continuous focus": the committed row is saved and a fresh
-      // blank draft is now the last row — put the cursor back in the same
-      // column so the next record can be typed without touching the mouse.
       const api = gridApiRef.current;
       if (api) {
-        const rowIndex = api.getDisplayedRowCount() - 1;
-        if (rowIndex >= 0) {
-          window.requestAnimationFrame(() => {
-            try {
+        // Excel Tab semantics on the draft row: typing column 1 and pressing
+        // Tab creates the record AND lands editing column 2 OF THAT NEW
+        // RECORD (not the fresh draft, not outside the grid).
+        const intent = draftCommitIntentRef.current;
+        draftCommitIntentRef.current = null;
+        window.requestAnimationFrame(() => {
+          try {
+            // Close any transient editor the grid itself opened on the draft
+            // row while Tab/Enter was processed — one focused editor only.
+            api.stopEditing();
+            if (intent === 'tab') {
+              const createdNode = api.getRowNode(created.id);
+              const nextField = nextTabbableColumnId(field, editableColumnIds, false) ?? field;
+              if (createdNode && createdNode.rowIndex !== null && createdNode.rowIndex >= 0) {
+                api.setFocusedCell(createdNode.rowIndex, nextField);
+                api.startEditingCell({ rowIndex: createdNode.rowIndex, colKey: nextField });
+                return;
+              }
+            }
+            // SHEET-11 "continuous focus": the committed row is saved and a
+            // fresh blank draft is now the last row — put the cursor back in
+            // the same column so the next record can be typed without
+            // touching the mouse.
+            const rowIndex = api.getDisplayedRowCount() - 1;
+            if (rowIndex >= 0) {
               api.setFocusedCell(rowIndex, field);
               api.startEditingCell({ rowIndex, colKey: field });
-            } catch {
-              // The grid can be torn down between the refresh and the frame.
             }
-          });
-        }
+          } catch {
+            // The grid can be torn down between the refresh and the frame.
+          }
+        });
+      } else {
+        draftCommitIntentRef.current = null;
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
     }
-  }, [repository, refresh]);
+  }, [repository, refresh, editableColumnIds]);
 
   const handleCellValueChanged = useCallback(async (
     event: CellValueChangedEvent<SheetGridRendererData>,
@@ -386,12 +458,17 @@ export function SheetPage({
   }, [repository, refresh, columns]);
 
   const handleDeleteColumn = useCallback(async (column: ColumnDefinition) => {
-    if (!canDeleteColumn(column, role ?? '', rows)) {
-      // SET-11 / FIXES_UI §5.8 confirmation wording: only an admin may delete
-      // a column that still holds data; Office can delete empty columns.
-      setStatusMessage(role === 'admin'
-        ? `${column.name} is the primary expiry column and cannot be deleted.`
-        : 'Only an admin can delete a column that contains data.');
+    const blockReason = columnDeleteBlockReason(column, role ?? '', rows);
+    if (blockReason !== null) {
+      // The message must name the REAL blocker: a stale primary-expiry mark
+      // on a non-expiry/deleted column is healed away and never reported as
+      // "the primary expiry column", and protection is id-exact, never by
+      // name — a user column called "Days Left" stays deletable.
+      setStatusMessage(blockReason === 'system'
+        ? 'Days Left is a generated system column and cannot be deleted.'
+        : blockReason === 'primary'
+          ? `${column.name} is the primary expiry column and cannot be deleted.`
+          : 'Only an admin can delete a column that contains data.');
       return;
     }
     // SET-11: the dialog states how many records still hold a value in this
@@ -541,6 +618,31 @@ export function SheetPage({
     }
   };
 
+  // FIXES_UI §5.9: ONE context-aware empty state — never stacked with the
+  // grid's own text, never covering the `+` header or the draft row. Rendered
+  // as a non-blocking hint INSIDE the grid area (overlay), or inline next to
+  // the accessible table in test/host environments.
+  const emptyNotice = rows.length === 0 ? (
+    <div className="sheet-grid__empty" role="status">
+      <p>Type in the blank row below to add your first entry.</p>
+    </div>
+  ) : matchingRows.length === 0 ? (
+    <div className="sheet-grid__empty" role="status">
+      <p>No records match these filters.</p>
+      <button
+        className="button button--quiet"
+        type="button"
+        onClick={() => {
+          setSearch('');
+          setStatusFilter('');
+          setQuickFilter('all');
+        }}
+      >
+        Clear filters
+      </button>
+    </div>
+  ) : null;
+
   if (loading) {
     return <div className="sheet-page sheet-page--loading" aria-live="polite">Loading visa sheet…</div>;
   }
@@ -676,11 +778,21 @@ export function SheetPage({
             </div>
           ) : null}
 
-          {isTestEnvironment ? null : (
+          {renderRealGrid ? (
             <div
               className="sheet-grid-wrap"
-              onContextMenu={handleGridContextMenu}
-            >
+                  onContextMenu={handleGridContextMenu}
+                  onKeyDownCapture={rememberGridKeyIntent}
+                  onPointerDownCapture={() => {
+                    draftCommitIntentRef.current = null;
+                  }}
+                >
+                  {/* §5.9: single non-blocking hint floating inside the grid
+                      area; the grid keeps filling the whole viewport below it
+                      and stays clickable (the hint ignores pointer events). In
+                      test/host environments the same ONE hint renders in flow
+                      next to the accessible table instead — never both. */}
+                  {isTestEnvironment ? null : emptyNotice}
               <div
                 className={`sheet-grid ${sheetGridThemeClass(theme)}`}
                 data-testid="sheet-grid"
@@ -748,6 +860,9 @@ export function SheetPage({
                     gridApiRef.current = event.api;
                   }}
                   onCellValueChanged={(event) => void handleCellValueChanged(event)}
+                  // SHEET-12: Tab commits + edits the next editable column;
+                  // Shift+Tab the previous one; system columns are skipped.
+                  tabToNextCell={handleTabToNextCell}
                   domLayout="normal"
                   animateRows
                   {...GRID_KEYBOARD_PROPS}
@@ -780,7 +895,7 @@ export function SheetPage({
                 </div>
               ) : null}
             </div>
-          )}
+          ) : null}
           <div className={`sheet-accessible-table-wrap${isTestEnvironment ? ' sheet-accessible-table-wrap--test' : ''}`}>
             <table className="sheet-accessible-table" aria-label="Visa records table">
               <thead>
@@ -870,28 +985,9 @@ export function SheetPage({
               </tbody>
             </table>
           </div>
-          {/* FIXES_UI §5.9: one context-aware empty state (no records yet vs
-              no filter match) — never two, and never covering the grid header. */}
-          {rows.length === 0 ? (
-            <div className="sheet-grid__empty" role="status">
-              <p>No records yet. Type in the blank row at the end to add your first entry.</p>
-            </div>
-          ) : matchingRows.length === 0 ? (
-            <div className="sheet-grid__empty" role="status">
-              <p>No records match the current filters.</p>
-              <button
-                className="button button--quiet"
-                type="button"
-                onClick={() => {
-                  setSearch('');
-                  setStatusFilter('');
-                  setQuickFilter('all');
-                }}
-              >
-                Clear filters
-              </button>
-            </div>
-          ) : null}
+          {/* Test/host environments render the accessible table instead of
+              the virtualised grid; the same ONE hint appears in flow there. */}
+          {isTestEnvironment ? emptyNotice : null}
         </section>
       )}
 

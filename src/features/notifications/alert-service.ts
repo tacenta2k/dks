@@ -89,6 +89,76 @@ export type NotificationRecord =
   | SummaryNotificationRecord
   | OfficeDeleteNotificationRecord;
 
+/**
+ * Stable UI identity for a notification: (kind, rowId/entryId, milestone).
+ * Two records describing the SAME logical alert (e.g. an old evaluation kept
+ * the pre-renewal expiry value, a re-run created the current one) get DIFFER
+ * ids (`expiry:rowId:VALUE:day`), so merging by id alone lets both surface as
+ * duplicate cards. The expiry value is intentionally NOT part of the key —
+ * after a renewal the old value's record collapses into the current one.
+ */
+export function notificationStableKey(record: NotificationRecord): string {
+  if (record.kind === 'expiry') {
+    return `expiry:${record.rowId}:${record.alertDay}`;
+  }
+  if (record.kind === 'office-delete') {
+    return `office-delete:${record.entryId}`;
+  }
+  return `${record.kind}:${record.summaryDate}`;
+}
+
+/** A snooze in the future suppresses the alert (R2-02). */
+export function isNotificationSnoozed(record: NotificationRecord, now = Date.now()): boolean {
+  return (
+    record.kind === 'expiry'
+    && typeof record.snoozedUntil === 'string'
+    && new Date(record.snoozedUntil).getTime() > now
+  );
+}
+
+/**
+ * Collapse a notification list to one card per stable key, keeping the
+ * record that best represents the alert's newest state:
+ *   1. an undismissed record beats a dismissed one;
+ *   2. an actively snoozed record beats a fresh duplicate (the user's snooze
+ *      must hold against a re-generated twin);
+ *   3. otherwise the newest `createdAt` wins; ties keep the later position.
+ * The surviving record occupies the group's FIRST position so list order
+ * (newest first from the local store) stays stable.
+ */
+export function dedupeNotifications(
+  records: readonly NotificationRecord[],
+  now = Date.now(),
+): NotificationRecord[] {
+  const groups = new Map<string, { position: number; winner: NotificationRecord }>();
+  records.forEach((record, index) => {
+    const key = notificationStableKey(record);
+    const group = groups.get(key);
+    if (!group) {
+      groups.set(key, { position: groups.size, winner: record });
+      return;
+    }
+    const score = (candidate: NotificationRecord): number => {
+      // Read above (rules 1-3).
+      const stateScore = candidate.dismissed === true
+        ? -1e15
+        : isNotificationSnoozed(candidate, now)
+          ? -1e9
+          : 0;
+      return stateScore + new Date(candidate.createdAt).getTime() / 1e3;
+    };
+    const incumbent = score(group.winner);
+    const challenger = score(record);
+    // Strictly better, or an exact tie: the LATER record wins (rule 3).
+    if (challenger >= incumbent) {
+      group.winner = record;
+    }
+  });
+  return Array.from(groups.values())
+    .sort((left, right) => left.position - right.position)
+    .map((group) => group.winner);
+}
+
 export interface AlertThresholds extends StatusThresholds {
   alertDays?: readonly number[];
 }

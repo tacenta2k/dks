@@ -119,6 +119,41 @@ describe('Visa Sheet layout (R3 batch E)', () => {
 
     // An empty sheet still has zero records: the draft is not a record.
     expect(await repository.getRows()).toHaveLength(0);
-    expect(screen.getByRole('status')).toHaveTextContent(/No records yet/i);
+    expect(screen.getByRole('status')).toHaveTextContent(/Type in the blank row/i);
+  });
+
+  it('shows exactly ONE non-blocking empty state, never a stacked card below the grid', async () => {
+    const repository = createInMemorySheetRepository();
+    await seedFixtureColumns(repository);
+    const { container } = render(<SheetPage repository={repository} role="office" />);
+    await screen.findByLabelText('New record Passport No');
+
+    expect(screen.getByRole('status')).toHaveTextContent(/Type in the blank row below to add your first entry/i);
+    // One hint element only — the old floating card under the grid is gone.
+    expect(container.querySelectorAll('.sheet-grid__empty')).toHaveLength(1);
+
+    // The hint is a non-blocking overlay inside the grid area
+    // (pointer-events: none) — never a card eating viewport height.
+    const overlay = ruleBody(sheetCss, '.sheet-grid__empty {');
+    expect(overlay).toContain('position: absolute');
+    expect(overlay).toContain('pointer-events: none');
+    // Bottom-anchored inside the grid: never covers the `+` header or the draft row.
+    expect(overlay).toContain('bottom:');
+  });
+
+  it('makes the records grid fill all remaining viewport height', () => {
+    // Workbench is a full-height flex column; the grid wrap flexes to the
+    // bottom of the window.
+    const workbench = ruleBody(sheetCss, '.content--sheet .sheet-workbench {');
+    expect(workbench).toContain('display: flex');
+    expect(workbench).toContain('flex-direction: column');
+    expect(workbench).toContain('height: 100%');
+
+    const wrap = ruleBody(sheetCss, '.content--sheet .sheet-grid-wrap {');
+    expect(wrap).toContain('flex: 1 1 auto');
+    expect(wrap).toContain('min-height');
+
+    const grid = ruleBody(sheetCss, '.content--sheet .sheet-grid {');
+    expect(grid).toContain('height: 100%');
   });
 });

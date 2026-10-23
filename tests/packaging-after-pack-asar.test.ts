@@ -12,7 +12,7 @@ import {
 } from 'node:fs';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -113,7 +113,11 @@ async function withWindowsAsarSemantics<T>(fn: (windowsAsar: AsarLib) => Promise
       if (entry.includes('/')) {
         throw new Error(`"${entry}" was not found in this archive`);
       }
-      return asar.extractFile(archive, entry.replace(/\\/g, '/'));
+      // Delegate with HOST separators: on Linux the real extractFile expects
+      // `/…` keys, on a real Windows checkout it expects `\…` ones — the mock
+      // must convert the Windows-shaped request to whichever host runs the
+      // test so the suite stays green on BOTH.
+      return asar.extractFile(archive, entry.replace(/\\/g, sep));
     },
   };
   mod.exports = windowsShaped;
@@ -649,9 +653,10 @@ describe.skipIf(!realElectron || !supportedForRealElectron)(
 
         // Exhaustive outcome: the probe either fully loads (ABI matches this
         // machine's Electron build) or rejects specifically at the native
-        // load — nothing else is an acceptable failure.
+        // load — nothing else is an acceptable failure. Accept the raw loader
+        // message AND the hook/probe's own clear "ABI mismatch" headline.
         const loaded = /DKS_OK=1/.test(stdout);
-        const abiRejected = /NODE_MODULE_VERSION|was compiled against a different/i.test(combined);
+        const abiRejected = /NODE_MODULE_VERSION|was compiled against a different|ABI mismatch/i.test(combined);
         expect(loaded !== abiRejected).toBe(true);
       } finally {
         fixture.cleanup();
@@ -694,10 +699,15 @@ describe.skipIf(!realElectron || !supportedForRealElectron)(
     }, 120_000);
 
     it('full afterPack succeeds when the packaged binding matches the packaged Electron', async (ctx) => {
-      // Stage an Electron-ABI better-sqlite3 build through its own installer.
-      // Needs network access to GitHub Releases: when that is not possible
-      // (offline sandbox), this test skips instead of failing falsely.
+      // Stage an Electron-ABI better-sqlite3 build through its own installer,
+      // then PROVE it loads under the packaged Electron before asserting the
+      // positive outcome. When the host Node ABI differs from the Electron
+      // ABI and no genuine Electron-ABI binary can be staged (offline, no
+      // prebuilt asset, node-gyp fallback kept the host ABI), the ABI-positive
+      // assertion skips cleanly instead of failing falsely on the test
+      // environment. The production afterPack guard is never weakened.
       const fixture = await stageIntoRealElectronDist();
+      const binary = join(fixture.unpackedModuleDir, 'build', 'Release', 'better_sqlite3.node');
       try {
         const prebuildBin = join(DEV_MODULES, 'prebuild-install', 'bin.js');
         const electronVersion = electronVersionFromNodeModules();
@@ -709,14 +719,35 @@ describe.skipIf(!realElectron || !supportedForRealElectron)(
             [prebuildBin, '--runtime', 'electron', '--target', electronVersion],
             { cwd: fixture.unpackedModuleDir, encoding: 'utf8', timeout: 180_000 },
           );
-          staged = attempt.status === 0
-            && existsSync(join(fixture.unpackedModuleDir, 'build', 'Release', 'better_sqlite3.node'));
+          staged = attempt.status === 0 && existsSync(binary);
           if (!staged) {
             // eslint-disable-next-line no-console
             console.warn(
               `[dks-test] could not stage an Electron-ABI better-sqlite3 prebuild `
               + `(offline or no matching asset): ${(attempt.stderr ?? attempt.stdout ?? '').trim().slice(0, 200)}`,
             );
+          }
+        }
+        if (staged) {
+          // Verify what was actually staged: prebuild-install may report
+          // success while shipping/compiling for the host Node ABI (e.g. a
+          // node-gyp fallback). Load the binary under the REAL Electron now —
+          // a mismatch here means "no Electron-ABI binary available", not a
+          // broken product.
+          const verify = spawnSync(
+            realElectron!.exe,
+            ['-e', `require(${JSON.stringify(binary)})`],
+            { env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' }, encoding: 'utf8', timeout: 60_000 },
+          );
+          if (verify.status !== 0) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              '[dks-test] staged binding does not load under the packaged Electron '
+              + `(expected when host Node ABI ${process.versions.modules} != Electron ABI; `
+              + 'no Electron-ABI build available), skipping the ABI-positive assertion: '
+              + `${(verify.stderr ?? verify.stdout ?? '').trim().slice(0, 200)}`,
+            );
+            staged = false;
           }
         }
         if (!staged) {

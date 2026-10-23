@@ -312,15 +312,48 @@
   padding-bottom: 1px;
 }
 
+/*
+ * FIXES_UI §5.9 — single, non-blocking empty-state hint. It floats INSIDE the
+ * grid area (bottom-centre, above the rows), never stacked as a separate
+ * card, never covering the `+` header or the draft row, and never blocking
+ * clicks (pointer-events: none; the Clear-filters button re-enables them).
+ */
 .sheet-grid__empty {
-  margin: -2px 0 0;
-  padding: 11px;
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: 14%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 16px;
   border: 1px solid var(--color-border);
-  border-top: 0;
-  border-radius: 0 0 10px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  box-shadow: 0 8px 22px var(--color-shadow);
   color: var(--color-text-muted);
   font-size: 12px;
   text-align: center;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.sheet-grid__empty p {
+  margin: 0;
+}
+
+.sheet-grid__empty button {
+  pointer-events: auto;
+  margin-left: 8px;
+}
+
+/* In test/host environments the hint renders in flow under the table. */
+.sheet-accessible-table-wrap ~ .sheet-grid__empty {
+  position: static;
+  transform: none;
+  border: 0;
+  box-shadow: none;
+  margin-top: 8px;
+  white-space: normal;
 }
 
 .sheet-accessible-table-wrap {
@@ -575,22 +608,42 @@
   max-width: none;
 }
 
+/*
+ * The records grid fills ALL remaining viewport height down to the bottom of
+ * the window: the workbench is a full-height flex column, toolbar keeps its
+ * natural size, and the grid wrap flexes to consume whatever is left.
+ */
 .content--sheet .sheet-workbench {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   min-height: 0;
   padding: 8px;
   border-radius: 10px;
   box-shadow: none;
 }
 
+.content--sheet .sheet-toolbar,
+.content--sheet .sheet-alert {
+  flex: 0 0 auto;
+}
+
 .content--sheet .sheet-grid-wrap {
   position: relative;
-  height: 100%;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 240px;
+}
+
+.content--sheet .sheet-accessible-table-wrap {
+  flex: 1 1 auto;
   min-height: 0;
+  overflow: auto;
 }
 
 .content--sheet .sheet-grid {
   height: 100%;
-  min-height: 360px;
+  min-height: 320px;
 }
 
 .sheet-grid-wrap {

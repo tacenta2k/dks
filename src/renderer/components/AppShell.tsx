@@ -9,7 +9,8 @@ import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
 import { DashboardPage } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
-import dksMark from '../../assets/dks-mark.png';
+import dksLogo from '../../assets/dks-logo.png';
+import dksLogoDark from '../../assets/dks-logo-dark.png';
 import { NotificationBell } from '../../features/notifications/NotificationBell';
 import type {
   NotificationRecord,
@@ -84,6 +85,7 @@ export interface AppShellProps {
   notifications?: readonly NotificationRecord[];
   onNotificationMarkRead?: (id: string) => void;
   onNotificationDismiss?: (id: string) => void;
+  onNotificationClearAll?: () => void;
   onNotificationView?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void;
   onNotificationRestore?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void | Promise<void>;
   onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
@@ -135,13 +137,29 @@ function loadSidebarCollapsed(): boolean {
 function Brand({ caption = 'Office workspace' }: { caption?: string }) {
   return (
     <div className="brand-lockup" title="DKS">
-      {/* The official DKS mark (generated from build/logo-source.png), so the
-          sidebar shows the real branding instead of a letter tile. */}
-      <div className="brand-mark brand-mark--image" aria-hidden="true">
-        <img src={dksMark} alt="" width={37} height={37} draggable={false} />
+      {/* The official DKS logo — the full lockup from build/logo-source.png,
+          never the generated cropped mark. It scales into the collapsed rail
+          with object-contain and needs no white plate in either theme. */}
+      <div className="brand-mark brand-mark--image brand-mark--logo">
+        <img
+          className="brand-logo__img brand-logo__img--on-light"
+          src={dksLogo}
+          alt="DKS — Software for businesses"
+          width={96}
+          height={43}
+          draggable={false}
+        />
+        <img
+          className="brand-logo__img brand-logo__img--on-dark"
+          src={dksLogoDark}
+          alt=""
+          aria-hidden="true"
+          width={96}
+          height={43}
+          draggable={false}
+        />
       </div>
       <div className="brand-text">
-        <p className="brand-name">DKS</p>
         <p className="brand-caption">{caption}</p>
       </div>
     </div>
@@ -303,6 +321,7 @@ export function AppShell({
   notifications = [],
   onNotificationMarkRead,
   onNotificationDismiss,
+  onNotificationClearAll,
   onNotificationView,
   onNotificationRestore,
   onNotificationSnooze,
@@ -543,6 +562,7 @@ export function AppShell({
               notifications={notifications}
               onMarkRead={onNotificationMarkRead}
               onDismiss={onNotificationDismiss}
+              onClearAll={onNotificationClearAll}
               onView={onNotificationView}
               onRestore={onNotificationRestore}
               onSnooze={onNotificationSnooze}

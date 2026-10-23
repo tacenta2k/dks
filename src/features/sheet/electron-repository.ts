@@ -1,6 +1,7 @@
 import { isValidIsoDate } from '../../lib/date';
-import type {
-  ColumnDefinition,
+import {
+  normalizeColumns,
+  type ColumnDefinition,
 } from '../../lib/columns';
 import type {
   DksLocalApi,
@@ -279,9 +280,12 @@ export class ElectronSheetRepository implements SheetRepository {
 
   async getColumns(): Promise<ColumnDefinition[]> {
     const snapshot = await this.snapshot();
-    return clone(snapshot.columns
+    // normalizeColumns heals the primary-expiry invariant in memory as well
+    // (first live date_expiry is the single primary; stale flags are dropped)
+    // so persisted junk can never leak into guards driven by these columns.
+    return normalizeColumns(clone(snapshot.columns
       .map((column) => localColumn(column, 'column'))
-      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true));
+      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true)));
   }
 
   async getRows(): Promise<SheetRow[]> {

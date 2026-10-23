@@ -215,6 +215,35 @@ describe('admin import and export workflows', () => {
     expect(result.unmappedHeaders).toEqual(['Unknown']);
   });
 
+  it('never maps or creates a user column for the generated "Days Left" system header', async () => {
+    const csv = 'Name,Days Left\\nAda,180';
+    const preview = await previewImport(csv, {
+      role: 'admin',
+      columns,
+      fileName: 'rows.csv',
+    });
+    // Never mapped and never treated as a new unmapped column.
+    expect(preview.mappings.some((mapping) => mapping.header === 'Days Left')).toBe(false);
+    expect(preview.unmappedHeaders).not.toContain('Days Left');
+    expect(preview.rows.every((row) => !('Days Left' in row))).toBe(true);
+
+    // And never created (even when the dialog would auto-create unknown
+    // columns): the system Days Left value stays derived, never stored.
+    const created: string[] = [];
+    const result = await importRows(csv, {
+      role: 'admin',
+      columns,
+      fileName: 'rows.csv',
+      createColumn: (header) => {
+        created.push(header);
+        return { id: 'days_left', name: header, type: 'number' };
+      },
+    });
+    expect(created).toEqual([]);
+    expect(result.records[0]?.data).toEqual({ name: 'Ada' });
+    expect(result.unmappedHeaders).not.toContain('Days Left');
+  });
+
   describe('imported date columns (Blocker 2)', () => {
     it('detects date-like values without flagging passport numbers', () => {
       expect(isDateLikeValue('10/01/2004')).toBe(true);

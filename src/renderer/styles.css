@@ -966,6 +966,66 @@ button:focus-visible {
   object-fit: contain;
 }
 
+/*
+ * FINAL POLISH — the official full DKS logo lockup (never the cropped mark)
+ * wherever the brand appears: sign-in card, sidebar (expanded and collapsed
+ * rail) and Settings → About. The light theme uses the original colours on a
+ * transparent background; dark mode swaps to the lightened variant, so there
+ * is never a white rectangular plate.
+ */
+.brand-logo {
+  display: block;
+}
+
+.brand-logo__img {
+  display: block;
+  object-fit: contain;
+}
+
+.brand-logo__img--on-dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-logo__img--on-light {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-logo__img--on-dark {
+  display: block;
+}
+
+/* Sign-in card: the lockup centred above the title, no crop. */
+.brand-logo--sign-in {
+  width: min(196px, 70%);
+  margin: 0 auto 20px;
+}
+
+.brand-logo--sign-in .brand-logo__img {
+  width: 100%;
+  height: auto;
+  max-height: 92px;
+}
+
+/* Sidebar (expanded): lockup next to the workspace caption. */
+.brand-mark--logo {
+  width: 96px;
+  height: 43px;
+  overflow: visible;
+}
+
+/* Sidebar (collapsed ~56px rail): same artwork scaled with object-contain,
+   centred, never letter-spaced text, never a white box. */
+.sidebar[data-collapsed='true'] .brand-mark--logo {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+}
+
+.sidebar[data-collapsed='true'] .brand-lockup {
+  justify-content: center;
+  padding: 0;
+}
+
 .login-card h1 {
   margin: 7px 0 11px;
   color: var(--color-text);
@@ -1320,9 +1380,27 @@ button:focus-visible {
 }
 
 .notification-bell__count {
+  margin-left: auto;
   color: var(--color-text-muted);
   font-size: 11px;
   font-weight: 650;
+}
+
+/* FIX: compact "Clear all" lives in the popover header (hidden when empty). */
+.notification-bell__clear-all {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-primary-strong);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.notification-bell__clear-all:hover {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
 }
 
 .notification-bell__empty {
