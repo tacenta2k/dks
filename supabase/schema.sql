@@ -138,6 +138,61 @@ begin
 end;
 $$;
 
+-- Both accounts may edit live rows.  The creator must not change afterwards,
+-- and Office must never be able to restore a deleted row through an UPDATE.
+create or replace function public.entries_keep_created_by()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  new.created_by := old.created_by;
+  new.created_at := old.created_at;
+  return new;
+end;
+$$;
+
+-- R3 batch G: attribution cannot be forged. auth.uid() is the caller's
+-- authenticated account (also inside SECURITY DEFINER functions), so Office
+-- cannot write updated_by = the admin's id and an admin restore is attributed
+-- to the admin. When there is no JWT (SQL editor, service role) the value the
+-- caller supplied is left untouched.
+create or replace function public.entries_stamp_updated_by()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if auth.uid() is not null then
+    new.updated_by := auth.uid();
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function public.guard_office_restore()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if tg_op = 'UPDATE' and public.is_office() then
+    if old.deleted is true and new.deleted is false then
+      raise exception 'Only administrators may restore entries'
+        using errcode = '42501';
+    end if;
+    if old.deleted is true then
+      raise exception 'Only administrators may update deleted entries'
+        using errcode = '42501';
+    end if;
+  end if;
+  return new;
+end;
+$$;
+
 create or replace function public.is_admin()
 returns boolean
 language sql
@@ -697,6 +752,21 @@ create trigger app_columns_primary_expiry_guard
 before insert or update or delete on public.app_columns
 for each row execute function public.guard_primary_expiry_column();
 
+drop trigger if exists entries_keep_created_by on public.entries;
+create trigger entries_keep_created_by
+before update on public.entries
+for each row execute function public.entries_keep_created_by();
+
+drop trigger if exists entries_stamp_updated_by on public.entries;
+create trigger entries_stamp_updated_by
+before update on public.entries
+for each row execute function public.entries_stamp_updated_by();
+
+drop trigger if exists entries_guard_office_restore on public.entries;
+create trigger entries_guard_office_restore
+before update on public.entries
+for each row execute function public.guard_office_restore();
+
 drop trigger if exists entries_primary_expiry_guard on public.entries;
 create trigger entries_primary_expiry_guard
 before insert or update on public.entries
@@ -879,22 +949,41 @@ drop policy if exists entries_insert_authenticated on public.entries;
 create policy entries_insert_authenticated
 on public.entries for insert to authenticated
 with check (
-  (public.is_admin() or public.is_office())
+  auth.uid() is not null
+  and (public.is_admin() or public.is_office())
   and created_by = auth.uid()
-  and not deleted
+  and deleted is false
+  and deleted_at is null
+  and deleted_by is null
 );
 
+-- The UPDATE policy never tests created_by: either account may edit (or soft
+-- delete) any live row, including rows created by the other account.  Office
+-- cannot see or update an already-deleted row, so restoring stays an
+-- administrator-only operation (restore_entry).  created_by is kept immutable
+-- by the entries_keep_created_by trigger.
 drop policy if exists entries_update_authenticated on public.entries;
 create policy entries_update_authenticated
 on public.entries for update to authenticated
-using (public.is_admin() or (public.is_office() and not deleted))
+using (
+  public.is_admin()
+  or (public.is_office() and deleted is false)
+)
 with check (
   public.is_admin()
   or (
     public.is_office()
     and (
-      (not deleted and deleted_at is null and deleted_by is null)
-      or (deleted and deleted_at is not null and deleted_by = auth.uid())
+      (
+        deleted is false
+        and deleted_at is null
+        and deleted_by is null
+      )
+      or (
+        deleted is true
+        and deleted_at is not null
+        and (deleted_by is null or deleted_by = auth.uid())
+      )
     )
   )
 );
@@ -925,10 +1014,116 @@ create policy audit_log_select_admin
 on public.audit_log for select to authenticated
 using (public.is_admin());
 
+-- R3 batch B: app_columns.name is unique across the table (deleted columns
+-- keep their name), and Office cannot SELECT a deleted row. The client asks
+-- this read-only function which row owns a name before pushing a new column,
+-- so a duplicate name is reconciled instead of failing the sync forever.
+create or replace function public.resolve_duplicate_column(p_name text)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row jsonb;
+begin
+  if auth.uid() is null then
+    raise exception 'Sign in before resolving columns'
+      using errcode = '42501';
+  end if;
+
+  if not (public.is_admin() or public.is_office()) then
+    raise exception 'Only DKS accounts may resolve columns'
+      using errcode = '42501';
+  end if;
+
+  if p_name is null or btrim(p_name) = '' then
+    return null;
+  end if;
+
+  -- Read the row as jsonb so an optional/absent app_columns field cannot make
+  -- the function fail at call time; prefer the live row, then the newest.
+  select to_jsonb(c)
+    into v_row
+    from public.app_columns c
+   where lower(btrim(c.name)) = lower(btrim(p_name))
+   order by coalesce((to_jsonb(c) ->> 'deleted')::boolean, false) asc,
+            coalesce((to_jsonb(c) ->> 'updated_at')::timestamptz, '-infinity'::timestamptz) desc
+   limit 1;
+
+  if v_row is null then
+    return null;
+  end if;
+
+  return jsonb_build_object(
+    'id', v_row -> 'id',
+    'name', v_row ->> 'name',
+    'type', coalesce(v_row ->> 'type', 'text'),
+    'options', coalesce(v_row -> 'options', '{}'::jsonb),
+    'position', coalesce((v_row ->> 'position')::integer, 0),
+    'deleted', coalesce((v_row ->> 'deleted')::boolean, false),
+    'deleted_at', v_row -> 'deleted_at',
+    'is_primary_expiry', coalesce((v_row ->> 'is_primary_expiry')::boolean, false),
+    'is_passport', coalesce((v_row ->> 'is_passport')::boolean, false),
+    'updated_at', v_row -> 'updated_at'
+  );
+end;
+$$;
+
+revoke all on function public.resolve_duplicate_column(text) from public;
+grant execute on function public.resolve_duplicate_column(text) to authenticated;
+
 drop policy if exists audit_log_insert_authenticated on public.audit_log;
 create policy audit_log_insert_authenticated
 on public.audit_log for insert to authenticated
 with check (actor = auth.uid() or actor is null);
+
+-- R2-10: clearing the audit log is an administrator-only operation.  There is
+-- deliberately NO delete policy on public.audit_log; the only path is this
+-- SECURITY DEFINER function, which re-checks the role server-side and leaves
+-- exactly one entry describing the clear.
+drop policy if exists audit_log_delete_admin on public.audit_log;
+drop policy if exists audit_log_delete_authenticated on public.audit_log;
+
+create or replace function public.clear_audit_log(p_message text default null)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_message text;
+begin
+  if auth.uid() is null or not public.is_admin() then
+    raise exception 'Only administrators may clear the audit log'
+      using errcode = '42501';
+  end if;
+
+  v_message := coalesce(
+    nullif(btrim(p_message), ''),
+    'Audit log cleared by Admin on '
+      || to_char(now() at time zone 'Asia/Muscat', 'DD/MM/YYYY HH24:MI')
+  );
+
+  -- Scoped on purpose: an unfiltered DELETE is rejected by REST layers with
+  -- "DELETE requires a WHERE clause" and hides intent. `id` is the identity
+  -- primary key, so every row is still removed.
+  delete from public.audit_log
+   where id is not null;
+
+  insert into public.audit_log (actor, entry_id, action, snapshot, details)
+  values (
+    auth.uid(),
+    null,
+    'clear_audit',
+    '{}'::jsonb,
+    jsonb_build_object('message', v_message)
+  );
+end;
+$$;
+
+revoke all on function public.clear_audit_log(text) from public;
+grant execute on function public.clear_audit_log(text) to authenticated;
 
 drop policy if exists admin_notifications_select_admin on public.admin_notifications;
 create policy admin_notifications_select_admin

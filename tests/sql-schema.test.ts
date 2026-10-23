@@ -236,10 +236,16 @@ describe('Supabase STEP 3 schema', () => {
     expect(columnGuardBody).toContain('new.is_primary_expiry is distinct from old.is_primary_expiry');
     expect(columnGuardBody).toContain('not new.is_primary_expiry and not public.is_admin()');
     expect(entriesUpdateBody).toContain('public.is_office()');
-    expect(entriesUpdateBody).toContain('not deleted');
+    // R2-01: Office may only update live rows; the created_by test is gone.
+    expect(entriesUpdateBody).toContain('deleted is false');
     expect(entriesUpdateBody).toContain('deleted_at is null');
     expect(entriesUpdateBody).toContain('deleted_by is null');
+    expect(entriesUpdateBody).toContain('deleted is true');
+    expect(entriesUpdateBody).not.toContain('created_by');
     expect(sql).toContain('create trigger entries_primary_expiry_guard');
+    // created_by is immutable and Office cannot restore a deleted row.
+    expect(sql).toContain('create trigger entries_keep_created_by');
+    expect(sql).toContain('create trigger entries_guard_office_restore');
   });
 
   it('keeps the expiry digest secret-free and quiet when Resend is not configured', () => {

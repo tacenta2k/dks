@@ -10,6 +10,33 @@ import type { DksLocalColumn, DksLocalRow, DksLocalSnapshot } from '../src/lib/t
 import { createSqliteStore } from '../electron/main/sqlite';
 import { sanitizeSyncError } from '../src/lib/sync-error';
 
+
+/**
+ * R3 batch G: entries and columns are written with explicit INSERT/UPDATE, never
+ * `INSERT … ON CONFLICT DO UPDATE`. Test doubles must model those two paths so
+ * the sync cannot silently fall back to an upsert.
+ */
+interface RecordedWrite {
+  table: string;
+  mode: 'insert' | 'update';
+  value: Record<string, unknown>;
+}
+
+function recordExplicitWrite(log: RecordedWrite[]) {
+  return (table: string) => ({
+    insert: async (values: readonly Record<string, unknown>[]) => {
+      for (const value of values) log.push({ table, mode: 'insert', value: { ...value } });
+      return { data: [...values], error: null };
+    },
+    update: (values: Record<string, unknown>) => ({
+      eq: async (_column: string, id: string) => {
+        log.push({ table, mode: 'update', value: { ...values, id } });
+        return { data: null, error: null };
+      },
+    }),
+  });
+}
+
 const LOCAL_ID = '11111111-1111-4111-8111-111111111111';
 const REMOTE_ID = '22222222-2222-4222-8222-222222222222';
 const DELETED_ID = '33333333-3333-4333-8333-333333333333';
@@ -62,12 +89,13 @@ describe('Supabase offline reconciliation', () => {
         updated_at: '2026-01-02T00:00:00.000Z',
       }],
     };
-    const upserts: Record<string, unknown[]> = {};
+    const writes: RecordedWrite[] = [];
     const client: SupabaseDataClient = {
       from: (table) => ({
         select: async () => ({ data: remoteTables[table] ?? [], error: null }),
+        ...recordExplicitWrite(writes)(table),
         upsert: async (values) => {
-          upserts[table] = [...values];
+          writes.push({ table, mode: 'insert', value: { ...values[0], viaUpsert: true } });
           return { data: [...values], error: null };
         },
       }),
@@ -99,9 +127,14 @@ describe('Supabase offline reconciliation', () => {
     const result = await runSupabaseSync({ client, local, now: () => '2026-01-05T00:00:00.000Z' });
 
     expect(result.status).toBe('healthy');
-    expect(upserts.entries).toEqual(expect.arrayContaining([
-      expect.objectContaining({ id: LOCAL_ID, data: { name: 'Local winner' } }),
-    ]));
+    // A row the server has never seen is a real INSERT (never an upsert).
+    expect(writes.filter((write) => write.table === 'entries')).toEqual([
+      expect.objectContaining({
+        mode: 'insert',
+        value: expect.objectContaining({ id: LOCAL_ID, data: { name: 'Local winner' } }),
+      }),
+    ]);
+    expect(writes.some((write) => write.value.viaUpsert === true)).toBe(false);
     expect(localSnapshot.rows).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: REMOTE_ID, data: { name: 'Remote winner' } }),
     ]));
@@ -254,15 +287,22 @@ describe('pending outbox synchronisation (B3)', () => {
     ]);
 
     const client: SupabaseDataClient = {
-      from: (table) => ({
+      from: (name) => ({
         select: async () => ({ data: [], error: null }),
-        upsert: async (values) => {
-          const id = values[0]?.id;
-          if (table === 'entries' && id === failingId) {
+        insert: async (values) => {
+          if (name === 'entries' && values[0]?.id === failingId) {
             return { data: null, error: { message: 'new row violates row-level security policy' } };
           }
           return { data: [...values], error: null };
         },
+        update: (values) => ({
+          eq: async (_column: string, id: string) => {
+            if (name === 'entries' && id === failingId) {
+              return { data: null, error: { message: 'new row violates row-level security policy' } };
+            }
+            return { data: null, error: null };
+          },
+        }),
       }),
     };
 
@@ -304,17 +344,12 @@ describe('pending outbox synchronisation (B3)', () => {
         status: 'pending',
       },
     ]);
-    const upserted: Record<string, unknown>[] = [];
+    const writes: RecordedWrite[] = [];
 
     const client: SupabaseDataClient = {
       from: (table) => ({
         select: async () => ({ data: [], error: null }),
-        upsert: async (values) => {
-          if (table === 'entries') {
-            upserted.push({ ...values[0] });
-          }
-          return { data: [...values], error: null };
-        },
+        ...recordExplicitWrite(writes)(table),
       }),
     };
 
@@ -335,12 +370,13 @@ describe('pending outbox synchronisation (B3)', () => {
     const result = await runSupabaseSync({ client, local, userId: USER_ID });
 
     expect(result.status).toBe('healthy');
-    expect(upserted).toHaveLength(2);
+    const entryWrites = writes.filter((write) => write.table === 'entries');
+    expect(entryWrites.map((write) => write.mode)).toEqual(['insert', 'update']);
     // First write inserts the row in an active state (remote insert policy
     // rejects rows that are already deleted) …
-    expect(upserted[0]).toEqual(expect.objectContaining({ id: DELETED_ID, deleted: false }));
-    // … then the deletion is applied with the acting user recorded.
-    expect(upserted[1]).toEqual(expect.objectContaining({
+    expect(entryWrites[0].value).toEqual(expect.objectContaining({ id: DELETED_ID, deleted: false }));
+    // … then the deletion is a real UPDATE with the acting user recorded.
+    expect(entryWrites[1].value).toEqual(expect.objectContaining({
       id: DELETED_ID,
       deleted: true,
       deleted_by: USER_ID,
@@ -377,7 +413,10 @@ describe('pending outbox synchronisation (B3)', () => {
             : [],
           error: null,
         }),
-        upsert: async (values) => ({ data: [...values], error: null }),
+        insert: async (values) => ({ data: [...values], error: null }),
+        update: (values) => ({
+          eq: async () => ({ data: [values], error: null }),
+        }),
       }),
       rpc: async (name, args) => {
         rpcCalls.push({ name, args });
@@ -458,9 +497,12 @@ describe('pending outbox synchronisation (B3)', () => {
     ]);
 
     const client: SupabaseDataClient = {
-      from: (table) => ({
+      from: () => ({
         select: async () => ({ data: [], error: null }),
-        upsert: async (values) => ({ data: [...values], error: null }),
+        insert: async (values) => ({ data: [...values], error: null }),
+        update: (values) => ({
+          eq: async () => ({ data: [values], error: null }),
+        }),
       }),
     };
 
@@ -550,24 +592,47 @@ describe('outbox queue drains after successful sync (B3)', () => {
       tables[table] = rows.map((row) => ({ ...row }));
     }
     const upserts: Array<{ table: string; values: Record<string, unknown>[] }> = [];
+    const applyValues = (table: string, values: readonly Record<string, unknown>[]) => {
+      const rows = tables[table] ?? (tables[table] = []);
+      for (const value of values) {
+        const key = typeof value.id === 'string' ? 'id' : 'key';
+        const index = rows.findIndex((row) => row[key] === value[key]);
+        if (index >= 0) {
+          rows[index] = { ...rows[index], ...value };
+        } else {
+          rows.push({ ...value });
+        }
+      }
+      upserts.push({ table, values: values.map((value) => ({ ...value })) });
+    };
     const client: SupabaseDataClient = {
       from: (table) => ({
         select: async () => ({ data: tables[table] ?? [], error: null }),
+        insert: async (values) => {
+          if (failSettings && table === 'settings') {
+            return { data: null, error: { message: 'settings write denied' } };
+          }
+          applyValues(table, values);
+          return { data: [...values], error: null };
+        },
+        update: (values) => ({
+          eq: async (_column: string, id: string) => {
+            applyValues(table, [{ ...values, id }]);
+            return { data: null, error: null };
+          },
+        }),
+        // Settings-only path; entries/columns must never arrive here.
         upsert: async (values) => {
           if (failSettings && table === 'settings') {
             return { data: null, error: { message: 'settings write denied' } };
           }
-          upserts.push({ table, values: values.map((value) => ({ ...value })) });
-          const rows = tables[table] ?? (tables[table] = []);
-          for (const value of values) {
-            const key = typeof value.id === 'string' ? 'id' : 'key';
-            const index = rows.findIndex((row) => row[key] === value[key]);
-            if (index >= 0) {
-              rows[index] = { ...rows[index], ...value };
-            } else {
-              rows.push({ ...value });
-            }
+          if (table !== 'settings') {
+            return {
+              data: null,
+              error: { message: `unexpected upsert for ${table}: entries and columns use insert/update` },
+            };
           }
+          applyValues(table, values);
           return { data: [...values], error: null };
         },
       }),
@@ -750,12 +815,14 @@ describe('sync failure surfacing (Blocker 3)', () => {
     const client: SupabaseDataClient = {
       from: (table) => ({
         select: async () => ({ data: [], error: null }),
-        upsert: async () => {
-          if (table === 'entries') {
-            return { data: null, error: { message } };
-          }
-          return { data: [], error: null };
-        },
+        insert: async () => (table === 'entries'
+          ? { data: null, error: { message } }
+          : { data: [], error: null }),
+        update: () => ({
+          eq: async () => (table === 'entries'
+            ? { data: null, error: { message } }
+            : { data: null, error: null }),
+        }),
       }),
     };
     return { client };
@@ -821,13 +888,21 @@ describe('sync failure surfacing (Blocker 3)', () => {
       const client: SupabaseDataClient = {
         from: (table) => ({
           select: async () => ({ data: tables[table] ?? [], error: null }),
-          upsert: async (values) => {
+          insert: async (values) => {
             const rows = tables[table] ?? (tables[table] = []);
             for (const value of values) {
               rows.push({ ...value });
             }
             return { data: [...values], error: null };
           },
+          update: (values) => ({
+            eq: async (_column: string, id: string) => {
+              const rows = tables[table] ?? (tables[table] = []);
+              const index = rows.findIndex((row) => row.id === id);
+              if (index >= 0) rows[index] = { ...rows[index], ...values };
+              return { data: null, error: null };
+            },
+          }),
         }),
         rpc: async (_name, args) => {
           const id = String(args.p_entry_id ?? '');
@@ -916,31 +991,52 @@ describe('entries insert authorization (RLS regression)', () => {
     return { store, local };
   }
 
-  /** Remote double that returns seeded rows and captures the entries upsert payload. */
+  /**
+   * Remote double that returns seeded rows and captures the exact entries write
+   * payload, split by mode. An upsert is rejected outright: entries must use an
+   * explicit INSERT or UPDATE.
+   */
   function capturingRemote(initial: Record<string, Record<string, unknown>[]> = {}) {
     const tables: Record<string, Record<string, unknown>[]> = {};
     for (const [table, rows] of Object.entries(initial)) {
       tables[table] = rows.map((row) => ({ ...row }));
     }
-    const entriesUpserts: Record<string, unknown>[] = [];
+    const entriesInserts: Record<string, unknown>[] = [];
+    const entriesUpdates: Record<string, unknown>[] = [];
     const client: SupabaseDataClient = {
       from: (table) => ({
         select: async () => ({ data: tables[table] ?? [], error: null }),
-        upsert: async (values) => {
+        insert: async (values) => {
           if (table === 'entries') {
-            for (const value of values) entriesUpserts.push({ ...value });
-            const rows = tables[table] ?? (tables[table] = []);
-            for (const value of values) {
-              const index = rows.findIndex((row) => row.id === value.id);
-              if (index >= 0) rows[index] = { ...rows[index], ...value };
-              else rows.push({ ...value });
-            }
+            for (const value of values) entriesInserts.push({ ...value });
+          }
+          const rows = tables[table] ?? (tables[table] = []);
+          for (const value of values) {
+            const index = rows.findIndex((row) => row.id === value.id);
+            if (index >= 0) rows[index] = { ...rows[index], ...value };
+            else rows.push({ ...value });
           }
           return { data: values, error: null };
         },
+        update: (values) => ({
+          eq: async (_column: string, id: string) => {
+            if (table === 'entries') entriesUpdates.push({ ...values, id });
+            const rows = tables[table] ?? [];
+            const index = rows.findIndex((row) => row.id === id);
+            if (index >= 0) {
+              // The SQL trigger keeps created_by immutable.
+              rows[index] = { ...rows[index], ...values, id, created_by: rows[index].created_by };
+            }
+            return { data: null, error: null };
+          },
+        }),
+        upsert: async () => ({
+          data: null,
+          error: { message: 'entries must never be written with an upsert' },
+        }),
       }),
     };
-    return { client, entriesUpserts };
+    return { client, entriesInserts, entriesUpdates };
   }
 
   /**
@@ -969,12 +1065,14 @@ describe('entries insert authorization (RLS regression)', () => {
         data: { name: 'Ahmed' },
         category: 'Employee',
       });
-      const { client, entriesUpserts } = capturingRemote();
+      const { client, entriesInserts, entriesUpdates } = capturingRemote();
       const result = await runSupabaseSync({ client, local, userId: ADMIN_UID });
 
       expect(result.status).toBe('healthy');
-      expect(entriesUpserts.length).toBe(1);
-      const payload = entriesUpserts[0];
+      // A fresh row is a real INSERT, and only an INSERT.
+      expect(entriesInserts.length).toBe(1);
+      expect(entriesUpdates).toHaveLength(0);
+      const payload = entriesInserts[0];
       expect(payload.created_by).toBe(ADMIN_UID);
       expect(payload.deleted).toBe(false);
       expect(entriesInsertPolicyPasses(payload, ADMIN_UID, 'admin')).toBe(true);
@@ -991,12 +1089,12 @@ describe('entries insert authorization (RLS regression)', () => {
         data: { name: 'Priya' },
         category: 'Family',
       });
-      const { client, entriesUpserts } = capturingRemote();
+      const { client, entriesInserts } = capturingRemote();
       const result = await runSupabaseSync({ client, local, userId: OFFICE_UID });
 
       expect(result.status).toBe('healthy');
-      expect(entriesUpserts.length).toBe(1);
-      const payload = entriesUpserts[0];
+      expect(entriesInserts.length).toBe(1);
+      const payload = entriesInserts[0];
       expect(payload.created_by).toBe(OFFICE_UID);
       expect(entriesInsertPolicyPasses(payload, OFFICE_UID, 'office')).toBe(true);
     } finally {
@@ -1024,11 +1122,13 @@ describe('entries insert authorization (RLS regression)', () => {
       // Local copy edited later (newer updated_at) -> local wins -> UPDATE.
       store.createEntry({ id: rowId, data: { name: 'Edited' }, category: 'Employee' });
 
-      const { client, entriesUpserts } = capturingRemote(remoteSeed);
+      const { client, entriesInserts, entriesUpdates } = capturingRemote(remoteSeed);
       await runSupabaseSync({ client, local, userId: OFFICE_UID });
 
-      expect(entriesUpserts.length).toBe(1);
-      const payload = entriesUpserts[0];
+      // Existing row → a real UPDATE, never an upsert that re-runs the INSERT policy.
+      expect(entriesInserts).toHaveLength(0);
+      expect(entriesUpdates.length).toBe(1);
+      const payload = entriesUpdates[0];
       // created_by is omitted on updates so the original creator is preserved.
       expect('created_by' in payload).toBe(false);
     } finally {
@@ -1039,5 +1139,120 @@ describe('entries insert authorization (RLS regression)', () => {
   it('policy simulator rejects a mismatched created_by (sanity check)', () => {
     expect(entriesInsertPolicyPasses({ created_by: OFFICE_UID, deleted: false }, ADMIN_UID, 'admin')).toBe(false);
     expect(entriesInsertPolicyPasses({ created_by: ADMIN_UID, deleted: true }, ADMIN_UID, 'admin')).toBe(false);
+  });
+});
+
+describe('no upsert loophole for entries or columns (R3 batch G)', () => {
+  function sqliteLocal() {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    const snapshot = (): DksLocalSnapshot => ({
+      rows: store.listRows(true).map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      deletedRows: store.listRows(true).filter((row) => row.deleted === true)
+        .map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      columns: store.listColumns(false).map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      deletedColumns: store.listColumns(true).filter((column) => column.deleted === true)
+        .map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      settings: store.getSettings(),
+      syncStatus: store.getSyncStatus() as unknown as DksLocalSnapshot['syncStatus'],
+    });
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => store.setSyncStatus(state as never) as unknown as DksLocalSnapshot['syncStatus'],
+      applyRemoteSnapshot: async (input) => {
+        for (const row of input.rows) store.applyRemoteEntry(row as never);
+        for (const column of input.columns) store.applyRemoteColumn(column as never);
+        return snapshot();
+      },
+      acknowledgeOutbox: async () => store.acknowledgeOutbox() as unknown as DksLocalSnapshot['syncStatus'],
+      recordConflict: async (conflict) => {
+        store.recordConflict({ ...conflict, resolved: false } as never);
+      },
+      listOutbox: async (input) => store.listOutbox(input?.status ?? 'all') as unknown as SupabaseOutboxItem[],
+      markOutboxSynced: (id) => store.markOutboxSynced(id),
+      markOutboxFailed: (id, message) => store.markOutboxFailed(id, message),
+      retryFailedOutbox: async () => store.retryFailedOutbox(),
+    };
+    return { store, local };
+  }
+
+  it('refuses to write an entry through an upsert-only client', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createEntry({
+        id: '99999999-1111-4111-8111-000000000001',
+        data: { name: 'Upsert-only' },
+        category: 'Employee',
+      });
+
+      const upserts: string[] = [];
+      const client: SupabaseDataClient = {
+        from: () => ({
+          select: async () => ({ data: [], error: null }),
+          upsert: async (values) => {
+            upserts.push('upsert');
+            return { data: [...values], error: null };
+          },
+        }),
+      };
+
+      const result = await runSupabaseSync({ client, local });
+
+      // The write is refused with an explanation instead of silently using an
+      // INSERT … ON CONFLICT path that re-evaluates the INSERT policy.
+      expect(result.status).toBe('error');
+      expect(result.errors.join(' ')).toContain('explicit INSERT');
+      expect(upserts).toEqual([]);
+      // Local data and the queued operation are preserved for a later retry.
+      expect(store.listRows(true)).toHaveLength(1);
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('refuses to update through a client without an UPDATE path', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      const rowId = '99999999-2222-4222-8222-000000000002';
+      store.applyRemoteEntry({
+        id: rowId,
+        data: { name: 'Remote original' },
+        category: 'Employee',
+        deleted: false,
+        created_by: '846536af-f3c6-47c1-8559-d13442c1490a',
+        updated_at: '2026-01-01T00:00:00.000Z',
+      } as never);
+      store.updateEntry(rowId, { data: { name: 'Local edit' } });
+
+      const upserts: string[] = [];
+      const client: SupabaseDataClient = {
+        from: () => ({
+          select: async () => ({
+            data: [{
+              id: rowId,
+              data: { name: 'Remote original' },
+              category: 'Employee',
+              deleted: false,
+              created_by: '846536af-f3c6-47c1-8559-d13442c1490a',
+              updated_at: '2026-01-01T00:00:00.000Z',
+            }],
+            error: null,
+          }),
+          insert: async (values) => ({ data: [...values], error: null }),
+          upsert: async (values) => {
+            upserts.push('upsert');
+            return { data: [...values], error: null };
+          },
+        }),
+      };
+
+      const result = await runSupabaseSync({ client, local, userId: '846536af-f3c6-47c1-8559-d13442c1490a' });
+
+      expect(result.status).toBe('error');
+      expect(result.errors.join(' ')).toContain('explicit UPDATE');
+      expect(upserts).toEqual([]);
+    } finally {
+      store.close();
+    }
   });
 });

@@ -4,11 +4,13 @@ import { useStore } from 'zustand';
 import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
 import {
+  hasSavedThemePreference,
   loadThemePreference,
   resolveTheme,
   saveThemePreference,
 } from '../lib/theme';
 import type { AppView, DksLocalSyncState, ThemePreference } from '../lib/types';
+import { localStoreErrorMessage } from '../lib/local-store-error';
 import { sanitizeSyncError } from '../lib/sync-error';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
@@ -27,8 +29,11 @@ import {
 } from '../features/settings/settings-service';
 import {
   createSnooze,
+  dedupeNotifications,
   evaluateAlerts,
   evaluateSummaryNotifications,
+  isNotificationSnoozed,
+  notificationStableKey,
   snoozeUntil,
   type AlertSnooze,
   type NotificationRecord,
@@ -118,6 +123,9 @@ export function App({
     pendingCount: 0,
   });
   const [pendingOutbox, setPendingOutbox] = useState<readonly SyncPendingItem[]>([]);
+  // R7: a local-storage failure is not "offline". It is surfaced explicitly so
+  // the shell never claims the data was saved locally when it was not.
+  const [localStoreError, setLocalStoreError] = useState<string | null>(null);
   const [workspaceSettings, setWorkspaceSettings] = useState<PartialSettings | undefined>(undefined);
   const [auditProfiles, setAuditProfiles] = useState<AuditProfile[]>([]);
   const [settingsLoadError, setSettingsLoadError] = useState<string | null>(null);
@@ -214,7 +222,10 @@ export function App({
         }
         setWorkspaceSettings(remote);
         setSettingsLoadError(null);
-        if (remote.theme) {
+        // R2-08: the workspace "default theme" only applies to a NEW sign-in on
+        // a PC with no saved personal preference. A personal choice always wins
+        // and is never overwritten by loading/opening Settings.
+        if (remote.theme && !hasSavedThemePreference()) {
           setThemePreference(remote.theme);
           appStore.getState().setTheme(remote.theme);
           saveThemePreference(remote.theme);
@@ -288,7 +299,14 @@ export function App({
       column.isPrimaryExpiry === true || column.is_primary_expiry === true
     ));
     const selectedPrimary = columns.find((column) => column.id === settings.primaryExpiryColumnId);
-    if (selectedPrimary && currentPrimary?.id !== selectedPrimary.id) {
+    // Auto-heal a stale settings.primaryExpiryColumnId: only a live
+    // date_expiry column may become/stay primary. A settings value pointing
+    // at a deleted or non-expiry column must never write primary marks.
+    const selectedPrimaryIsLiveExpiry = !!selectedPrimary
+      && selectedPrimary.type === 'date_expiry'
+      && selectedPrimary.deleted !== true
+      && selectedPrimary.visible !== false;
+    if (selectedPrimaryIsLiveExpiry && currentPrimary?.id !== selectedPrimary.id) {
       for (const column of columns.filter((candidate) => candidate.type === 'date_expiry')) {
         const primary = column.id === selectedPrimary.id;
         await sheetRepository.updateColumn(column.id, {
@@ -299,11 +317,9 @@ export function App({
       setRepositoryRevision((revision) => revision + 1);
     }
 
-    if (settings.theme !== themePreference) {
-      setThemePreference(settings.theme);
-      appStore.getState().setTheme(settings.theme);
-      saveThemePreference(settings.theme);
-    }
+    // R2-08: saving the workspace settings (including the "Theme default" for
+    // new sign-ins) must NOT re-theme the current session. The personal toggle
+    // in the top bar owns the active theme.
 
     if (authStatus === 'demo') {
       return;
@@ -474,6 +490,11 @@ export function App({
         await local.markOutboxFailed?.({ id, message });
       },
       retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
+      // R3 batch B: adopt the server's column id after a duplicate-name
+      // reconciliation so the column stops failing on every sync.
+      rekeyColumn: async (oldId, newId) => {
+        await local.rekeyColumn?.({ oldId, newId });
+      },
     };
     const syncClient = client as unknown as SupabaseDataClient;
 
@@ -561,11 +582,19 @@ export function App({
     void local
       .getSnapshot()
       .then((snapshot) => {
-        if (!cancelled && snapshot.syncStatus) {
+        if (cancelled) {
+          return;
+        }
+        setLocalStoreError(null);
+        if (snapshot.syncStatus) {
           setSyncStatus(snapshot.syncStatus);
         }
       })
-      .catch(() => undefined);
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setLocalStoreError(localStoreErrorMessage(error));
+        }
+      });
     return () => {
       cancelled = true;
     };
@@ -630,17 +659,63 @@ export function App({
     }
   };
 
-  const handleNotificationDismiss = (id: string) => {
-    setNotifications((current) => current.map((record) => (
-      record.id === id ? { ...record, dismissed: true } : record
-    )));
-    void persistNotification(id, { dismissed: true, read: true });
-    if (id.startsWith('admin-notification-') && authService.authClient) {
-      void dismissAdminNotification(
-        authService.authClient as unknown as AdminNotificationClient,
-        id,
-      ).catch(() => undefined);
+  /**
+   * Dismiss is addressed by the REAL record id (a store row). Internally the
+   * id is expanded through the alert's stable key (kind + rowId/entryId +
+   * milestone), so every duplicate record of the SAME logical alert is
+   * dismissed together — in React state, in the local SQLite cache and, for
+   * admin notifications, on the server. Dedupe keys never leave this layer:
+   * components and persistence always deal in ids.
+   */
+  const dismissNotificationRecords = (records: readonly NotificationRecord[]) => {
+    const dismissedAt = records.map((record) => ({ ...record, dismissed: true, read: true }));
+    setNotifications((current) => {
+      const dismissedIds = new Set(records.map((record) => record.id));
+      return current.map((record) => (
+        dismissedIds.has(record.id) ? { ...record, dismissed: true, read: true } : record
+      ));
+    });
+    for (const record of dismissedAt) {
+      void persistNotification(record.id, { dismissed: true, read: true });
+      if (record.id.startsWith('admin-notification-') && authService.authClient) {
+        void dismissAdminNotification(
+          authService.authClient as unknown as AdminNotificationClient,
+          record.id,
+        ).catch(() => undefined);
+      }
     }
+  };
+
+  const handleNotificationDismiss = (idOrKey: string) => {
+    // Expand the clicked record id to every record of the SAME logical alert
+    // (stable key), so persisted duplicates disappear together. Stable keys
+    // never cross this boundary — callers only ever deal in record ids.
+    const target = notifications.find((record) => record.id === idOrKey)
+      ?? notifications.find((record) => notificationStableKey(record) === idOrKey);
+    if (!target) {
+      return;
+    }
+    const targetKey = notificationStableKey(target);
+    const matches = notifications.filter((record) => (
+      notificationStableKey(record) === targetKey
+    ));
+    dismissNotificationRecords(matches);
+  };
+
+  // Clear all: every alert currently listed disappears at once; the popover
+  // shows "No notifications" immediately and the dismissal is durable.
+  const handleNotificationClearAll = () => {
+    const visible = dedupeNotifications(notifications).filter((record) => (
+      record.dismissed !== true && !isNotificationSnoozed(record)
+    ));
+    const keys = new Set(visible.map((record) => notificationStableKey(record)));
+    const matches = notifications.filter((record) => (
+      keys.has(notificationStableKey(record)) && record.dismissed !== true
+    ));
+    if (matches.length === 0) {
+      return;
+    }
+    dismissNotificationRecords(matches);
   };
 
   const handleNotificationView = (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => {
@@ -722,16 +797,19 @@ export function App({
       health={health}
       syncStatus={syncStatus}
       pendingOutbox={pendingOutbox}
+      localStoreError={localStoreError}
       isDemoMode={authStatus === 'demo'}
       sheetRepository={sheetRepository}
       settings={workspaceSettings}
       onSettingsChange={persistWorkspaceSettings}
       settingsError={settingsLoadError}
       auditProfiles={auditProfiles}
+      auditRemoteClient={authService.authClient as unknown as { rpc?: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> } | null}
       repositoryRevision={repositoryRevision}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}
       onNotificationDismiss={handleNotificationDismiss}
+      onNotificationClearAll={handleNotificationClearAll}
       onNotificationView={handleNotificationView}
       onNotificationRestore={handleNotificationRestore}
       onNotificationSnooze={handleNotificationSnooze}

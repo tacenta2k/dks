@@ -372,3 +372,80 @@
     padding: 17px;
   }
 }
+
+/* About: identity block (DKS · version · Tacenta) with the GitHub link. */
+.settings-about {
+  align-items: flex-start;
+}
+
+.settings-about__identity {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+/* Navy artwork on a light card; the lightened variant on a dark card. */
+.settings-about__logo {
+  width: 168px;
+  height: auto;
+  margin: 0 0 6px;
+  object-fit: contain;
+}
+
+.settings-about__logo--on-dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .settings-about__logo--on-light {
+  display: none;
+}
+
+:root[data-theme='dark'] .settings-about__logo--on-dark {
+  display: block;
+}
+
+.settings-about .settings-about__name {
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+
+.settings-about .settings-about__version {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.settings-about .settings-about__author {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin: 2px 0 0;
+}
+
+.settings-about__link {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--color-text-muted);
+  text-decoration: none;
+}
+
+.settings-about__link:hover,
+.settings-about__link:focus-visible {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.settings-about .settings-about__author + p {
+  margin-top: 6px;
+}
+
+:root[data-theme='dark'] .settings-about {
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+}

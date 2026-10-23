@@ -312,15 +312,48 @@
   padding-bottom: 1px;
 }
 
+/*
+ * FIXES_UI §5.9 — single, non-blocking empty-state hint. It floats INSIDE the
+ * grid area (bottom-centre, above the rows), never stacked as a separate
+ * card, never covering the `+` header or the draft row, and never blocking
+ * clicks (pointer-events: none; the Clear-filters button re-enables them).
+ */
 .sheet-grid__empty {
-  margin: -2px 0 0;
-  padding: 11px;
+  position: absolute;
+  z-index: 5;
+  left: 50%;
+  bottom: 14%;
+  transform: translateX(-50%);
+  margin: 0;
+  padding: 8px 16px;
   border: 1px solid var(--color-border);
-  border-top: 0;
-  border-radius: 0 0 10px 10px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-surface) 92%, transparent);
+  box-shadow: 0 8px 22px var(--color-shadow);
   color: var(--color-text-muted);
   font-size: 12px;
   text-align: center;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.sheet-grid__empty p {
+  margin: 0;
+}
+
+.sheet-grid__empty button {
+  pointer-events: auto;
+  margin-left: 8px;
+}
+
+/* In test/host environments the hint renders in flow under the table. */
+.sheet-accessible-table-wrap ~ .sheet-grid__empty {
+  position: static;
+  transform: none;
+  border: 0;
+  box-shadow: none;
+  margin-top: 8px;
+  white-space: normal;
 }
 
 .sheet-accessible-table-wrap {
@@ -533,5 +566,411 @@
 
   .sheet-workbench {
     padding: 11px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   R2-09 — Visa Sheet fills the whole workspace (no centered card).
+   Measured from the 50px global top bar; the toolbar is the only chrome above
+   the grid and the grid scrolls internally.
+   --------------------------------------------------------------------------- */
+/* Double class on purpose: the generic `.content` rule sets
+   `width: min(100%, 1280px); margin: 0 auto`. Both are single-class selectors,
+   so the winner depended on CSS bundle order — the sheet could still render as
+   a centered 1280px column on a 1920px screen. `.content.content--sheet`
+   outranks it regardless of order. */
+.content.content--sheet {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  height: calc(100vh - 50px);
+  min-height: 0;
+  flex-direction: column;
+  margin: 0;
+  padding: 10px 12px 12px;
+}
+
+.content.content--sheet .sheet-page {
+  width: 100%;
+  max-width: none;
+  flex: 1;
+  min-height: 0;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 0;
+}
+
+/* Nothing inside the sheet may re-introduce a centered column. */
+.content.content--sheet .sheet-workbench,
+.content.content--sheet .sheet-grid-wrap,
+.content.content--sheet .sheet-accessible-table-wrap {
+  width: 100%;
+  max-width: none;
+}
+
+/*
+ * The records grid fills ALL remaining viewport height down to the bottom of
+ * the window: the workbench is a full-height flex column, toolbar keeps its
+ * natural size, and the grid wrap flexes to consume whatever is left.
+ */
+.content--sheet .sheet-workbench {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 8px;
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.content--sheet .sheet-toolbar,
+.content--sheet .sheet-alert {
+  flex: 0 0 auto;
+}
+
+.content--sheet .sheet-grid-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  height: auto;
+  min-height: 240px;
+}
+
+.content--sheet .sheet-accessible-table-wrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.content--sheet .sheet-grid {
+  height: 100%;
+  min-height: 320px;
+}
+
+.sheet-grid-wrap {
+  position: relative;
+  min-height: 0;
+}
+
+.sheet-grid-wrap .sheet-grid {
+  height: 100%;
+  min-height: 320px;
+}
+
+/* AG Grid follows the app theme (R2-07). The light theme class is the base;
+   the dark class swaps every surface, editor, menu and scrollbar token. */
+.sheet-grid.ag-theme-quartz,
+.sheet-grid.ag-theme-quartz-dark {
+  --ag-font-size: 13px;
+  --ag-border-color: var(--color-border);
+  --ag-background-color: var(--color-surface);
+  --ag-foreground-color: var(--color-text);
+  --ag-header-background-color: var(--color-surface-muted);
+  --ag-header-foreground-color: var(--color-text-muted);
+  --ag-odd-row-background-color: transparent;
+  --ag-row-hover-color: color-mix(in srgb, var(--color-primary) 7%, transparent);
+  --ag-selected-row-background-color: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  --ag-input-focus-box-shadow: 0 0 0 2px var(--color-primary);
+  --ag-range-selection-border-color: var(--color-primary);
+  border-radius: 8px;
+}
+
+/* R2-09 — compact, icon-only row actions that fit inside the row. */
+.sheet-actions-cell {
+  padding: 0 4px !important;
+  overflow: hidden;
+}
+
+.sheet-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  height: 100%;
+}
+
+.sheet-row-actions__button {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+}
+
+.sheet-row-actions__button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.sheet-row-actions__button:hover {
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+.sheet-row-actions__button--renew:hover {
+  border-color: color-mix(in srgb, var(--color-success) 45%, var(--color-border));
+  background: var(--color-success-soft);
+  color: var(--color-success);
+}
+
+/* ---------------------------------------------------------------------------
+   R2-09 — Admin-only "Tools ▾" toolbar menu (replaces the Admin card)
+   --------------------------------------------------------------------------- */
+.sheet-tools {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.sheet-tools__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.sheet-tools__button:hover,
+.sheet-tools__button[aria-expanded='true'] {
+  background: var(--color-surface-muted);
+}
+
+.sheet-tools__menu {
+  position: absolute;
+  z-index: 60;
+  top: calc(100% + 6px);
+  right: 0;
+  display: flex;
+  width: 220px;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 16px 34px var(--color-shadow-strong);
+}
+
+.sheet-tools__item {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheet-tools__item:hover {
+  background: var(--color-surface-muted);
+}
+
+.sheet-tools__note {
+  margin: 4px 6px 2px;
+  color: var(--color-text-subtle);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.sheet-tools__loading {
+  color: var(--color-text-muted);
+  font-size: 11px;
+}
+
+/* ---------------------------------------------------------------------------
+   SHEET-13 — column header right-click menu
+   --------------------------------------------------------------------------- */
+.sheet-column-menu {
+  position: absolute;
+  z-index: 70;
+  display: flex;
+  min-width: 190px;
+  flex-direction: column;
+  padding: 5px;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 16px 34px var(--color-shadow-strong);
+}
+
+.sheet-column-menu__item {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sheet-column-menu__item:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+.sheet-column-menu__item:disabled {
+  color: var(--color-text-subtle);
+  cursor: default;
+}
+
+/* ---------------------------------------------------------------------------
+   SHEET-04 — Group by header rows (Community full-width rows)
+   --------------------------------------------------------------------------- */
+.sheet-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 100%;
+  padding: 0 10px;
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sheet-group-header__count {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text-subtle);
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+/* SHEET-11 / R3: the blank draft row sits immediately after the last saved
+   record (it is a normal row at the end of the list, not a pinned overlay).
+   Its cells get a visible outline so the "type here to add" row is obvious. */
+.ag-row.sheet-draft-row {
+  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
+  font-style: italic;
+}
+
+.ag-row.sheet-draft-row .ag-cell {
+  border-right: 1px dashed var(--color-border-strong);
+  border-bottom: 1px dashed var(--color-border-strong);
+  color: var(--color-text);
+}
+
+.ag-row.sheet-draft-row .ag-cell:first-child {
+  border-left: 1px dashed var(--color-border-strong);
+}
+
+.sheet-draft-row td {
+  background: color-mix(in srgb, var(--color-surface-muted) 72%, transparent);
+  border-top: 1px dashed var(--color-border-strong) !important;
+  border-bottom: 1px dashed var(--color-border-strong) !important;
+}
+
+.sheet-draft-row td:first-child {
+  border-left: 1px dashed var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .sheet-draft-row td,
+:root[data-theme='dark'] .ag-row.sheet-draft-row {
+  background: color-mix(in srgb, var(--color-surface-muted) 85%, transparent);
+}
+
+.sheet-draft-input {
+  width: 100%;
+  min-width: 80px;
+  padding: 3px 6px;
+  border: 1px dashed var(--color-border-strong);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+}
+
+/* R2-07 — no white panels in dark mode for the plain HTML admin tables. */
+:root[data-theme='dark'] .recycle-bin-page table,
+:root[data-theme='dark'] .audit-log-page table,
+:root[data-theme='dark'] .audit-log-page tbody tr,
+:root[data-theme='dark'] .recycle-bin-page tbody tr {
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+/* Compact inline feedback inside the Tools toolbar slot. */
+.sheet-tools .admin-inline-message {
+  max-width: 300px;
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* FIXES_UI §5.2 "Smaller windows": search shrinks, then the last quick filters
+   move into this menu so the toolbar stays one row. */
+.sheet-more-filters {
+  position: relative;
+  display: inline-flex;
+}
+
+.sheet-more-filters__button {
+  gap: 3px;
+  white-space: nowrap;
+}
+
+.sheet-more-filters__menu {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 4px);
+  left: 0;
+  display: grid;
+  min-width: 120px;
+  padding: 4px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 14px 28px var(--color-shadow);
+}
+
+.sheet-more-filters__item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-text);
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+}
+
+.sheet-more-filters__item:hover,
+.sheet-more-filters__item:focus-visible {
+  background: var(--color-primary-soft);
+}
+
+.sheet-more-filters__item[aria-checked='true'] {
+  color: var(--color-primary-strong);
+  font-weight: 700;
+}
+
+@media (max-width: 1080px) {
+  /* Search gives up width before anything else does. */
+  .sheet-toolbar__filters {
+    flex-wrap: nowrap;
+  }
+
+  .sheet-search input {
+    width: clamp(120px, 18vw, 220px);
   }
 }

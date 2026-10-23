@@ -277,6 +277,43 @@ export function formatDisplayDate(value: string | Date | null | undefined): stri
  * date-only display form for date values, and returns the input unchanged
  * when nothing parseable was supplied.
  */
+/**
+ * DKS is operated in Oman. Audit messages (and anything else that claims to be
+ * "the business timestamp") are stamped in Asia/Muscat regardless of the PC's
+ * timezone, so an Admin in a different region does not produce a message that
+ * disagrees with the server's default (`now() at time zone 'Asia/Muscat'`).
+ */
+export const DKS_BUSINESS_TIME_ZONE = 'Asia/Muscat';
+
+/**
+ * Format a moment as `DD/MM/YYYY HH:mm` in the business timezone. Uses
+ * formatToParts so the output does not depend on the host's locale data, and
+ * hourCycle h23 so midnight is `00:00`, never `24:00`.
+ */
+export function formatBusinessDateTime(
+  value: string | Date | null | undefined,
+  timeZone: string = DKS_BUSINESS_TIME_ZONE,
+): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return String(value);
+  }
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone,
+    day: '2-digit',
+    month: '2-digit',
+    year: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const pick = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  return `${pick('day')}/${pick('month')}/${pick('year')} ${pick('hour')}:${pick('minute')}`;
+}
+
 export function formatLocalDateTime(value: string | Date | null | undefined): string {
   if (value === null || value === undefined) {
     return '';

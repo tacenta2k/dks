@@ -1,6 +1,7 @@
 import { isValidIsoDate } from '../../lib/date';
-import type {
-  ColumnDefinition,
+import {
+  normalizeColumns,
+  type ColumnDefinition,
 } from '../../lib/columns';
 import type {
   DksLocalApi,
@@ -279,9 +280,12 @@ export class ElectronSheetRepository implements SheetRepository {
 
   async getColumns(): Promise<ColumnDefinition[]> {
     const snapshot = await this.snapshot();
-    return clone(snapshot.columns
+    // normalizeColumns heals the primary-expiry invariant in memory as well
+    // (first live date_expiry is the single primary; stale flags are dropped)
+    // so persisted junk can never leak into guards driven by these columns.
+    return normalizeColumns(clone(snapshot.columns
       .map((column) => localColumn(column, 'column'))
-      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true));
+      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true)));
   }
 
   async getRows(): Promise<SheetRow[]> {
@@ -321,6 +325,28 @@ export class ElectronSheetRepository implements SheetRepository {
       'deleteColumn',
       async (local) => localColumn(await local.deleteColumn({ id: columnId, role }), 'deleted column'),
       () => this.fallback.softDeleteColumn(columnId, role),
+    );
+  }
+
+  /**
+   * R3 batch B — adopt the server's column id after a duplicate-name
+   * reconciliation. The local store rewrites the entry JSON keys, so every
+   * value stays attached to the same (now server-identified) column.
+   */
+  async rekeyColumn(oldId: string, newId: string): Promise<void> {
+    await this.use(
+      'rekeyColumn',
+      async (local) => {
+        if (!local.rekeyColumn) {
+          throw new Error('Column reconciliation is unavailable in this local store');
+        }
+        const result = await local.rekeyColumn({ oldId, newId });
+        if (result?.ok !== true) {
+          throw new Error('The local column could not be reconciled with the server id');
+        }
+        return undefined;
+      },
+      async () => undefined,
     );
   }
 
@@ -453,6 +479,30 @@ export class ElectronSheetRepository implements SheetRepository {
       async (local) => (await local.listAudit({ limit: 500 })).map(auditEntry),
       async () => this.fallback.getAuditHistory ? this.fallback.getAuditHistory() : [],
     );
+  }
+
+  async clearAuditLog(message: string, options: SheetAuditOptions = {}): Promise<SheetAuditEntry[]> {
+    await this.use(
+      'clearAuditLog',
+      async (local) => {
+        if (!local.clearAuditLog) {
+          throw new Error('Audit log clearing is unavailable in this local store');
+        }
+        await local.clearAuditLog({
+          message,
+          role: String(this.role ?? 'admin'),
+          actor: options.actorId ?? options.actor ?? null,
+        });
+        return undefined;
+      },
+      async () => {
+        if (this.fallback.clearAuditLog) {
+          await this.fallback.clearAuditLog(message);
+        }
+        return undefined;
+      },
+    );
+    return this.getAuditHistory();
   }
 
   async createRows(

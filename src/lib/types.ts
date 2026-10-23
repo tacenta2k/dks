@@ -199,11 +199,17 @@ export interface DksLocalApi {
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
+  rekeyColumn?: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {
     records: readonly DksLocalImportRecord[];
     options?: DksLocalAuditOptions;
   }) => Promise<DksLocalRow[]>;
   listAudit: (input?: { limit?: number }) => Promise<DksLocalAuditRecord[]>;
+  clearAuditLog?: (input: {
+    message: string;
+    role: string;
+    actor?: string | null;
+  }) => Promise<DksLocalAuditRecord>;
   listNotifications: (input?: { unreadOnly?: boolean }) => Promise<DksLocalNotificationRecord[]>;
   addNotification?: (input: DksLocalNotificationInput) => Promise<DksLocalNotificationRecord>;
   updateNotification?: (input: DksLocalNotificationUpdate) => Promise<DksLocalNotificationRecord | null>;
@@ -224,6 +230,7 @@ export interface DksLocalApi {
 export interface DksWindowApi {
   platform: string;
   appVersion: string;
+  openExternal?: (url: string) => Promise<boolean>;
   minimizeToTray: () => void;
   quit: () => void;
   local?: DksLocalApi;

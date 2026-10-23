@@ -1,6 +1,6 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
 import { SettingsPage } from '../src/features/settings/SettingsPage';
@@ -152,5 +152,42 @@ describe('settings page', () => {
     // ("Administration") are removed.
     expect(banner).toHaveTextContent('Settings');
     expect(banner).not.toHaveTextContent('Administration');
+  });
+});
+
+describe('About & updates (R2-06)', () => {
+  afterEach(() => {
+    delete (window as unknown as { dks?: unknown }).dks;
+  });
+
+  it('shows the real app version, Tacenta credit and opens GitHub externally', async () => {
+    const openExternal = vi.fn().mockResolvedValue(true);
+    (window as unknown as { dks: Record<string, unknown> }).dks = {
+      appVersion: '4.2.0',
+      openExternal,
+    };
+
+    render(<SettingsPage role="admin" onCheckForUpdates={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
+
+    expect(screen.getByText('DKS')).toBeInTheDocument();
+    expect(screen.getByLabelText('Version 4.2.0')).toHaveTextContent('Version 4.2.0');
+    expect(screen.getByText(/Made by Tacenta/)).toBeInTheDocument();
+
+    const link = screen.getByRole('link', { name: 'Tacenta on GitHub' });
+    fireEvent.click(link);
+
+    expect(openExternal).toHaveBeenCalledTimes(1);
+    expect(openExternal).toHaveBeenCalledWith('https://github.com/tacenta2k');
+    // The About card keeps the update check.
+    expect(screen.getByRole('button', { name: 'Check for updates' })).toBeInTheDocument();
+  });
+
+  it('prefers an explicit version prop and never renders a placeholder', () => {
+    render(<SettingsPage role="admin" appVersion="9.9.9" />);
+    fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
+    expect(screen.getByLabelText('Version 9.9.9')).toBeInTheDocument();
+    expect(screen.queryByText(/Unavailable/i)).not.toBeInTheDocument();
+    expect(screen.getByText('Version 9.9.9')).toBeInTheDocument();
   });
 });

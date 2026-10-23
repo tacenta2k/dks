@@ -94,6 +94,34 @@ describe('sync status panel (Blocker 3, UI)', () => {
       .toBeInTheDocument();
   });
 
+  it('reports a missing local database instead of claiming "Offline" (R7)', () => {
+    render(
+      <AppShell
+        profile={officeProfile()}
+        syncStatus={syncState({ status: 'offline' })}
+        localStoreError={'Local database unavailable: NODE_MODULE_VERSION 137…'}
+      />,
+    );
+
+    const banner = screen.getByTestId('local-store-error');
+    expect(banner).toHaveAttribute('role', 'alert');
+    expect(banner.textContent).toContain('Local database unavailable');
+
+    // The pill must never claim the data was saved locally when it was not.
+    expect(screen.queryByText(/Offline — saved locally/)).not.toBeInTheDocument();
+    expect(screen.getByTitle('Local database unavailable')).toBeInTheDocument();
+
+    // The real reason stays reachable, not hidden behind a generic message.
+    expect(banner.textContent).toContain('NODE_MODULE_VERSION 137');
+  });
+
+  it('shows no local-database banner when the store is healthy', () => {
+    render(<AppShell profile={officeProfile()} syncStatus={syncState()} />);
+
+    expect(screen.queryByTestId('local-store-error')).not.toBeInTheDocument();
+    expect(screen.getByText('Saved to cloud')).toBeInTheDocument();
+  });
+
   it('hides the issue block entirely when there is nothing pending and no error', () => {
     const { container } = render(
       <AppShell

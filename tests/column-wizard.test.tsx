@@ -36,4 +36,26 @@ describe('column wizard', () => {
     expect(onSubmit).not.toHaveBeenCalled();
     expect(screen.getByRole('alert')).toHaveTextContent(/at least one dropdown option/i);
   });
+
+  it('refuses to create a user column named like the generated "Days Left" column', () => {
+    const onSubmit = vi.fn();
+
+    render(<ColumnWizard existingColumns={[]} onClose={vi.fn()} onSubmit={onSubmit} />);
+    fireEvent.change(screen.getByLabelText('Column name'), { target: { value: 'Days Left' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/generated system column/i);
+
+    // Spacing/casing variants are blocked exactly the same way…
+    fireEvent.change(screen.getByLabelText('Column name'), { target: { value: ' days_left ' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(screen.getByRole('alert')).toHaveTextContent(/generated system column/i);
+
+    // …while a legitimately different name still goes through.
+    fireEvent.change(screen.getByLabelText('Column name'), { target: { value: 'Total days left' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Add column' }));
+    expect(onSubmit).toHaveBeenCalledWith(expect.objectContaining({ name: 'Total days left' }));
+  });
 });

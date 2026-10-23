@@ -12,6 +12,10 @@ import type {
   RemoteEntryInput,
 } from './sqlite';
 import type { SyncState, SyncStatus } from './sync';
+import {
+  localStoreUnavailableMessage,
+  type LocalStoreFailure,
+} from './local-store-diagnostics';
 
 /** Stable channel names shared by the main-process registration and preload. */
 export const LOCAL_IPC_CHANNELS = Object.freeze({
@@ -25,8 +29,10 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   addColumn: 'dks:local:add-column',
   updateColumn: 'dks:local:update-column',
   deleteColumn: 'dks:local:delete-column',
+  rekeyColumn: 'dks:local:rekey-column',
   importRecords: 'dks:local:import-records',
   listAudit: 'dks:local:list-audit',
+  clearAuditLog: 'dks:local:clear-audit-log',
   listNotifications: 'dks:local:list-notifications',
   addNotification: 'dks:local:add-notification',
   updateNotification: 'dks:local:update-notification',
@@ -67,9 +73,11 @@ export interface LocalIpcStore {
   createColumn?: (input: ColumnInput & { role?: string }) => unknown;
   updateColumn?: (input: ColumnInput & { role?: string }) => unknown;
   deleteColumn: (id: string, role: string, idempotencyKey?: string) => unknown | null;
+  rekeyColumn?: (oldId: string, newId: string) => boolean;
   getSyncStatus: () => SyncState;
   setSyncStatus: (state: SyncStatus | (Partial<SyncState> & Pick<SyncState, 'status'>)) => SyncState;
   listAudit: (limit?: number) => readonly AuditRecord[];
+  clearAuditLog?: (input: { message: string; actor?: string | null }) => AuditRecord;
   listNotifications: (unreadOnly?: boolean) => readonly NotificationRecord[];
   addNotification?: (input: NotificationInput) => NotificationRecord;
   updateNotification?: (id: number | string, patch: NotificationPatch) => NotificationRecord | null;
@@ -624,6 +632,17 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         .filter((row): row is Record<string, unknown> => row !== null);
     },
 
+    [LOCAL_IPC_CHANNELS.rekeyColumn]: (payload) => {
+      const input = asRecord(payload, 'column rekey input');
+      const oldId = requiredString(input.oldId, 'old column id');
+      const newId = requiredString(input.newId, 'new column id');
+      const rekey = store.rekeyColumn;
+      if (!rekey) {
+        throw new Error('Column reconciliation is unavailable in this local store');
+      }
+      return { ok: rekey(oldId, newId) === true };
+    },
+
     [LOCAL_IPC_CHANNELS.listAudit]: (payload) => {
       const input = payload === undefined ? {} : asRecord(payload, 'audit list input');
       const limit = input.limit === undefined ? DEFAULT_AUDIT_LIMIT : Number(input.limit);
@@ -631,6 +650,20 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error(`audit limit must be an integer between 1 and ${MAX_AUDIT_LIMIT}`);
       }
       return cloneSerializable(store.listAudit(limit));
+    },
+
+    [LOCAL_IPC_CHANNELS.clearAuditLog]: (payload) => {
+      const input = asRecord(payload, 'audit clear input');
+      if (input.role !== 'admin') {
+        throw new Error('Only administrators may clear the audit log');
+      }
+      const message = requiredString(input.message, 'audit clear message');
+      const clear = store.clearAuditLog;
+      if (!clear) {
+        throw new Error('Audit log clearing is unavailable in this local store');
+      }
+      const actor = typeof input.actor === 'string' && input.actor.trim() ? input.actor.trim() : null;
+      return cloneSerializable(clear({ message, actor }));
     },
 
     [LOCAL_IPC_CHANNELS.listNotifications]: (payload) => {
@@ -889,3 +922,46 @@ export function registerLocalIpcHandlers(
 }
 
 export const installLocalIpcHandlers = registerLocalIpcHandlers;
+
+/**
+ * R7: when the local store cannot be opened the app must still answer every
+ * `dks:local:*` channel. A rejected handler with a descriptive message is far
+ * better than Electron's `No handler registered for 'dks:local:get-snapshot'`,
+ * which told the user (and the renderer) nothing about the real cause.
+ */
+export function createLocalStoreFailureHandlers(
+  failure: LocalStoreFailure,
+): LocalIpcHandlers {
+  const handlers = {} as Record<LocalIpcChannel, LocalIpcHandler>;
+  for (const channel of Object.values(LOCAL_IPC_CHANNELS) as LocalIpcChannel[]) {
+    handlers[channel] = () => {
+      throw new Error(localStoreUnavailableMessage(failure, channel));
+    };
+  }
+  return handlers;
+}
+
+export interface LocalStoreFailureIpcDependencies {
+  ipcMain: LocalIpcMain;
+  failure: LocalStoreFailure;
+}
+
+export function registerLocalStoreFailureIpcHandlers(
+  dependencies: LocalStoreFailureIpcDependencies,
+): () => void {
+  const handlers = createLocalStoreFailureHandlers(dependencies.failure);
+  const channels = Object.keys(handlers) as LocalIpcChannel[];
+
+  for (const channel of channels) {
+    // Idempotent: a retry after a transient failure replaces the stub instead
+    // of throwing "Attempted to register a second handler".
+    dependencies.ipcMain.removeHandler?.(channel);
+    dependencies.ipcMain.handle(channel, (_event, payload) => handlers[channel](payload, _event));
+  }
+
+  return () => {
+    for (const channel of channels) {
+      dependencies.ipcMain.removeHandler?.(channel);
+    }
+  };
+}

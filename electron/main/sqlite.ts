@@ -393,9 +393,28 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * The generated "Days Left" system column is protected by ID only
+ * (`col.id === 'daysLeft'`), never by name: a legacy persisted user column
+ * NAMED "Days Left" (e.g. id `days_left`) must remain deletable.
+ */
+const SYSTEM_DAYS_LEFT_COLUMN_ID = 'daysLeft';
+
 function isDaysLeftColumn(column: Pick<LocalColumnDefinition, 'id' | 'name'>): boolean {
-  const normalize = (value: string) => value.trim().toLowerCase().replace(/[ _-]/g, '');
-  return normalize(column.id) === 'daysleft' || normalize(column.name) === 'daysleft';
+  return column.id === SYSTEM_DAYS_LEFT_COLUMN_ID;
+}
+
+/**
+ * Only a LIVE primary expiry (active date_expiry column flagged primary) may
+ * block deletion; stale marks on deleted or non-expiry columns are healed,
+ * never honoured.
+ */
+function isLivePrimaryExpiryColumn(
+  column: Pick<LocalColumnDefinition, 'type' | 'deleted' | 'isPrimaryExpiry'>,
+): boolean {
+  return column.type === 'date_expiry'
+    && column.deleted !== true
+    && column.isPrimaryExpiry === true;
 }
 
 function hasColumnValue(value: unknown): boolean {
@@ -404,10 +423,10 @@ function hasColumnValue(value: unknown): boolean {
 }
 
 function canDeleteColumnForOffice(
-  column: Pick<LocalColumnDefinition, 'id' | 'name' | 'isPrimaryExpiry'>,
+  column: Pick<LocalColumnDefinition, 'id' | 'name' | 'type' | 'deleted' | 'isPrimaryExpiry'>,
   rows: readonly GridRowLike[],
 ): boolean {
-  if (isDaysLeftColumn(column) || column.isPrimaryExpiry === true) {
+  if (isDaysLeftColumn(column) || isLivePrimaryExpiryColumn(column)) {
     return false;
   }
 
@@ -450,6 +469,14 @@ export class SqliteStore {
     this.idFactory = normalizedOptions.idFactory ?? normalizedOptions.idGenerator ?? randomUUID;
     this.bindInstanceMethods();
     this.applyMigrations();
+    // Startup self-heal: stale primary-expiry marks (deleted/non-expiry
+    // columns, "no expiry column but something still flagged") are repaired
+    // before any read or delete guard can trip over them.
+    try {
+      this.repairPrimaryExpiry(this.now());
+    } catch {
+      // Healing is best effort; the per-operation repair still runs.
+    }
   }
 
   /**
@@ -854,6 +881,81 @@ export class SqliteStore {
   }
 
   /** Apply an already-authoritative remote column without creating a sync echo. */
+  /**
+   * R3 batch B — adopt the server's id for a column that already existed under
+   * another id (two machines created the same column name independently, or a
+   * soft-deleted remote column still owns the unique name).
+   *
+   * This is deliberately narrow and transactional:
+   *   - the local column keeps every value (name/type/options/position/…);
+   *   - entry JSON is rewritten so `data[oldId]` becomes `data[newId]` — no
+   *     value is dropped, and the name-keyed fallback keeps working;
+   *   - queued outbox rows for the old column id are re-pointed so the pending
+   *     change is not orphaned;
+   *   - nothing is deleted unless the old row was replaced by the new id.
+   * If a column with `newId` already exists locally the call is a no-op.
+   */
+  public rekeyColumn(oldId: string, newId: string): boolean {
+    this.ensureOpen();
+    const sourceId = oldId.trim();
+    const targetId = newId.trim();
+    if (!sourceId || !targetId || sourceId === targetId) {
+      return false;
+    }
+    const source = this.getColumn(sourceId);
+    if (!source || this.getColumn(targetId)) {
+      return false;
+    }
+
+    const rewrite = this.database.transaction(() => {
+      this.database.prepare('DELETE FROM columns WHERE id = ?').run(sourceId);
+      this.database.prepare(`
+        INSERT INTO columns (
+          id, name, type, options, position, visible, is_primary_expiry,
+          is_passport, deleted, deleted_at, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        targetId,
+        source.name,
+        source.type,
+        encode(source.options, {}),
+        Number(source.position ?? 0),
+        source.visible === false ? 0 : 1,
+        bool(source.isPrimaryExpiry ?? source.is_primary_expiry) ? 1 : 0,
+        bool(source.isPassport ?? source.is_passport) ? 1 : 0,
+        bool(source.deleted) ? 1 : 0,
+        source.deleted_at ?? null,
+        String(source.created_at ?? this.now()),
+        String(source.updated_at ?? this.now()),
+      );
+
+      // Entry JSON: move the value to the adopted id and drop the stale key.
+      const rows = this.database.prepare('SELECT id, data FROM entries').all() as {
+        id: string;
+        data: string;
+      }[];
+      const update = this.database.prepare('UPDATE entries SET data = ? WHERE id = ?');
+      for (const row of rows) {
+        const data = decode(row.data, {}) as Record<string, unknown>;
+        if (!data || typeof data !== 'object' || !(sourceId in data)) {
+          continue;
+        }
+        const next: Record<string, unknown> = { ...data };
+        if (!(targetId in next)) {
+          next[targetId] = data[sourceId];
+        }
+        delete next[sourceId];
+        update.run(encode(next), row.id);
+      }
+
+      this.database.prepare(
+        "UPDATE outbox SET entity_id = ? WHERE entity_type = 'column' AND entity_id = ?",
+      ).run(targetId, sourceId);
+    });
+    rewrite();
+    return true;
+  }
+
   public applyRemoteColumn(input: RemoteColumnInput): LocalColumn {
     this.ensureOpen();
     if (!input.id?.trim() || !input.name?.trim()) {
@@ -928,12 +1030,10 @@ export class SqliteStore {
     if (!LOCAL_COLUMN_TYPES.has(input.type)) {
       throw new Error(`Unsupported column type: ${String(input.type)}`);
     }
-    if (
-      (input.isPrimaryExpiry === true || input.is_primary_expiry === true)
-      && input.type !== 'date_expiry'
-    ) {
-      throw new Error('The primary expiry column must use date_expiry type');
-    }
+    // A stale is_primary_expiry on a NON-date_expiry column is HEALED, never
+    // rejected: rejecting it made the bogus legacy "Days Left" row impossible
+    // to repair or delete. The flag simply has no meaning outside date_expiry
+    // and `primary` below already gates on the type.
     const existing = this.getColumn(input.id);
     const timestamp = input.updatedAt ?? input.updated_at ?? this.now();
     const isFirstExpiry = input.type === 'date_expiry'
@@ -947,7 +1047,14 @@ export class SqliteStore {
     );
 
     const execute = this.database.transaction(() => {
-      if (primary) {
+      // Honour an EXPLICIT primary re-selection made on an already-persisted
+      // row (the administrator's "this is now the primary" action): clear the
+      // other marks so the selection wins. For BULK/creation upserts (row not
+      // yet persisted — sync or import brings both flags at once) other marks
+      // stay in place and repairPrimaryExpiry resolves any ambiguity
+      // deterministically to the FIRST live expiry column by position, so the
+      // outcome never depends on iteration order.
+      if (primary && existing) {
         this.database.prepare('UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE is_primary_expiry = 1 AND id <> ?')
           .run(timestamp, input.id);
       }
@@ -1011,12 +1118,34 @@ export class SqliteStore {
     return result;
   }
 
+  /**
+   * Self-heal the primary-expiry invariant in the LOCAL data:
+   *   1. clear every stale mark (deleted columns and non-date_expiry columns
+   *      may never carry is_primary_expiry — those marks used to block the
+   *      column's own deletion with the misleading "primary expiry" error);
+   *   2. when no live date_expiry column exists, NO column may stay marked
+   *      primary (returns "none" instead of leaving the junk flag);
+   *   3. otherwise exactly one live date_expiry column is primary — the first
+   *      by position when the current marks are zero or ambiguous.
+   * Runs on startup and after every column change, including before delete
+   * checks, so a guard can never be fooled by the state it is healing.
+   */
   private repairPrimaryExpiry(timestamp: string): void {
+    this.database.prepare(
+      `UPDATE columns
+          SET is_primary_expiry = 0, updated_at = ?
+        WHERE is_primary_expiry = 1
+          AND (deleted = 1 OR type <> 'date_expiry')`,
+    ).run(timestamp);
+
     const activeExpiry = this.database.prepare(
       'SELECT id FROM columns WHERE deleted = 0 AND type = \'date_expiry\' ORDER BY position, id',
     ).all() as { id: string }[];
 
     if (activeExpiry.length === 0) {
+      this.database.prepare(
+        'UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE is_primary_expiry = 1',
+      ).run(timestamp);
       return;
     }
 
@@ -1027,7 +1156,8 @@ export class SqliteStore {
       return;
     }
 
-    this.database.prepare('UPDATE columns SET is_primary_expiry = 0 WHERE deleted = 0 AND type = \'date_expiry\'').run();
+    this.database.prepare('UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE deleted = 0 AND type = \'date_expiry\'')
+      .run(timestamp);
     this.database.prepare('UPDATE columns SET is_primary_expiry = 1, updated_at = ? WHERE id = ?')
       .run(timestamp, activeExpiry[0].id);
   }
@@ -1044,8 +1174,12 @@ export class SqliteStore {
     id: string,
     role: 'admin' | 'office' | string,
   ): boolean {
+    this.ensureOpen();
+    // Self-heal before judging: stale primary marks (deleted/non-expiry
+    // columns, no live expiry) must never block this deletion.
+    this.repairPrimaryExpiry(this.now());
     const column = this.getColumn(id);
-    if (!column || isDaysLeftColumn(column) || column.isPrimaryExpiry === true) {
+    if (!column || isDaysLeftColumn(column) || isLivePrimaryExpiryColumn(column)) {
       return false;
     }
     if (role === 'admin') {
@@ -1177,7 +1311,12 @@ export class SqliteStore {
 
   public markOutboxFailed(id: number | string, message: string): void {
     this.ensureOpen();
-    this.database.prepare('UPDATE outbox SET status = \'failed\', last_error = ? WHERE id = ?').run(message, id);
+    // A failed attempt is still an attempt: the sync detail panel shows
+    // "attempted N×" from this counter, which previously stayed at 0 because
+    // only the (barely used) processing transition incremented it.
+    this.database.prepare(
+      'UPDATE outbox SET status = \'failed\', last_error = ?, attempts = attempts + 1 WHERE id = ?',
+    ).run(message, id);
   }
 
   /** Mark the local mutation queue complete after a full remote reconciliation. */
@@ -1193,9 +1332,18 @@ export class SqliteStore {
     return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
   }
 
+  /**
+   * Requeue every failed item for another attempt.
+   *
+   * `last_error` is deliberately KEPT: the reason used to be wiped here, so
+   * while the retry was in flight (and if the process died mid-attempt) the
+   * user saw a pending item with no explanation even though the failure had
+   * already been recorded. The reason survives until a successful write
+   * (`markOutboxSynced`) clears it or the next attempt replaces it.
+   */
   public retryFailedOutbox(): number {
     this.ensureOpen();
-    const result = this.database.prepare('UPDATE outbox SET status = \'pending\', last_error = NULL WHERE status = \'failed\'').run();
+    const result = this.database.prepare('UPDATE outbox SET status = \'pending\' WHERE status = \'failed\'').run();
     return result.changes;
   }
 
@@ -1337,6 +1485,37 @@ export class SqliteStore {
     }));
   }
 
+  /**
+   * R2-10 / R3 batch C: administrator-only clear of the local audit mirror.
+   *
+   * This is the ONLY place in DKS that removes audit rows, and it is
+   * deliberately narrow:
+   *   - one transaction, one statement, an explicit predicate (an unfiltered
+   *     `DELETE` is what servers with a "DELETE requires a WHERE clause" guard
+   *     reject, and it also reads as an accident in a code review);
+   *   - a single `clear_audit` entry is written afterwards, in the same call,
+   *     so the clear itself is always traceable;
+   *   - the caller's role is checked by the IPC layer and the RPC, so Office
+   *     cannot reach this method.
+   */
+  public clearAuditLog(input: { message: string; actor?: string | null }): AuditRecord {
+    this.ensureOpen();
+    const timestamp = this.now();
+    const clear = this.database.transaction(() => {
+      this.database.prepare('DELETE FROM audit_log WHERE id IS NOT NULL').run();
+    });
+    clear();
+    return this.recordAudit({
+      actor: input.actor ?? null,
+      entityType: 'audit_log',
+      entityId: null,
+      action: 'clear_audit',
+      before: null,
+      after: { message: input.message },
+      createdAt: timestamp,
+    });
+  }
+
   public addNotification(input: NotificationInput): NotificationRecord {
     this.ensureOpen();
     const timestamp = input.createdAt ?? this.now();
@@ -1367,37 +1546,49 @@ export class SqliteStore {
   public updateNotification(id: number | string, patch: NotificationPatch): NotificationRecord | null {
     this.ensureOpen();
     const requested = String(id);
-    const current = this.listNotifications().find((notification) => (
+    // A logical alert can be persisted by several physical rows (historical
+    // duplicate inserts). State patches (read / dismissed / payload) must
+    // land on EVERY matching row, or an untouched duplicate resurrects the
+    // alert on the next load.
+    const matches = this.listNotifications().filter((notification) => (
       String(notification.id) === requested
       || notification.payload.id === id
       || notification.payload.id === requested
       || notification.payload.dedupeKey === requested
     ));
+    const current = matches[0];
     if (!current) {
       return null;
     }
 
-    const nextPayload = patch.payload ? { ...current.payload, ...patch.payload } : current.payload;
-    const nextRead = patch.read ?? current.read;
-    const nextDismissed = patch.dismissed ?? current.dismissed;
     const updatedAt = this.now();
-    this.database.prepare(`
+    const update = this.database.prepare(`
       UPDATE notifications
          SET payload = ?, read = ?, dismissed = ?, updated_at = ?
        WHERE id = ?
-    `).run(
-      encode(nextPayload),
-      nextRead ? 1 : 0,
-      nextDismissed ? 1 : 0,
-      updatedAt,
-      current.id,
-    );
+    `);
+    const apply = this.database.transaction(() => {
+      for (const match of matches) {
+        const nextPayload = patch.payload
+          ? { ...match.payload, ...patch.payload }
+          : match.payload;
+        update.run(
+          encode(nextPayload),
+          (patch.read ?? match.read) ? 1 : 0,
+          (patch.dismissed ?? match.dismissed) ? 1 : 0,
+          updatedAt,
+          match.id,
+        );
+      }
+    });
+    apply();
 
+    const nextPayload = patch.payload ? { ...current.payload, ...patch.payload } : current.payload;
     return {
       ...current,
       payload: nextPayload,
-      read: nextRead,
-      dismissed: nextDismissed,
+      read: patch.read ?? current.read,
+      dismissed: patch.dismissed ?? current.dismissed,
       updatedAt,
     };
   }

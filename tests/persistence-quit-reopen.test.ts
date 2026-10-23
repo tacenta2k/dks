@@ -43,20 +43,41 @@ function registerWithMockIpcMain(store: LocalIpcStore) {
 
 function createFakeRemote() {
   const tables: Record<string, Record<string, unknown>[]> = {};
+  const apply = (table: string, values: readonly Record<string, unknown>[]) => {
+    const rows = tables[table] ?? (tables[table] = []);
+    for (const value of values) {
+      const key = typeof value.id === 'string' ? 'id' : 'key';
+      const index = rows.findIndex((row) => row[key] === value[key]);
+      if (index >= 0) {
+        rows[index] = { ...rows[index], ...value };
+      } else {
+        rows.push({ ...value });
+      }
+    }
+  };
   const client: SupabaseDataClient = {
     from: (table) => ({
       select: async () => ({ data: tables[table] ?? [], error: null }),
+      // R3 batch G: entries/columns are written with an explicit INSERT or
+      // UPDATE; only settings may be upserted.
+      insert: async (values) => {
+        apply(table, values);
+        return { data: [...values], error: null };
+      },
+      update: (values) => ({
+        eq: async (_column: string, id: string) => {
+          apply(table, [{ ...values, id }]);
+          return { data: null, error: null };
+        },
+      }),
       upsert: async (values) => {
-        const rows = tables[table] ?? (tables[table] = []);
-        for (const value of values) {
-          const key = typeof value.id === 'string' ? 'id' : 'key';
-          const index = rows.findIndex((row) => row[key] === value[key]);
-          if (index >= 0) {
-            rows[index] = { ...rows[index], ...value };
-          } else {
-            rows.push({ ...value });
-          }
+        if (table !== 'settings') {
+          return {
+            data: null,
+            error: { message: `unexpected upsert for ${table}` },
+          };
         }
+        apply(table, values);
         return { data: [...values], error: null };
       },
     }),

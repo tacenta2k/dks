@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -50,10 +50,13 @@ describe('sheet row actions', () => {
     expect((await repository.getRows()).filter((row) => row.deleted !== true)).toHaveLength(2);
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete row A1234567' }));
+    // SET-11: the delete confirms in-app (Cancel is the safe default).
+    const dialog = await screen.findByRole('dialog', { name: 'Move this record to the Recycle Bin?' });
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Move to Recycle Bin' }));
     await waitFor(async () => {
       expect((await repository.getRows()).filter((row) => row.deleted !== true)).toHaveLength(1);
     });
-    expect(window.confirm).toHaveBeenCalledWith(expect.stringMatching(/move .*recycle bin/i));
   }, 10_000);
 
   it('requires a future expiry before marking a row renewed', async () => {

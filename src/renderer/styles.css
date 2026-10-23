@@ -272,6 +272,61 @@ button:focus-visible {
   font-weight: 650;
 }
 
+/* R7: the local SQLite store could not be opened. This is a real error state —
+   never an "offline" badge — and it must stay readable in both themes. */
+.local-store-error {
+  margin: 0 0 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(229, 72, 77, 0.4);
+  border-left: 4px solid #e5484d;
+  border-radius: 12px;
+  background: rgba(229, 72, 77, 0.08);
+}
+
+.local-store-error__headline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+  color: var(--color-danger, #e5484d);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.local-store-error__dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #e5484d;
+}
+
+.local-store-error__body {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.local-store-error__details {
+  margin-top: 8px;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.local-store-error__details summary {
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.local-store-error__details p {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
 /* Blocker 3: expandable pending-change details under the sync status. */
 .sync-status__issues {
   margin-top: 6px;
@@ -895,6 +950,82 @@ button:focus-visible {
   font-size: 28px;
 }
 
+/* R3 batch H: the official DKS mark replaces the letter tile. The image keeps
+   its own rounded plate, so the gradient/shadow of the letter tile is dropped. */
+.brand-mark--image {
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
+  box-shadow: none;
+}
+
+.brand-mark--image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/*
+ * FINAL POLISH — the official full DKS logo lockup (never the cropped mark)
+ * wherever the brand appears: sign-in card, sidebar (expanded and collapsed
+ * rail) and Settings → About. The light theme uses the original colours on a
+ * transparent background; dark mode swaps to the lightened variant, so there
+ * is never a white rectangular plate.
+ */
+.brand-logo {
+  display: block;
+}
+
+.brand-logo__img {
+  display: block;
+  object-fit: contain;
+}
+
+.brand-logo__img--on-dark {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-logo__img--on-light {
+  display: none;
+}
+
+:root[data-theme='dark'] .brand-logo__img--on-dark {
+  display: block;
+}
+
+/* Sign-in card: the lockup centred above the title, no crop. */
+.brand-logo--sign-in {
+  width: min(196px, 70%);
+  margin: 0 auto 20px;
+}
+
+.brand-logo--sign-in .brand-logo__img {
+  width: 100%;
+  height: auto;
+  max-height: 92px;
+}
+
+/* Sidebar (expanded): lockup next to the workspace caption. */
+.brand-mark--logo {
+  width: 96px;
+  height: 43px;
+  overflow: visible;
+}
+
+/* Sidebar (collapsed ~56px rail): same artwork scaled with object-contain,
+   centred, never letter-spaced text, never a white box. */
+.sidebar[data-collapsed='true'] .brand-mark--logo {
+  width: 44px;
+  height: 44px;
+  margin: 0 auto;
+}
+
+.sidebar[data-collapsed='true'] .brand-lockup {
+  justify-content: center;
+  padding: 0;
+}
+
 .login-card h1 {
   margin: 7px 0 11px;
   color: var(--color-text);
@@ -967,6 +1098,96 @@ button:focus-visible {
 .button--primary:hover {
   background: var(--color-primary-strong);
   box-shadow: 0 11px 22px color-mix(in srgb, var(--color-primary) 31%, transparent);
+}
+
+/* FIXES_UI §12 — destructive and neutral dialog buttons. */
+.button--danger {
+  background: #c0392b;
+  box-shadow: 0 9px 18px color-mix(in srgb, #c0392b 24%, transparent);
+  color: #fff;
+}
+
+.button--danger:hover:not(:disabled) {
+  background: #a93226;
+}
+
+.button--secondary {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+  color: var(--color-text);
+}
+
+.button--secondary:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+.button--quiet {
+  border-color: transparent;
+  background: transparent;
+  color: var(--color-primary-strong);
+}
+
+.button--quiet:hover:not(:disabled) {
+  background: var(--color-primary-soft);
+}
+
+.button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+/* Shared confirmation dialog (SET-11): red destructive action, Cancel safe. */
+.confirm-dialog-backdrop {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: color-mix(in srgb, #0d1424 52%, transparent);
+}
+
+.confirm-dialog {
+  display: grid;
+  width: min(100%, 420px);
+  gap: 12px;
+  padding: 20px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: 0 24px 70px var(--color-shadow-strong);
+}
+
+.confirm-dialog__title {
+  margin: 0;
+  font-size: 16px;
+}
+
+.confirm-dialog__body p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.confirm-dialog__hint {
+  margin: 0;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+}
+
+.confirm-dialog__error {
+  margin: 0;
+  color: #c0392b;
+  font-size: 11px;
+}
+
+.confirm-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
 }
 
 .login-card__footnote {
@@ -1069,4 +1290,192 @@ button:focus-visible {
     transition-duration: 0.01ms !important;
     animation-duration: 0.01ms !important;
   }
+}
+
+/* ---------------------------------------------------------------------------
+   R2-02: notification bell popover (shared by Admin and Office)
+   --------------------------------------------------------------------------- */
+.notification-bell {
+  position: relative;
+}
+
+.notification-bell__button {
+  position: relative;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  padding: 0;
+  place-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease,
+    color 160ms ease;
+}
+
+.notification-bell__button:hover,
+.notification-bell__button[aria-expanded='true'] {
+  border-color: var(--color-border);
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+}
+
+.notification-bell__button svg {
+  width: 18px;
+  height: 18px;
+}
+
+.notification-bell__badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border: 2px solid var(--color-surface);
+  border-radius: 999px;
+  background: #e5484d;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 13px;
+  text-align: center;
+}
+
+.notification-bell__panel {
+  position: absolute;
+  z-index: 45;
+  top: calc(100% + 8px);
+  right: 0;
+  display: flex;
+  width: 360px;
+  max-width: calc(100vw - 24px);
+  max-height: min(70vh, 520px);
+  flex-direction: column;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  background: var(--color-surface-raised);
+  box-shadow: 0 18px 40px var(--color-shadow-strong);
+  overflow: hidden;
+}
+
+.notification-bell__header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.notification-bell__header strong {
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.notification-bell__count {
+  margin-left: auto;
+  color: var(--color-text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+/* FIX: compact "Clear all" lives in the popover header (hidden when empty). */
+.notification-bell__clear-all {
+  padding: 2px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--color-primary-strong);
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.notification-bell__clear-all:hover {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
+.notification-bell__empty {
+  margin: 0;
+  padding: 22px 14px;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.notification-bell__list {
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.notification-bell__item {
+  display: grid;
+  gap: 2px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--color-border);
+}
+
+.notification-bell__item:last-child {
+  border-bottom: 0;
+}
+
+.notification-bell__item--unread {
+  background: color-mix(in srgb, var(--color-primary-soft) 55%, transparent);
+}
+
+.notification-bell__message {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-bell__meta {
+  margin: 0;
+  overflow: hidden;
+  color: var(--color-text-subtle);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.notification-bell__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 6px;
+}
+
+.notification-bell__action {
+  padding: 3px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 1.3;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.notification-bell__action:hover {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-muted);
 }

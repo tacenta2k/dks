@@ -20,6 +20,13 @@ import {
   type ImportSource,
 } from '../import-export/import-service';
 import { AuditLogPage, type AuditProfile } from '../audit/AuditLogPage';
+import {
+  AUDIT_CLEAR_CONFIRMATION,
+  auditClearMessage,
+  clearRemoteAuditLog,
+  isAuditClearConfirmation,
+  type AuditClearRemoteClient,
+} from '../audit/audit-service';
 import { PrintReportModal } from '../print/PrintReportModal';
 import {
   exportReportToPdf,
@@ -27,6 +34,7 @@ import {
   type PrintReportModel,
 } from '../print/print-service';
 import { RecycleBinPage } from '../recycle-bin/RecycleBinPage';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
 import {
   createInMemorySheetRepository,
   type SheetRepository,
@@ -129,12 +137,6 @@ function actorOptions(actor: AdminActor | null | undefined): {
     actorId: actor?.id ?? null,
     actor: actor?.name ?? actor?.email ?? null,
   };
-}
-
-function isConfirmed(message: string): boolean {
-  return typeof window === 'undefined' || typeof window.confirm !== 'function'
-    ? true
-    : window.confirm(message);
 }
 
 /**
@@ -299,6 +301,17 @@ export function AdminSheetActions({
   const [rows, setRows] = useState<SheetRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  // R7 follow-up: the toolbar loads its own snapshot, independently of the
+  // grid. Exporting/printing before that read resolved produced an EMPTY
+  // artifact (0 rows, no columns) — the intermittent admin-features failure.
+  // These refs make every action wait for the real loaded state.
+  const snapshotReady = useRef(false);
+  const snapshotLoad = useRef<Promise<boolean> | null>(null);
+  // State is captured by the click handler's closure; after awaiting the load
+  // the closure still holds the pre-load arrays, so the loaded snapshot is also
+  // mirrored into refs and read from there.
+  const columnsRef = useRef<ColumnDefinition[]>([]);
+  const rowsRef = useRef<SheetRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [preview, setPreview] = useState<ImportPreview | null>(null);
@@ -309,27 +322,86 @@ export function AdminSheetActions({
   const [importColumnTypes, setImportColumnTypes] = useState<Record<string, ImportColumnType>>({});
   const [importConversions, setImportConversions] = useState<Record<string, 'keep' | 'date_start' | 'date_expiry'>>({});
   const [reportOpen, setReportOpen] = useState(false);
+  const [toolsOpen, setToolsOpen] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
+  const toolsRef = useRef<HTMLElement>(null);
 
-  const refresh = useCallback(async () => {
+  // R2-09: the Administrator Tools card became a compact "Tools ▾" menu.
+  // Escape / outside click closes it; picking an item closes it too.
+  useEffect(() => {
+    if (!toolsOpen) {
+      return undefined;
+    }
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setToolsOpen(false);
+      }
+    };
+    const onPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (toolsRef.current && target && !toolsRef.current.contains(target)) {
+        setToolsOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onPointerDown);
+    return () => {
+      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('mousedown', onPointerDown);
+    };
+  }, [toolsOpen]);
+
+  const refresh = useCallback(async (): Promise<boolean> => {
     setLoading(true);
+    snapshotReady.current = false;
     try {
       const [nextColumns, nextRows] = await Promise.all([
         repository.getColumns(),
         repository.getRows(),
       ]);
+      columnsRef.current = nextColumns;
+      rowsRef.current = nextRows;
       setColumns(nextColumns);
       setRows(nextRows);
       setError(null);
+      snapshotReady.current = true;
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load admin sheet actions.');
+      return false;
     } finally {
       setLoading(false);
     }
   }, [repository]);
 
   useEffect(() => {
-    void refresh();
+    const pending = refresh();
+    snapshotLoad.current = pending;
+    return () => {
+      // A late resolution must not flip the flag for a newer repository.
+      if (snapshotLoad.current === pending) {
+        snapshotLoad.current = null;
+        snapshotReady.current = false;
+      }
+    };
+  }, [refresh]);
+
+  /**
+   * Resolves once the toolbar's snapshot has been read. Returns false when the
+   * read failed, so callers can report it instead of exporting/printing an
+   * empty sheet.
+   */
+  const ensureSnapshotLoaded = useCallback(async (): Promise<boolean> => {
+    if (snapshotReady.current) {
+      return true;
+    }
+    const pending = snapshotLoad.current ?? refresh();
+    snapshotLoad.current = pending;
+    await pending;
+    if (snapshotLoad.current === pending) {
+      snapshotLoad.current = null;
+    }
+    return snapshotReady.current;
   }, [refresh]);
 
   const saveExport = onSaveExport ?? saveArtifactWithBrowserFallback;
@@ -341,9 +413,16 @@ export function AdminSheetActions({
     setBusy(true);
     setError(null);
     try {
+      // Never export a half-loaded snapshot: wait for the real loaded state.
+      if (!(await ensureSnapshotLoaded())) {
+        setError('The sheet data could not be loaded, so nothing was exported.');
+        return;
+      }
+      const loadedRows = activeRows(rowsRef.current);
+      const loadedColumns = columnsRef.current;
       const artifact = format === 'xlsx'
-        ? createXlsxExport({ role, rows: activeRows(rows), columns })
-        : createCsvExport({ role, rows: activeRows(rows), columns });
+        ? createXlsxExport({ role, rows: loadedRows, columns: loadedColumns })
+        : createCsvExport({ role, rows: loadedRows, columns: loadedColumns });
       // The service builds pure artifacts; invoke the injected/native saver here.
       saveExport(artifact);
       setStatus(`Exported ${artifact.rowCount} rows as ${format === 'xlsx' ? 'Excel' : 'CSV'}.`);
@@ -364,8 +443,17 @@ export function AdminSheetActions({
     setBusy(true);
     setError(null);
     try {
+      // Column mapping is built from the snapshot, so wait for it first.
+      if (!(await ensureSnapshotLoaded())) {
+        setError('The sheet data could not be loaded, so the file was not imported.');
+        return;
+      }
       const source = await importSourceForFile(file);
-      const nextPreview = await previewImport(source, { role, columns, fileName: file.name });
+      const nextPreview = await previewImport(source, {
+        role,
+        columns: columnsRef.current,
+        fileName: file.name,
+      });
       const initialTypes: Record<string, ImportColumnType> = {};
       for (const header of nextPreview.unmappedHeaders) {
         initialTypes[header] = nextPreview.suggestedColumnTypes.find((s) => s.header === header)?.type ?? 'text';
@@ -488,6 +576,14 @@ export function AdminSheetActions({
     }
   };
 
+  const openReport = async () => {
+    if (!(await ensureSnapshotLoaded())) {
+      setError('The sheet data could not be loaded, so the report was not opened.');
+      return;
+    }
+    setReportOpen(true);
+  };
+
   const handlePrint = (model: PrintReportModel) => {
     if (onPrint) {
       onPrint(model);
@@ -516,49 +612,85 @@ export function AdminSheetActions({
 
   return (
     <>
-      <section className="admin-sheet-actions" aria-label="Admin sheet actions">
-        <div className="admin-sheet-actions__heading">
-          <div>
-            <p className="admin-eyebrow">Administrator tools</p>
-            <h2>Manage records</h2>
-          </div>
-          {loading ? <span className="admin-sheet-actions__loading">Loading…</span> : null}
-        </div>
-        <div className="admin-sheet-actions__buttons">
-           {can(role, 'export') ? (
-             <>
-               <p className="admin-inline-message admin-inline-message--warning">
-                 Exported files contain sensitive data. Protect them and delete them when no longer needed.
-               </p>
-               <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('csv')}>
-                Export CSV
-              </button>
-              <button className="button button--quiet" type="button" disabled={busy} onClick={() => void exportRows('xlsx')}>
-                Export Excel
-              </button>
-            </>
-          ) : null}
-          {can(role, 'import') ? (
-            <>
-              <button className="button button--quiet" type="button" disabled={busy} onClick={() => fileInput.current?.click()}>
+      <section className="sheet-tools" aria-label="Admin sheet actions" ref={toolsRef}>
+        <button
+          className="sheet-tools__button"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={toolsOpen}
+          disabled={busy}
+          onClick={() => setToolsOpen((open) => !open)}
+        >
+          Tools <span aria-hidden="true">▾</span>
+        </button>
+        {toolsOpen ? (
+          <div className="sheet-tools__menu" role="menu" aria-label="Sheet tools">
+            {can(role, 'import') ? (
+              <button
+                className="sheet-tools__item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setToolsOpen(false);
+                  fileInput.current?.click();
+                }}
+              >
                 Import file
               </button>
-              <input
-                ref={fileInput}
-                className="admin-file-input"
-                aria-label="Import CSV or Excel file"
-                type="file"
-                accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
-                onChange={(event) => void onFileChange(event)}
-              />
-            </>
-          ) : null}
-          {can(role, 'print') ? (
-            <button className="button button--quiet" type="button" onClick={() => setReportOpen(true)}>
-              Print
-            </button>
-          ) : null}
-        </div>
+            ) : null}
+            {can(role, 'export') ? (
+              <>
+                <button
+                  className="sheet-tools__item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void exportRows('csv');
+                  }}
+                >
+                  Export CSV
+                </button>
+                <button
+                  className="sheet-tools__item"
+                  type="button"
+                  role="menuitem"
+                  onClick={() => {
+                    setToolsOpen(false);
+                    void exportRows('xlsx');
+                  }}
+                >
+                  Export Excel
+                </button>
+              </>
+            ) : null}
+            {can(role, 'print') ? (
+              <button
+                className="sheet-tools__item"
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setToolsOpen(false);
+                  void openReport();
+                }}
+              >
+                Print / PDF report
+              </button>
+            ) : null}
+            <p className="sheet-tools__note">
+              Exported files contain sensitive data. Protect them and delete them when no longer needed.
+            </p>
+          </div>
+        ) : null}
+        <input
+          ref={fileInput}
+          className="admin-file-input"
+          aria-label="Import CSV or Excel file"
+          type="file"
+          accept=".csv,.xlsx,.xls,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+          onChange={(event) => void onFileChange(event)}
+        />
+        {loading ? <span className="sheet-tools__loading">Loading…</span> : null}
         {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
         {status ? <p className="admin-inline-message" role="status">{status}</p> : null}
       </section>
@@ -609,6 +741,9 @@ export function AdminRecycleBinPanel({
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [busyRowId, setBusyRowId] = useState<string | null>(null);
+  const [pendingAction, setPendingAction] = useState<
+    { kind: 'restore' | 'permanent-delete'; row: SheetRow } | null
+  >(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -637,54 +772,65 @@ export function AdminRecycleBinPanel({
     void refresh();
   }, [refreshToken, refresh]);
 
-  const restore = async (row: SheetRow) => {
+  /**
+   * SET-11 / R2-14 — restore and permanent delete confirm in an in-app dialog
+   * (red button for the destructive action, Cancel as the safe default, Esc
+   * closes, no double submit, failure stays visible) instead of a native
+   * window.confirm.
+   */
+  const askRestore = (row: SheetRow) => {
     if (busyRowId) {
       return;
     }
-    if (!isConfirmed(`Restore ${displayRowLabel(row, columns)} to the active sheet?`)) {
+    setError(null);
+    setPendingAction({ kind: 'restore', row });
+  };
+
+  const askPermanentDelete = (row: SheetRow) => {
+    if (busyRowId) {
       return;
     }
-    if (!repository.restoreRow) {
+    setError(null);
+    setPendingAction({ kind: 'permanent-delete', row });
+  };
+
+  const confirmPendingAction = async () => {
+    const pending = pendingAction;
+    if (!pending || busyRowId) {
+      return;
+    }
+    const label = displayRowLabel(pending.row, columns);
+    if (pending.kind === 'restore' && !repository.restoreRow) {
       setError('This repository does not support restoring rows.');
       return;
     }
-    setBusyRowId(row.id);
-    setStatus(null);
-    try {
-      await repository.restoreRow(row.id, actorOptions(actor));
-      await refresh();
-      onRepositoryChanged?.();
-      setStatus(`Restored ${displayRowLabel(row, columns)}.`);
-    } catch (caught) {
-      // The row must remain visible in the Recycle Bin until the restore has
-      // actually succeeded.
-      setError(caught instanceof Error ? caught.message : 'Unable to restore the row.');
-    } finally {
-      setBusyRowId(null);
-    }
-  };
-
-  const permanentDelete = async (row: SheetRow) => {
-    if (busyRowId) {
-      return;
-    }
-    if (!isConfirmed(`Permanently delete ${displayRowLabel(row, columns)}? This cannot be undone.`)) {
-      return;
-    }
-    if (!repository.permanentDeleteRow) {
+    if (pending.kind === 'permanent-delete' && !repository.permanentDeleteRow) {
       setError('This repository does not support permanent deletion.');
       return;
     }
-    setBusyRowId(row.id);
+    setBusyRowId(pending.row.id);
     setStatus(null);
     try {
-      await repository.permanentDeleteRow(row.id, actorOptions(actor));
+      if (pending.kind === 'restore') {
+        await repository.restoreRow!(pending.row.id, actorOptions(actor));
+        setStatus(`Restored ${label}.`);
+      } else {
+        await repository.permanentDeleteRow!(pending.row.id, actorOptions(actor));
+        setStatus(`Permanently deleted ${label}.`);
+      }
       await refresh();
       onRepositoryChanged?.();
-      setStatus(`Permanently deleted ${displayRowLabel(row, columns)}.`);
+      setPendingAction(null);
     } catch (caught) {
-      // Never hide the record when deletion failed; surface the real error.
-      setError(caught instanceof Error ? caught.message : 'Unable to permanently delete the row.');
+      // The row must remain visible (and the dialog open) until the operation
+      // has actually succeeded.
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : pending.kind === 'restore'
+            ? 'Unable to restore the row.'
+            : 'Unable to permanently delete the row.',
+      );
     } finally {
       setBusyRowId(null);
     }
@@ -702,9 +848,34 @@ export function AdminRecycleBinPanel({
         role={role}
         rows={rows}
         columns={columns}
-        onRestore={restore}
-        onPermanentDelete={permanentDelete}
+        onRestore={askRestore}
+        onPermanentDelete={askPermanentDelete}
       />
+      <ConfirmDialog
+        open={pendingAction !== null}
+        title={pendingAction?.kind === 'restore' ? 'Restore this record?' : 'Permanently delete this record?'}
+        confirmLabel={pendingAction?.kind === 'restore' ? 'Restore' : 'Delete permanently'}
+        destructive={pendingAction?.kind !== 'restore'}
+        busy={busyRowId !== null}
+        error={error}
+        onConfirm={confirmPendingAction}
+        onCancel={() => {
+          if (busyRowId === null) {
+            setPendingAction(null);
+          }
+        }}
+      >
+        {pendingAction ? (
+          pendingAction.kind === 'restore' ? (
+            <p>{displayRowLabel(pendingAction.row, columns)} returns to the active sheet.</p>
+          ) : (
+            <p>
+              {displayRowLabel(pendingAction.row, columns)} is removed for good.
+              This cannot be undone.
+            </p>
+          )
+        ) : null}
+      </ConfirmDialog>
     </div>
   );
 }
@@ -713,13 +884,25 @@ export function AdminAuditLogPanel({
   repository: providedRepository,
   role,
   profiles = [],
-}: AdminToolsProps & { profiles?: readonly AuditProfile[] }) {
+  actorLabel,
+  remoteClient,
+}: AdminToolsProps & {
+  profiles?: readonly AuditProfile[];
+  /** Signed-in administrator name used in the clear-audit entry (R2-10). */
+  actorLabel?: string | null;
+  /** Supabase client used for the admin-only `clear_audit_log` RPC (R2-10). */
+  remoteClient?: AuditClearRemoteClient | null;
+}) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
     [providedRepository],
   );
   const [entries, setEntries] = useState<SheetAuditEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<string | null>(null);
+  const [confirmingClear, setConfirmingClear] = useState(false);
+  const [confirmation, setConfirmation] = useState('');
+  const [clearing, setClearing] = useState(false);
 
   useEffect(() => {
     let mounted = true;
@@ -750,10 +933,127 @@ export function AdminAuditLogPanel({
     return null;
   }
 
+  const clearAuditLog = async () => {
+    if (!isAuditClearConfirmation(confirmation) || clearing) {
+      return;
+    }
+    const message = auditClearMessage((actorLabel ?? '').trim() || 'Admin');
+    setClearing(true);
+    setError(null);
+    setStatus(null);
+    let remoteCleared = false;
+    try {
+      // R3 batch C: remote first, and only through the admin RPC. If the
+      // server refuses (Office caller, offline, migration not run) nothing is
+      // removed locally, so the mirror keeps matching the server and a retry
+      // cannot erase history that was already cleared.
+      await clearRemoteAuditLog(remoteClient ?? null, message);
+      remoteCleared = true;
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to clear the audit log.');
+      setClearing(false);
+      return;
+    }
+
+    try {
+      if (repository.clearAuditLog) {
+        setEntries(await repository.clearAuditLog(message));
+      } else {
+        setEntries([]);
+      }
+      setStatus(message);
+      setConfirmingClear(false);
+      setConfirmation('');
+    } catch (caught) {
+      const reason = caught instanceof Error ? caught.message : 'unknown error';
+      // Be explicit about the half-done state instead of implying nothing
+      // happened: the server log is gone, only this PC's copy is stale.
+      setError(
+        remoteCleared
+          ? `The server audit log was cleared, but this PC's copy could not be updated (${reason}). Sync again to refresh it.`
+          : reason,
+      );
+    } finally {
+      setClearing(false);
+    }
+  };
+
   return (
     <div className="admin-panel">
       {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
+      {status ? <p className="admin-inline-message" role="status">{status}</p> : null}
+      <div className="admin-panel__toolbar">
+        <button
+          className="button button--danger"
+          type="button"
+          onClick={() => {
+            setConfirmation('');
+            setConfirmingClear(true);
+          }}
+        >
+          Clear audit log
+        </button>
+      </div>
       <AuditLogPage role={role} entries={entries} profiles={profiles} />
+      {confirmingClear ? (
+        <div
+          className="admin-dialog-backdrop"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget && !clearing) {
+              setConfirmingClear(false);
+            }
+          }}
+        >
+          <div className="admin-dialog" role="dialog" aria-modal="true" aria-label="Clear audit log">
+            <h2>Clear the audit log?</h2>
+            <p>
+              {entries.length > 0
+                ? `All ${entries.length} recorded ${entries.length === 1 ? 'action' : 'actions'} will be permanently removed for every PC.`
+                : 'The audit log is cleared for every PC.'} One entry recording
+              this clear stays in the log. This cannot be undone.
+            </p>
+            <p className="admin-dialog__hint">
+              Clearing happens on the server first, in one transaction, so a
+              failure leaves the log untouched.
+            </p>
+            <p className="admin-dialog__hint">
+              Type <strong>{AUDIT_CLEAR_CONFIRMATION}</strong> to confirm.
+            </p>
+            <input
+              aria-label="Type DELETE to confirm"
+              autoFocus
+              value={confirmation}
+              onChange={(event) => setConfirmation(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Escape') {
+                  setConfirmingClear(false);
+                }
+                if (event.key === 'Enter') {
+                  void clearAuditLog();
+                }
+              }}
+            />
+            <div className="admin-dialog__actions">
+              <button
+                className="button button--secondary"
+                type="button"
+                disabled={clearing}
+                onClick={() => setConfirmingClear(false)}
+              >
+                Cancel
+              </button>
+              <button
+                className="button button--danger"
+                type="button"
+                disabled={clearing || !isAuditClearConfirmation(confirmation)}
+                onClick={() => void clearAuditLog()}
+              >
+                {clearing ? 'Clearing…' : 'Clear audit log'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

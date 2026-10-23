@@ -2,11 +2,15 @@ import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from
 
 import { can } from '../../lib/permissions';
 import { formatLocalDateTime } from '../../lib/date';
+import { resolveSyncIndicator } from '../../lib/sync-indicator';
+import { LOCAL_STORE_ERROR_HEADLINE } from '../../lib/local-store-error';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
 import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
 import type { DksLocalSyncState } from '../../lib/types';
 import { DashboardPage } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
+import dksLogo from '../../assets/dks-logo.png';
+import dksLogoDark from '../../assets/dks-logo-dark.png';
 import { NotificationBell } from '../../features/notifications/NotificationBell';
 import type {
   NotificationRecord,
@@ -27,6 +31,7 @@ import {
   type PartialSettings,
 } from '../../features/settings/SettingsPage';
 import type { AuditProfile } from '../../features/audit/AuditLogPage';
+import type { AuditClearRemoteClient } from '../../features/audit/audit-service';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -52,6 +57,11 @@ export interface AppShellProps {
   syncStatus?: DksLocalSyncState;
   /** Per-item pending outbox details (sanitised) for the sync status panel. */
   pendingOutbox?: readonly SyncPendingItem[];
+  /**
+   * R7: set when the local SQLite store could not be opened. The shell then
+   * shows a real error state instead of an "offline" pill.
+   */
+  localStoreError?: string | null;
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
   repositoryRevision?: number;
@@ -67,12 +77,15 @@ export interface AppShellProps {
   resendNote?: string;
   settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
   auditProfiles?: readonly AuditProfile[];
+  /** Supabase client for the admin-only clear-audit RPC (R2-10). */
+  auditRemoteClient?: AuditClearRemoteClient | null;
   onSaveExport?: ExportSaveCallback;
   onSavePdf?: (file: PdfExportFile) => void;
   onPrint?: (model: PrintReportModel) => void;
   notifications?: readonly NotificationRecord[];
   onNotificationMarkRead?: (id: string) => void;
   onNotificationDismiss?: (id: string) => void;
+  onNotificationClearAll?: () => void;
   onNotificationView?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void;
   onNotificationRestore?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void | Promise<void>;
   onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
@@ -124,11 +137,29 @@ function loadSidebarCollapsed(): boolean {
 function Brand({ caption = 'Office workspace' }: { caption?: string }) {
   return (
     <div className="brand-lockup" title="DKS">
-      <div className="brand-mark" aria-hidden="true">
-        <span>D</span>
+      {/* The official DKS logo — the full lockup from build/logo-source.png,
+          never the generated cropped mark. It scales into the collapsed rail
+          with object-contain and needs no white plate in either theme. */}
+      <div className="brand-mark brand-mark--image brand-mark--logo">
+        <img
+          className="brand-logo__img brand-logo__img--on-light"
+          src={dksLogo}
+          alt="DKS — Software for businesses"
+          width={96}
+          height={43}
+          draggable={false}
+        />
+        <img
+          className="brand-logo__img brand-logo__img--on-dark"
+          src={dksLogoDark}
+          alt=""
+          aria-hidden="true"
+          width={96}
+          height={43}
+          draggable={false}
+        />
       </div>
       <div className="brand-text">
-        <p className="brand-name">DKS</p>
         <p className="brand-caption">{caption}</p>
       </div>
     </div>
@@ -267,6 +298,7 @@ export function AppShell({
     pendingCount: 0,
   },
   pendingOutbox = [],
+  localStoreError = null,
   isDemoMode = false,
   sheetRepository,
   repositoryRevision = 0,
@@ -282,12 +314,14 @@ export function AppShell({
   resendNote,
   settingsError,
   auditProfiles = [],
+  auditRemoteClient = null,
   onSaveExport,
   onSavePdf,
   onPrint,
   notifications = [],
   onNotificationMarkRead,
   onNotificationDismiss,
+  onNotificationClearAll,
   onNotificationView,
   onNotificationRestore,
   onNotificationSnooze,
@@ -354,25 +388,22 @@ export function AppShell({
   const actor: AdminActor | null = profile
     ? { id: profile.id, name: profile.fullName ?? profile.email, email: profile.email }
     : null;
-  // FIXES_UI §3.2: four real states from the outbox — never a decorative label.
-  // "Saved to cloud" only after confirmed acknowledgement (status healthy, no
-  // pending); "Sync error" never uses a success icon (see data-state → CSS).
-  const syncStateKey: 'cloud' | 'syncing' | 'offline' | 'error' =
-    syncStatus.status === 'error'
-      ? 'error'
-      : syncStatus.status === 'syncing'
-        ? 'syncing'
-        : syncStatus.pendingCount > 0 || syncStatus.status === 'offline'
-          ? 'offline'
-          : 'cloud';
-  const pendingSuffix = syncStatus.pendingCount > 0 ? ` · ${syncStatus.pendingCount} pending` : '';
-  const syncLabel = syncStateKey === 'error'
-    ? `Sync error${pendingSuffix}`
-    : syncStateKey === 'syncing'
-      ? `Syncing…${pendingSuffix}`
-      : syncStateKey === 'offline'
-        ? `Offline — saved locally${pendingSuffix}`
-        : 'Saved to cloud';
+  // FIXES_UI §3.2 / R2-12: four real states from the outbox — never a
+  // decorative label. "Saved to cloud" only after confirmed acknowledgement
+  // (status healthy AND no pending items); any queued or failed item shows
+  // "Sync error · N pending" (or "Syncing… · N pending") so the pill can
+  // never claim success while work is outstanding.
+  const localStoreFailureMessage = typeof localStoreError === 'string' && localStoreError.trim()
+    ? localStoreError.trim()
+    : null;
+  // R7: a missing local database is never reported as "offline"; "Offline —
+  // saved locally" would be a lie because nothing can be saved at all.
+  const syncIndicator = localStoreFailureMessage
+    ? { key: 'error' as const, label: LOCAL_STORE_ERROR_HEADLINE, pendingSuffix: '' }
+    : resolveSyncIndicator(syncStatus.status, syncStatus.pendingCount);
+  const syncStateKey = syncIndicator.key;
+  const pendingSuffix = syncIndicator.pendingSuffix;
+  const syncLabel = syncIndicator.label;
   const brandCaption = profile?.role === 'admin' ? 'Admin workspace' : 'Office workspace';
 
   return (
@@ -531,6 +562,7 @@ export function AppShell({
               notifications={notifications}
               onMarkRead={onNotificationMarkRead}
               onDismiss={onNotificationDismiss}
+              onClearAll={onNotificationClearAll}
               onView={onNotificationView}
               onRestore={onNotificationRestore}
               onSnooze={onNotificationSnooze}
@@ -580,7 +612,26 @@ export function AppShell({
           </div>
         </header>
 
-        <main className="content" aria-label={copy.title}>
+        <main
+          className={`content${effectiveView === 'sheet' ? ' content--sheet' : ''}`}
+          aria-label={copy.title}
+        >
+          {localStoreFailureMessage ? (
+            <div className="local-store-error" role="alert" data-testid="local-store-error">
+              <p className="local-store-error__headline">
+                <span className="local-store-error__dot" aria-hidden="true" />
+                {LOCAL_STORE_ERROR_HEADLINE}
+              </p>
+              <p className="local-store-error__body">
+                Entries cannot be read or saved on this device until the local database starts.
+                Settings and the cloud connection are unaffected.
+              </p>
+              <details className="local-store-error__details">
+                <summary>Technical details</summary>
+                <p>{localStoreFailureMessage}</p>
+              </details>
+            </div>
+          ) : null}
 
            {effectiveView === 'dashboard' ? (
              // No revision in the key: remounting on every sync destroyed
@@ -593,23 +644,27 @@ export function AppShell({
                 refreshToken={pageRefreshToken}
               />
            ) : effectiveView === 'sheet' ? (
-             <div className="admin-integrated-sheet">
-               <AdminSheetActions
-                 repository={sheetRepository}
-                 role={role}
-                 actor={actor}
-                 onSaveExport={onSaveExport}
-                 onSavePdf={onSavePdf}
-                 onPrint={onPrint}
-                 onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
-               />
-                <SheetPage
-                  repository={sheetRepository}
-                  hideAdminActions
-                  role={role}
-                  refreshToken={pageRefreshToken}
-                />
-              </div>
+             // R2-09: no centered wrapper and no Administrator Tools card. The
+             // grid fills the page; the Admin-only Tools menu lives in the
+             // sheet's single toolbar, and Office gets no tools at all.
+             <SheetPage
+               repository={sheetRepository}
+               role={role}
+               refreshToken={pageRefreshToken}
+               theme={resolvedTheme}
+               thresholds={dashboardThresholds}
+               toolsMenu={(
+                 <AdminSheetActions
+                   repository={sheetRepository}
+                   role={role}
+                   actor={actor}
+                   onSaveExport={onSaveExport}
+                   onSavePdf={onSavePdf}
+                   onPrint={onPrint}
+                   onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
+                 />
+               )}
+             />
            ) : effectiveView === 'recycle-bin' ? (
               <AdminRecycleBinPanel
                 repository={sheetRepository}
@@ -619,7 +674,14 @@ export function AppShell({
                 refreshToken={pageRefreshToken}
               />
            ) : effectiveView === 'audit-log' ? (
-             <AdminAuditLogPanel key={`audit-log-${sheetRevision}`} repository={sheetRepository} role={role} profiles={auditProfiles} />
+             <AdminAuditLogPanel
+               key={`audit-log-${sheetRevision}`}
+               repository={sheetRepository}
+               role={role}
+               profiles={auditProfiles}
+               actorLabel={actor?.name ?? null}
+               remoteClient={auditRemoteClient ?? null}
+             />
            ) : (
              <SettingsPage
                role={role}

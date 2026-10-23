@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { AuthService, type AuthClientLike } from '../src/features/auth/auth-service';
 import { SheetPage } from '../src/features/sheet/SheetPage';
+import { buildGridColumns } from '../src/features/sheet/grid-columns';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 import { App } from '../src/renderer/App';
 import { seedFixtureColumns } from './fixtures/sheet-columns';
@@ -69,33 +70,57 @@ describe('sheet page', () => {
 
     await screen.findByText('A1234567');
     expect(screen.getByLabelText('Search records')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Expired' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: '7 days' })).toBeInTheDocument();
+
+    // R2-04 (user decision): chips are Today · ≤7d · ≤30d · ≤60d · ≤90d.
+    // The Expired and No-expiry chips are gone; they live in the dropdown.
+    expect(screen.getByRole('button', { name: 'Today' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '≤7d' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: '≤90d' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Expired' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'No expiry' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '7 days' })).not.toBeInTheDocument();
+
     // The hard-coded Category filter and "Group by Category" behaviour are gone (F3).
     expect(screen.queryByRole('button', { name: 'Group by Category' })).not.toBeInTheDocument();
     expect(screen.queryByLabelText('Filter by category')).not.toBeInTheDocument();
     expect(screen.getByText('4')).toBeInTheDocument();
 
-    // The five-status model is available in the Status filter.
-    const statusFilter = screen.getByLabelText('Filter by status');
+    // R2-04: the final status dropdown has five options and no Urgent /
+    // Expires today entries (they remain row colours / Days Left badges).
+    const statusFilter = screen.getByLabelText('Filter by status') as HTMLSelectElement;
     expect(statusFilter).toBeInTheDocument();
-    expect(statusFilter.textContent).toContain('Expires today');
+    const optionLabels = Array.from(statusFilter.options).map((option) => option.textContent?.trim());
+    expect(optionLabels).toEqual(['All statuses', 'Valid', 'Expiring soon', 'Expired', 'No expiry']);
+    expect(statusFilter.textContent).not.toContain('Urgent');
+    expect(statusFilter.textContent).not.toContain('Expires today');
 
     fireEvent.change(screen.getByLabelText('Search records'), { target: { value: 'does-not-exist' } });
     await waitFor(() => expect(screen.queryByText('A1234567')).not.toBeInTheDocument());
   });
 
-  it('hides admin-only sheet controls for office users and protects generated columns', async () => {
+  it('removes the old sheet buttons, hides admin tools for office, and protects generated columns', async () => {
     const repository = createInMemorySheetRepository();
     await seedFixtureColumns(repository);
     render(<SheetPage repository={repository} role="office" />);
 
     await screen.findByText('Days Left');
+    // R2-09: Add row / Add column / Manage columns are gone from the toolbar.
+    // (Column Setup is opened by the `+` column header instead.)
+    expect(screen.queryByRole('button', { name: 'Add row' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Manage columns' })).not.toBeInTheDocument();
+    // Office has no Tools menu or export/print/settings controls at all.
+    expect(screen.queryByRole('button', { name: /^Tools/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Export' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Manage columns' }));
-    expect(screen.getByRole('button', { name: 'Delete Days Left column' })).toBeDisabled();
+    // The generated Days Left column is never editable or deletable.
+    const defs = buildGridColumns(
+      await repository.getColumns(),
+      { onDuplicate: vi.fn(), onDelete: vi.fn(), onRenew: vi.fn() },
+      'office',
+    );
+    expect(defs.find((column) => column.colId === 'daysLeft')?.editable).toBe(false);
+    expect(defs.filter((column) => column.colId === '__actions')).toHaveLength(1);
   });
 
   it('retains the default local sheet repository while navigating the workspace', async () => {

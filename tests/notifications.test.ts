@@ -278,7 +278,7 @@ describe('notification alert evaluator', () => {
     expect(store.list()[0]?.dismissed).toBe(true);
   });
 
-  it('renders unread records and offers a custom snooze action', () => {
+  it('renders unread records and offers snoozes limited by the time left (R2-02)', () => {
     const [record] = evaluateAlerts({
       rows: [row('r1', '2026-01-31')],
       columns,
@@ -293,7 +293,13 @@ describe('notification alert evaluator', () => {
     // S1: the body carries the human row label, never the raw row id.
     expect(screen.getByText('Ravi Kumar expires in 30 days.')).toBeTruthy();
     expect(screen.queryByText(/r1 expires/)).toBeNull();
-    expect(screen.getByRole('button', { name: 'Snooze custom' })).toBeTruthy();
+    // R2-02: fixed snooze choices only (1 day / 3 days / 1 week) — the native
+    // date input and the custom snooze button are gone.
+    expect(screen.getByRole('button', { name: 'Snooze 1 day' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Snooze 3 days' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Snooze 1 week' })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Snooze custom' })).toBeNull();
+    expect(document.querySelector('input[type="datetime-local"]')).toBeNull();
   });
 });
 
