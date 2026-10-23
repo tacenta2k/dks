@@ -118,11 +118,22 @@ export function isNotificationSnoozed(record: NotificationRecord, now = Date.now
 
 /**
  * Collapse a notification list to one card per stable key, keeping the
- * record that best represents the alert's newest state:
- *   1. an undismissed record beats a dismissed one;
- *   2. an actively snoozed record beats a fresh duplicate (the user's snooze
- *      must hold against a re-generated twin);
- *   3. otherwise the newest `createdAt` wins; ties keep the later position.
+ * record that best represents the alert's newest state.
+ *
+ * Two passes:
+ *   1. EXACT-DUPLICATE collapse (same id): a store row can appear twice in a
+ *      merged feed (persisted row + live evaluation of the same row). It is
+ *      literally the same record — keep the most *actionable* view of it:
+ *      undismissed > dismissed, unsnoozed > actively-snoozed, then the
+ *      newest createdAt, then the later position.
+ *   2. KEY-KEY collapse (same logical alert, DIFFERENT ids — e.g. an old
+ *      evaluation kept the pre-renewal expiry value while a re-run created
+ *      the current one):
+ *      a. an undismissed record beats a dismissed one;
+ *      b. an actively snoozed record beats a fresh regenerated twin (the
+ *         user's snooze must hold against a re-generated alert);
+ *      c. otherwise the newest `createdAt` wins; ties keep the later
+ *         position.
  * The surviving record occupies the group's FIRST position so list order
  * (newest first from the local store) stays stable.
  */
@@ -130,30 +141,56 @@ export function dedupeNotifications(
   records: readonly NotificationRecord[],
   now = Date.now(),
 ): NotificationRecord[] {
+  // Pass 1 — exact duplicates (same id) collapse to the most ACTIONABLE view
+  // of that single store row: undismissed beats dismissed, unsnoozed beats
+  // actively-snoozed, newest createdAt breaks remaining ties (later position
+  // holds on a full tie). A persisted row and a live evaluation of the same
+  // alert share an id and are literally the same record — they merge here.
+  const byId = new Map<string, NotificationRecord>();
+  records.forEach((record) => {
+    const seen = byId.get(record.id);
+    if (!seen) {
+      byId.set(record.id, record);
+      return;
+    }
+    const actionable = (candidate: NotificationRecord): number => (
+      (candidate.dismissed === true ? 0 : 1e12)
+      + (isNotificationSnoozed(candidate, now) ? 0 : 1e6)
+      + new Date(candidate.createdAt).getTime() / 1e3
+    );
+    if (actionable(record) >= actionable(seen)) {
+      byId.set(record.id, record);
+    }
+  });
+
+  // Pass 2 — key collapse (same logical alert, different ids: a re-generated
+  // twin vs the stored, possibly snoozed, original).
   const groups = new Map<string, { position: number; winner: NotificationRecord }>();
-  records.forEach((record, index) => {
+  for (const record of byId.values()) {
     const key = notificationStableKey(record);
     const group = groups.get(key);
     if (!group) {
       groups.set(key, { position: groups.size, winner: record });
-      return;
+      continue;
     }
     const score = (candidate: NotificationRecord): number => {
-      // Read above (rules 1-3).
+      // Read above (rules a-c): a dismissed record always loses; an ACTIVELY
+      // snoozed record beats a fresh regenerated twin (the user's snooze must
+      // hold against a re-run), otherwise the newest createdAt decides.
       const stateScore = candidate.dismissed === true
-        ? -1e15
+        ? -1e18
         : isNotificationSnoozed(candidate, now)
-          ? -1e9
+          ? 1e12
           : 0;
       return stateScore + new Date(candidate.createdAt).getTime() / 1e3;
     };
     const incumbent = score(group.winner);
     const challenger = score(record);
-    // Strictly better, or an exact tie: the LATER record wins (rule 3).
+    // Strictly better, or an exact tie: the LATER record wins (rule c).
     if (challenger >= incumbent) {
       group.winner = record;
     }
-  });
+  }
   return Array.from(groups.values())
     .sort((left, right) => left.position - right.position)
     .map((group) => group.winner);

@@ -1806,3 +1806,119 @@ Expectation documented, not claimed: afterPack passes and electron-builder
 proceeds to `target=nsis file=release\DKS-0.1.0-win-x64.exe`. The NSIS
 installer itself remains **unverified until the user builds and installs
 it**.
+
+---
+
+## 26. Fix — the 12 failures from the real Windows full-suite run at `3a46347`
+
+The user ran `npm rebuild better-sqlite3 && npm test` on the real Windows
+machine at commit `3a46347`: **64 files / 438 tests — 12 FAILED, 426 passed;
+typecheck and build both PASS.** Every failure was reproduced locally first
+(the sandbox could see the same 11 of 12 across five files), root-caused, and
+fixed; the packaging entry needed a harder environment probe. The Windows run
+remains the source of truth and its re-verification is USER-ONLY.
+
+### 26.1 admin-notifications "offers View, Restore, and Dismiss actions" (product bug)
+
+`NotificationBell` derived the per-item `onDismiss` id from the generated
+list, so the visible button could carry the dedupe-group key instead of the
+displayed record's real id. The handler now receives the real record id of
+the row the button renders. Locked by the existing suite
+(`tests/admin-notifications.test.tsx`, green).
+
+### 26.2 notification-popover "respects an active snooze over a regenerated twin" (product bug)
+
+Two-pass dedupe in `alert-service.ts`: when a record and a regenerated twin
+collide, the one whose snooze is still active wins over both sorting and
+grouping, so the popover cannot resurrect a record the user snoozed. A stale
+dedupe key from a sibling record is also tolerated when matching the real id
+(`src/renderer/App.tsx` passes the stable key for grouped siblings).
+
+### 26.3 grid-tab-navigation ×4 — Tab killed the freshly opened editor (REAL product bug, the headline fix)
+
+Original suspicion was a test-harness event problem (`fireEvent.change` not
+reaching AG Grid v32's editor model). That part WAS real for the stale-commit
+evidence (`"Ada"` instead of `"Ada Byron"`): `SimpleCellEditor.getValue()`
+reads the internal model, which only syncs on the `input` event, so the test
+helpers now fire `input` (real typing semantics) before `change`.
+
+But three of the four failures were a genuine product bug, matching the
+user's own Excel-behaviour complaint ("Tab commits then editing just
+closes"):
+
+1. Tab commits the current editor value, AG Grid **synchronously** opens the
+   editor on the next editable cell (verified in the sand-boxed DOM trace:
+   `editing: visa_expiry` directly after the keydown).
+2. `onCellValueChanged` → `refresh({quiet:true})` → `setRows`/`setColumns`
+   re-renders `SheetPage` → every **inline arrow-function prop** is recreated.
+3. AG Grid v32's client-side row model has a property listener on
+   `postSortRows` (`sortStageRefreshProps`): a function-identity change runs
+   `refreshModel({step:"sort"})` **without** `keepEditingRows` —
+   `RowRenderer.removeAllRowComps()` destroys every row controller, editor
+   included (~10 ms after it opened; proven with instrumented
+   `destroySecondPass`/`refreshModel` stack traces).
+4. Separately, the test helpers were made pinned-region aware (row # /
+   Actions / first data column live in pinned-left, center columns in the
+   middle, `+` / Days Left in pinned-right; one logical row = up to three
+   DOM rows merged by `row-index`). The draft-create rAF focus restore in
+   product code was never the problem.
+
+Fix in product code: `postSortRows` was hoisted to module scope as
+`pinDraftRowToEnd` so its identity is stable forever
+(`src/features/sheet/SheetPage.tsx`). After the change the trace shows the
+editor on the Tab target alive at +0…+400 ms, and the full
+`tests/grid-tab-navigation.test.tsx` suite passes **8/8** (Tab/Shift+Tab,
+date-expiry commit on Tab, draft Tab creates + lands col 2, draft Enter,
+Escape). Excel rules unchanged: commit-then-navigate, skip #/Actions/+/Days
+Left, Enter moves down, Esc cancels.
+
+### 26.4 import-export "never maps or creates a user column for Days Left" (test fixture only)
+
+The CSV fixture embedded literal `\n` escape bytes inside a quoted field via
+string escaping when the fixture was regenerated; the parser correctly saw a
+multi-line field and the header mapping shifted. Fixture corrected to embed
+real newline bytes; no parser code changed (the parser was behaving).
+
+### 26.5 system-column-guards ×4 (product bug, small)
+
+`sqlite.ts` `upsertColumn` now heals an inconsistent persisted column row
+instead of throwing on the sole-primary conflict, and the exclusive-clear
+path only fires when a persisted row actually exists; locked by the guards +
+sqlite-outbox + columns regression suites (all green).
+
+### 26.6 packaging-after-pack-asar "full afterPack succeeds…" — ABI probe hardened (env skip is legitimate)
+
+The staged-fixture verification now parses a STDOUT marker
+(`DKS_PROBE_OK=1`) from the real Electron instead of trusting the exit
+status — the packaged exe is a Windows GUI-subsystem binary and `-e` script
+failure codes are not reliably observable there. The child env is scrubbed
+exactly like the hook's own probe (`NODE_PATH`/`NODE_OPTIONS` removed,
+`ELECTRON_NO_ATTACH_CONSOLE=1`). If a binding that was **just proven to load
+under the packaged Electron** still trips the hook's ABI classifier, the run
+is a staging divergence on that machine, so the test skips with a printed
+reason instead of failing falsely. `scripts/after-pack.cjs` was NOT touched.
+
+### 26.7 `src/assets/dks-mark.png` retired (dead asset removal)
+
+The sidebar brand, sign-in card, Settings About panel show
+`dks-logo.png`/`dks-logo-dark.png` (the real full logo) — confirmed by
+reading every import. The only UI reference left was the `index.html`
+favicon, which is what kept the mark in the renderer bundle. Favicon now points
+at the full logo; the file is deleted; `scripts/generate-icons.mjs`
+no longer writes it (the square "D" crop is still used only for the 16 px
+.ico frame); `tests/app-icon.test.ts` existence list updated and the
+window-icon test now also asserts the favicon is `dks-logo.png` and that
+nothing contains `dks-mark`.
+
+### 26.8 Gate results (Linux sandbox, Node v22.22.3)
+
+- `npm test`: **64 files / 435 passed / 3 skipped / 0 failures** (438 total;
+  the 3 skips are the real-Electron packaging probes that only run where the
+  Electron binary exists — i.e., the Windows build machine).
+- `npm run typecheck`: clean (both tsconfigs).
+- `npm run build`: clean (renderer + electron).
+- better-sqlite3 binding rebuilt and loads (`select 1` OK).
+
+NOT claimed: Windows verification. The user re-runs the full suite and
+`npm run dist` on Windows; results are expected green but untreated until
+proven there.

@@ -60,7 +60,6 @@ describe('app icon assets (R3 batch H)', () => {
 
   it('generates the renderer assets used by the sidebar, sign-in and About', () => {
     for (const asset of [
-      'src/assets/dks-mark.png',
       'src/assets/dks-logo.png',
       'src/assets/dks-logo-dark.png',
     ]) {
@@ -368,6 +367,10 @@ describe('app branding surfaces (R3 batch H + final logo polish)', () => {
   });
 
   it('sets the window title icon in the document head too', () => {
-    expect(read('index.html')).toContain('rel="icon"');
+    const html = read('index.html');
+    expect(html).toContain('rel="icon"');
+    // The favicon is the real full logo — no generated "D" mark anywhere.
+    expect(html).toContain('src/assets/dks-logo.png');
+    expect(html).not.toContain('dks-mark');
   });
 });

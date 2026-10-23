@@ -15,7 +15,11 @@ import {
 export interface NotificationBellProps {
   notifications: readonly NotificationRecord[];
   onMarkRead?: (id: string) => void;
-  /** Called with the logical alert's STABLE KEY (every duplicate is dismissed). */
+  /**
+   * Called with the dismissed record's REAL id. Dedupe keys stay INTERNAL to
+   * this component/the store layer: callers expand one id to every duplicate
+   * of the same logical alert when persisting, but the id is never replaced.
+   */
   onDismiss?: (id: string) => void;
   onClearAll?: () => void;
   onView?: (record: OfficeDeleteNotificationRecord) => void;
@@ -190,8 +194,9 @@ export function NotificationBell({
             <ul className="notification-bell__list">
               {visible.map((notification) => {
                 const unread = notification.read !== true;
-                // Dismiss always speaks the logical alert key: every duplicate
-                // record for the same alert disappears at once.
+                // The list key is the stable DEDUPE key; every action speaks
+                // the record's real id so persistence always targets a store
+                // row (callers expand one logical alert to all duplicates).
                 const stableKey = notificationStableKey(notification);
                 const snoozeOptions = notification.kind === 'expiry'
                   ? snoozeOptionsForDaysLeft(notification.daysLeft)
@@ -252,11 +257,13 @@ export function NotificationBell({
                         </>
                       )}
                       {/* EVERY item keeps a compact Dismiss — including expiry
-                          alerts, read state and daysLeft <= 0 alike. */}
+                          alerts, read state and daysLeft <= 0 alike. Dismiss
+                          always addresses the RECORD ID (a real store row);
+                          the app layer resolves its logical-alert siblings. */}
                       <button
                         className="notification-bell__action"
                         type="button"
-                        onClick={() => onDismiss?.(stableKey)}
+                        onClick={() => onDismiss?.(notification.id)}
                       >
                         Dismiss
                       </button>

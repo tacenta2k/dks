@@ -9,7 +9,7 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import type { CellValueChangedEvent, ColDef, GridApi } from 'ag-grid-community';
+import type { CellValueChangedEvent, ColDef, GridApi, PostSortRowsParams } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
@@ -113,6 +113,30 @@ function displayLabel(row: SheetRow, columns: readonly ColumnDefinition[]): stri
 
 function selectedValue(event: ChangeEvent<HTMLSelectElement>): string {
   return event.target.value;
+}
+
+/**
+ * Sorting must never move the blank draft row away from the end of the list
+ * (Community API: postSortRows). IMPORTANT: this callback must have a STABLE
+ * identity — AG Grid v32 listens for the `postSortRows` grid-option change
+ * and runs a full sort-stage refresh WITHOUT keepEditingRows whenever the
+ * function reference changes, which destroys every open cell editor — the
+ * post-commit refresh after a Tab re-renders this page, and handing the
+ * grid a fresh arrow function used to kill the editor ~10ms after it opened
+ * on the Tab target. Hoisted to module scope so the identity is stable.
+ */
+function pinDraftRowToEnd(params: PostSortRowsParams<SheetGridRendererData>): void {
+  const nodes = params.nodes;
+  if (!nodes) {
+    return;
+  }
+  const draftIndex = nodes.findIndex(
+    (node) => (node.data as SheetGridRendererData | undefined)?.__rowId === DRAFT_ROW_ID,
+  );
+  if (draftIndex >= 0 && draftIndex !== nodes.length - 1) {
+    const [draftNode] = nodes.splice(draftIndex, 1);
+    nodes.push(draftNode);
+  }
 }
 
 function accessibleCellValue(row: SheetRow, column: ColumnDefinition): string {
@@ -826,20 +850,11 @@ export function SheetPage({
                     return rowClassForStatus(params.data.status ?? null);
                   }}
                   // Sorting must never move the blank draft row away from the
-                  // end of the list (Community API: postSortRows).
-                  postSortRows={(params) => {
-                    const nodes = params.nodes;
-                    if (!nodes) {
-                      return;
-                    }
-                    const draftIndex = nodes.findIndex(
-                      (node) => (node.data as SheetGridRendererData | undefined)?.__rowId === DRAFT_ROW_ID,
-                    );
-                    if (draftIndex >= 0 && draftIndex !== nodes.length - 1) {
-                      const [draftNode] = nodes.splice(draftIndex, 1);
-                      nodes.push(draftNode);
-                    }
-                  }}
+                  // end of the list (Community API: postSortRows). The callback
+                  // is hoisted to module scope so its identity NEVER changes —
+                  // a new function reference after each render would trigger a
+                  // full sort-stage grid refresh that destroys open editors.
+                  postSortRows={pinDraftRowToEnd}
                   isFullWidthRow={(params) => isGroupHeaderRow(params.rowNode.data)}
                   fullWidthCellRenderer={GroupHeaderCell}
                   getContextMenuItems={(params) => {

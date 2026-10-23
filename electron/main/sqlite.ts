@@ -1030,12 +1030,10 @@ export class SqliteStore {
     if (!LOCAL_COLUMN_TYPES.has(input.type)) {
       throw new Error(`Unsupported column type: ${String(input.type)}`);
     }
-    if (
-      (input.isPrimaryExpiry === true || input.is_primary_expiry === true)
-      && input.type !== 'date_expiry'
-    ) {
-      throw new Error('The primary expiry column must use date_expiry type');
-    }
+    // A stale is_primary_expiry on a NON-date_expiry column is HEALED, never
+    // rejected: rejecting it made the bogus legacy "Days Left" row impossible
+    // to repair or delete. The flag simply has no meaning outside date_expiry
+    // and `primary` below already gates on the type.
     const existing = this.getColumn(input.id);
     const timestamp = input.updatedAt ?? input.updated_at ?? this.now();
     const isFirstExpiry = input.type === 'date_expiry'
@@ -1049,7 +1047,14 @@ export class SqliteStore {
     );
 
     const execute = this.database.transaction(() => {
-      if (primary) {
+      // Honour an EXPLICIT primary re-selection made on an already-persisted
+      // row (the administrator's "this is now the primary" action): clear the
+      // other marks so the selection wins. For BULK/creation upserts (row not
+      // yet persisted — sync or import brings both flags at once) other marks
+      // stay in place and repairPrimaryExpiry resolves any ambiguity
+      // deterministically to the FIRST live expiry column by position, so the
+      // outcome never depends on iteration order.
+      if (primary && existing) {
         this.database.prepare('UPDATE columns SET is_primary_expiry = 0, updated_at = ? WHERE is_primary_expiry = 1 AND id <> ?')
           .run(timestamp, input.id);
       }

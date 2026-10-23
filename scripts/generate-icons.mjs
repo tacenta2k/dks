@@ -10,7 +10,10 @@
  *   src/assets/dks-logo.png 720px wide lockup for About / the sign-in card
  *   src/assets/dks-logo-dark.png  the same lockup lightened for dark mode
  *                                (no white plate behind the wordmark)
- *   src/assets/dks-mark.png square "D" mark for the sidebar tile and favicon
+ *
+ * (The old src/assets/dks-mark.png square "D" tile was retired: every UI
+ * surface — sidebar brand, sign-in, About and the favicon — shows the real
+ * full logo.)
  *
  * Notes
  *   - The white page around the artwork is keyed out (ink-over-white
@@ -39,7 +42,6 @@ const ICON_PNG = resolve(ROOT, 'build/icon.png');
 const ICON_ICO = resolve(ROOT, 'build/icon.ico');
 const ASSET_LOGO = resolve(ROOT, 'src/assets/dks-logo.png');
 const ASSET_LOGO_DARK = resolve(ROOT, 'src/assets/dks-logo-dark.png');
-const ASSET_MARK = resolve(ROOT, 'src/assets/dks-mark.png');
 
 /** Inks below this distance from white are treated as page, not artwork. */
 const WHITE_CUTOFF = 245;
@@ -330,19 +332,18 @@ async function main() {
   // unreadable at taskbar size, so the wordmark-only crop is used).
   await writeFile(ICON_PNG, await renderSquare(logo.wordmark, 1024, 0.9, { plate: true }));
 
-  // Renderer assets: a wide lockup for About / sign-in and the D mark for the
-  // sidebar tile and the favicon.
+  // Renderer assets: the FULL lockup everywhere — sidebar brand, sign-in,
+  // About and even the favicon (the square "D" mark used to live in
+  // src/assets/dks-mark.png; nothing in the UI references it anymore).
   await mkdir(dirname(ASSET_LOGO), { recursive: true });
   await writeFile(ASSET_LOGO, await renderWide(logo.full, 720));
   await writeFile(ASSET_LOGO_DARK, await renderWide(logo.full, 720, { forDarkMode: true }));
-  await writeFile(ASSET_MARK, await renderSquare(logo.mark, 256, 0.92));
 
   console.log('[icons] wrote', [
     'build/icon.ico',
     'build/icon.png',
     'src/assets/dks-logo.png',
     'src/assets/dks-logo-dark.png',
-    'src/assets/dks-mark.png',
   ].join(', '));
   console.log('[icons] ico frames', sizes.join(', '), 'bytes', ico.length);
 }

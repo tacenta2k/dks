@@ -138,9 +138,9 @@ describe('notification popover (R2-02)', () => {
 
     expect(onView).toHaveBeenCalledWith(deletionAlert);
     expect(onRestore).toHaveBeenCalledWith(deletionAlert);
-    // Dismiss addresses the LOGICAL alert (stable key) so every persisted
-    // duplicate of the entry's deletion notice disappears at once.
-    expect(onDismiss).toHaveBeenCalledWith('office-delete:entry-1');
+    // Dismiss passes the REAL record id — the dedupe/stable key stays
+    // internal; the app layer expands one id to every sibling duplicate.
+    expect(onDismiss).toHaveBeenCalledWith(deletionAlert.id);
     expect(notificationStableKey(deletionAlert)).toBe('office-delete:entry-1');
     expect(screen.queryByRole('button', { name: /Snooze/ })).not.toBeInTheDocument();
   });
@@ -224,9 +224,10 @@ describe('notification popover (R2-02)', () => {
     expect(dismissButtons).toHaveLength(2);
 
     fireEvent.click(dismissButtons[0]);
-    // Dismiss speaks the logical alert key (kind + rowId + milestone), not
-    // one physical record id — every duplicate disappears immediately.
-    expect(onDismiss).toHaveBeenCalledWith('expiry:row-1:0');
+    // Different milestones → both cards survive dedupe; Dismiss passes the
+    // REAL record id of the clicked card (stable key stays internal).
+    expect(dedupeNotifications([expiryAlert(0), expiryAlert(1, { read: true })])).toHaveLength(2);
+    expect(onDismiss).toHaveBeenCalledWith(expiryAlert(0).id);
     expect(notificationStableKey(expiryAlert(0))).toBe('expiry:row-1:0');
   });
 

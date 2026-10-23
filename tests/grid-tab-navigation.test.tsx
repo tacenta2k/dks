@@ -82,14 +82,45 @@ async function renderSheet(repository: SheetRepository) {
   return renderResult;
 }
 
-function centerRows(): HTMLElement[] {
-  const container = document.querySelector('.ag-center-cols-container .ag-center-cols-clipper')
-    ?? document.querySelector('.ag-center-cols-container');
-  return Array.from((container ?? document).querySelectorAll('.ag-row')) as HTMLElement[];
+/**
+ * One logical grid row (by row-index) spans up to three containers in AG Grid
+ * v32 — pinned-left (row # / Actions / first data column), center, and
+ * pinned-right (+ / Days Left). Querying just one container can find a
+ * different row's cells; this merges the three DOM rows that share an index.
+ */
+function rowsByIndex(): Map<number, HTMLElement[]> {
+  const map = new Map<number, HTMLElement[]>();
+  document.querySelectorAll('.ag-center-cols-container, .ag-pinned-left-cols-container, .ag-pinned-right-cols-container')
+    .forEach((container) => {
+      container.querySelectorAll('.ag-row').forEach((row) => {
+        const index = Number((row as HTMLElement).getAttribute('row-index'));
+        const list = map.get(index) ?? [];
+        list.push(row as HTMLElement);
+        map.set(index, list);
+      });
+    });
+  return map;
 }
 
-function cellIn(row: HTMLElement, colId: string): HTMLElement | null {
-  return row.querySelector(`.ag-cell[col-id="${colId}"]`);
+/** Distinct logical row indexes, in grid order. */
+function logicalRowIndexes(): number[] {
+  return Array.from(rowsByIndex().keys()).sort((left, right) => left - right);
+}
+
+/** Every cell for `colId` in the logical row at `index` (any pinned region). */
+function cellInRow(index: number, colId: string): HTMLElement | null {
+  for (const row of rowsByIndex().get(index) ?? []) {
+    const cell = row.querySelector(`.ag-cell[col-id="${colId}"]`);
+    if (cell) {
+      return cell as HTMLElement;
+    }
+  }
+  return null;
+}
+
+function isDraftRow(index: number): boolean {
+  return (rowsByIndex().get(index) ?? [])
+    .some((row) => row.classList.contains('sheet-draft-row'));
 }
 
 function editingCell(): HTMLElement | null {
@@ -97,12 +128,16 @@ function editingCell(): HTMLElement | null {
 }
 
 function gridCell(colId: string): HTMLElement {
-  const cell = document.querySelector(`.ag-center-cols-container .ag-cell[col-id="${colId}"]`)
-    ?? document.querySelector(`.ag-cell[col-id="${colId}"]`);
+  const cell = document.querySelector(`.ag-cell[col-id="${colId}"]`);
   expect(cell, `grid cell for ${colId} should exist`).toBeTruthy();
   return cell as HTMLElement;
 }
 
+/**
+ * Types into the open editor — REAL keyboard input semantics: the DOM `input`
+ * event is what keeps AG Grid's editor model in sync (its `getValue()` reads
+ * the model, not the raw DOM node; real typing always fires `input`).
+ */
 async function typeInEditor(value: string): Promise<HTMLInputElement> {
   const input = await waitFor<HTMLInputElement>(() => {
     const editing = editingCell();
@@ -110,6 +145,7 @@ async function typeInEditor(value: string): Promise<HTMLInputElement> {
     expect(candidate, 'an editor input must be open').toBeTruthy();
     return candidate as HTMLInputElement;
   });
+  fireEvent.input(input, { target: { value } });
   fireEvent.change(input, { target: { value } });
   return input;
 }
@@ -232,11 +268,10 @@ describe('Grid Tab navigation end-to-end (SHEET-12)', () => {
     await renderSheet(repository);
 
     // The draft is the only row before any record exists.
-    let rows = centerRows();
-    expect(rows).toHaveLength(1);
-    expect(rows[0]).toHaveClass('sheet-draft-row');
+    expect(logicalRowIndexes()).toHaveLength(1);
+    expect(isDraftRow(logicalRowIndexes()[0])).toBe(true);
 
-    const draftNameCell = cellIn(rows[0], 'full_name');
+    const draftNameCell = cellInRow(logicalRowIndexes()[0], 'full_name');
     expect(draftNameCell).toBeTruthy();
     fireEvent.doubleClick(draftNameCell as HTMLElement);
     const nameEditor = await typeInEditor('Zara');
@@ -251,22 +286,24 @@ describe('Grid Tab navigation end-to-end (SHEET-12)', () => {
     await waitFor(() => {
       const editing = editingCell();
       expect(editing?.getAttribute('col-id')).toBe(expiryId);
-      const createdRow = centerRows()[0];
-      expect(createdRow).not.toHaveClass('sheet-draft-row');
-      expect(createdRow.contains(editing as HTMLElement)).toBe(true);
+      expect(isDraftRow(logicalRowIndexes()[0])).toBe(false);
+      expect(
+        (rowsByIndex().get(logicalRowIndexes()[0]) ?? [])
+          .some((row) => row.contains(editing as Node)),
+      ).toBe(true);
     });
 
     // A fresh blank draft row sits beneath the record.
-    rows = centerRows();
-    expect(rows[rows.length - 1]).toHaveClass('sheet-draft-row');
-    expect(rows.length).toBeGreaterThanOrEqual(2);
+    const indexes = logicalRowIndexes();
+    expect(indexes.length).toBeGreaterThanOrEqual(2);
+    expect(isDraftRow(indexes[indexes.length - 1])).toBe(true);
   }, 30_000);
 
   it('draft row: Enter commits and keeps continuous-entry focus on the fresh draft', async () => {
     const repository = await seedRepository();
     await renderSheet(repository);
 
-    const draftNameCell = cellIn(centerRows()[0], 'full_name');
+    const draftNameCell = cellInRow(logicalRowIndexes().at(-1) as number, 'full_name');
     fireEvent.doubleClick(draftNameCell as HTMLElement);
     const nameEditor = await typeInEditor('Noor');
     fireEvent.keyDown(nameEditor, { key: 'Enter' });
@@ -276,11 +313,15 @@ describe('Grid Tab navigation end-to-end (SHEET-12)', () => {
     });
 
     await waitFor(() => {
-      const rows = centerRows();
+      const indexes = logicalRowIndexes();
+      const lastIndex = indexes[indexes.length - 1];
       const editing = editingCell();
       expect(editing?.getAttribute('col-id')).toBe('full_name');
-      expect(rows[rows.length - 1]).toHaveClass('sheet-draft-row');
-      expect(rows[rows.length - 1].contains(editing as HTMLElement)).toBe(true);
+      expect(isDraftRow(lastIndex)).toBe(true);
+      expect(
+        (rowsByIndex().get(lastIndex) ?? [])
+          .some((row) => row.contains(editing as Node)),
+      ).toBe(true);
     });
   }, 30_000);
 

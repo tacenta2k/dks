@@ -660,11 +660,12 @@ export function App({
   };
 
   /**
-   * Dismiss is addressed by the alert's STABLE KEY (kind + rowId/entryId +
-   * milestone), not by one record id: every duplicate record of the same
-   * logical alert is dismissed together — in React state, in the local SQLite
-   * cache and, for admin notifications, on the server. (Passing a bare record
-   * id still works: ids match here too.)
+   * Dismiss is addressed by the REAL record id (a store row). Internally the
+   * id is expanded through the alert's stable key (kind + rowId/entryId +
+   * milestone), so every duplicate record of the SAME logical alert is
+   * dismissed together — in React state, in the local SQLite cache and, for
+   * admin notifications, on the server. Dedupe keys never leave this layer:
+   * components and persistence always deal in ids.
    */
   const dismissNotificationRecords = (records: readonly NotificationRecord[]) => {
     const dismissedAt = records.map((record) => ({ ...record, dismissed: true, read: true }));
@@ -686,12 +687,18 @@ export function App({
   };
 
   const handleNotificationDismiss = (idOrKey: string) => {
-    const matches = notifications.filter((record) => (
-      record.id === idOrKey || notificationStableKey(record) === idOrKey
-    ));
-    if (matches.length === 0) {
+    // Expand the clicked record id to every record of the SAME logical alert
+    // (stable key), so persisted duplicates disappear together. Stable keys
+    // never cross this boundary — callers only ever deal in record ids.
+    const target = notifications.find((record) => record.id === idOrKey)
+      ?? notifications.find((record) => notificationStableKey(record) === idOrKey);
+    if (!target) {
       return;
     }
+    const targetKey = notificationStableKey(target);
+    const matches = notifications.filter((record) => (
+      notificationStableKey(record) === targetKey
+    ));
     dismissNotificationRecords(matches);
   };
 

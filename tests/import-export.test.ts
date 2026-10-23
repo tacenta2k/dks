@@ -216,7 +216,7 @@ describe('admin import and export workflows', () => {
   });
 
   it('never maps or creates a user column for the generated "Days Left" system header', async () => {
-    const csv = 'Name,Days Left\\nAda,180';
+    const csv = 'Name,Days Left\nAda,180';
     const preview = await previewImport(csv, {
       role: 'admin',
       columns,
