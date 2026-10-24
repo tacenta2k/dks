@@ -26,6 +26,10 @@
 --  5. NEW trigger office_signin_requests_notify_admin mirrors the existing
 --     Office-delete pattern: an Admin-only admin_notifications row on every
 --     new pending request (no staff identity — the Office account is shared).
+--  6. §5c REPAIRS write_audit_log(): nested scalar guards so the shared audit
+--     trigger no longer dereferences OLD.deleted when it fires on a table
+--     without a "deleted" column (the crash that broke this migration's
+--     sign-in flow on databases created from the original schema.sql).
 --
 -- SECURITY MODEL:
 --  - Approval is bound to the SIGNED JWT's `session_id` claim
@@ -421,11 +425,14 @@ create policy renewals_select_authenticated
 
 -- --- audit_log ---
 -- office may insert its own actions (POST-edit/commit side-effects); gate it.
+-- The original actor constraint (actor = auth.uid() or actor is null) is
+-- PRESERVED — attribution can never be forged through a direct insert.
 drop policy if exists audit_log_insert_authenticated on public.audit_log;
 create policy audit_log_insert_authenticated
   on public.audit_log for insert to authenticated
   with check (
-    public.is_admin() or (public.is_office() and public.office_session_is_approved())
+    (actor = auth.uid() or actor is null)
+    and (public.is_admin() or (public.is_office() and public.office_session_is_approved()))
   );
 -- audit_log select: unchanged (admin-only).
 
@@ -705,6 +712,114 @@ drop trigger if exists office_signin_requests_notify_admin on public.office_sign
 create trigger office_signin_requests_notify_admin
 after insert on public.office_signin_requests
 for each row execute function public.office_signin_request_notify_admin();
+
+-- ---------------------------------------------------------------------------
+-- §5c — REPAIR public.write_audit_log() (latent bug, any table without a
+--        "deleted" column)
+--
+-- Root cause of the sign-in failure "Cannot verify sign-in approval —
+-- record "old" has no field "deleted"":
+--   The shared audit trigger ran for EVERY insert into admin_notifications
+--   (including the new sign-in notification above), and its entries
+--   soft-delete branch evaluated
+--     if tg_table_name = 'entries' and tg_op = 'UPDATE' and old.deleted ...
+--   as ONE expression. plpgsql dereferences record fields while evaluating
+--   it, so OLD.deleted was read even though TG_TABLE_NAME was
+--   'admin_notifications' — a table with no "deleted" column. The insert
+--   (and therefore request_office_signin) always failed.
+-- Fix: nest the field dereferences behind a scalar-only outer IF so they are
+-- only evaluated for real entries UPDATEs. Behaviour is otherwise unchanged.
+-- (The same repair ships standalone in ARENA/sql/office-approval-fix.sql for
+-- databases that already applied an earlier revision of this migration.)
+-- ---------------------------------------------------------------------------
+create or replace function public.write_audit_log()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  audit_entry_id uuid;
+  before_snapshot jsonb;
+  after_snapshot jsonb;
+  row_snapshot jsonb;
+  row_label text;
+begin
+  if tg_op = 'DELETE' then
+    row_snapshot := to_jsonb(old);
+    before_snapshot := row_snapshot;
+    after_snapshot := null;
+  else
+    row_snapshot := to_jsonb(new);
+    before_snapshot := case when tg_op = 'UPDATE' then to_jsonb(old) else null end;
+    after_snapshot := row_snapshot;
+  end if;
+
+  if tg_table_name = 'entries' and tg_op <> 'DELETE' then
+    audit_entry_id := new.id;
+  elsif tg_table_name = 'renewals' then
+    audit_entry_id := new.entry_id;
+  elsif tg_table_name = 'admin_notifications' then
+    if tg_op = 'DELETE' then
+      audit_entry_id := old.entry_id;
+    else
+      audit_entry_id := new.entry_id;
+    end if;
+  else
+    audit_entry_id := null;
+  end if;
+
+  insert into public.audit_log (actor, entry_id, action, snapshot, details)
+  values (
+    auth.uid(),
+    audit_entry_id,
+    lower(tg_op),
+    jsonb_build_object('before', before_snapshot, 'after', after_snapshot),
+    jsonb_build_object(
+      'table', tg_table_name,
+      'record_id', coalesce(row_snapshot ->> 'id', 'unknown')
+     )
+   );
+
+   -- Keep record-field dereferences inside this nested branch (scalar guard
+   -- outside) — see the §5c header comment for the plpgsql failure mode.
+   if tg_table_name = 'entries' and tg_op = 'UPDATE' then
+     if old.deleted is false and new.deleted is true and public.is_office() then
+       select coalesce(
+         nullif(trim(new.data ->> 'Name'), ''),
+         (
+           select nullif(trim(new.data ->> c.name), '')
+             from public.app_columns c
+            where not c.deleted
+              and c.type in ('text', 'notes')
+            order by c.position
+            limit 1
+         ),
+         new.id::text
+       )
+         into row_label;
+
+       insert into public.admin_notifications (type, message, payload, read, entry_id)
+       values (
+         'delete',
+         'Office deleted ' || row_label || ' on ' || to_char(now(), 'YYYY-MM-DD HH24:MI'),
+         jsonb_build_object(
+           'entry_id', new.id,
+           'row_label', row_label,
+           'deleted_by', auth.uid()
+         ),
+         false,
+         new.id
+       );
+     end if;
+   end if;
+
+  if tg_op = 'DELETE' then
+    return old;
+  end if;
+  return new;
+end;
+$$;
 
 commit;
 

@@ -221,7 +221,9 @@ describe('entries RLS — migration file', () => {
 
     const updateStart = schema.indexOf('create policy entries_update_authenticated');
     const updateBody = schema.slice(updateStart, schema.indexOf('\n\n', updateStart));
-    expect(updateBody).toContain('public.is_office() and deleted is false');
+    // Office additionally requires an approved sign-in session (SEC-01/SEC-03);
+    // the soft-delete/restore WITH-CHECK arms below are unchanged.
+    expect(updateBody).toContain('public.is_office() and public.office_session_is_approved() and deleted is false');
     expect(updateBody).toContain('deleted is true');
     expect(updateBody).not.toContain('created_by');
   });

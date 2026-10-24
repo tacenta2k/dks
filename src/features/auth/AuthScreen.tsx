@@ -1,4 +1,5 @@
 import { FormEvent, useRef, useState } from 'react';
+import { Eye, EyeOff } from 'lucide-react';
 
 import { isSupabaseConfigured } from '../../lib/supabase';
 import type { AuthStatus, SupabaseHealth } from './auth-types';
@@ -29,6 +30,10 @@ export function AuthScreen({
 }: AuthScreenProps) {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  // Password visibility toggle: the input keeps id/name/autoComplete so
+  // autofill and password managers behave exactly as before; only `type`
+  // flips between "password" and "text".
+  const [passwordVisible, setPasswordVisible] = useState(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   // R2-03: ONLY an in-flight sign-in disables the form.  The Supabase health
   // check also flips the shared auth status to "loading"; reusing that status
@@ -128,15 +133,31 @@ export function AuthScreen({
           </div>
           <div style={{ display: 'grid', gap: 8, marginBottom: 17, textAlign: 'left' }}>
             <label htmlFor="dks-password">Password</label>
-            <input
-              id="dks-password"
-              name="password"
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(event) => setPassword(event.target.value)}
-              required
-            />
+            <div className="password-field">
+              <input
+                id="dks-password"
+                name="password"
+                type={passwordVisible ? 'text' : 'password'}
+                autoComplete="current-password"
+                value={password}
+                onChange={(event) => setPassword(event.target.value)}
+                required
+              />
+              <button
+                type="button"
+                className="password-field__toggle"
+                aria-label={passwordVisible ? 'Hide password' : 'Show password'}
+                title={passwordVisible ? 'Hide password' : 'Show password'}
+                aria-pressed={passwordVisible}
+                onClick={() => setPasswordVisible((visible) => !visible)}
+              >
+                {passwordVisible ? (
+                  <EyeOff size={17} aria-hidden="true" />
+                ) : (
+                  <Eye size={17} aria-hidden="true" />
+                )}
+              </button>
+            </div>
           </div>
           <button
             className="button button--primary button--wide"

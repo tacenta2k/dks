@@ -1,4 +1,5 @@
 import type { Session } from '@supabase/supabase-js';
+import { readFileSync } from 'node:fs';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -663,5 +664,66 @@ describe('local IPC session clearance', () => {
     const store = makeLocalStore();
     const handlers = createLocalIpcHandlers({ store });
     expect(() => handlers[LOCAL_IPC_CHANNELS.getSnapshot]()).not.toThrow();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Gate styling contract — readable in light AND dark themes (no white-on-white)
+// ---------------------------------------------------------------------------
+
+describe('approval gate — readability contract', () => {
+  it('uses theme-token classes on the pending card (title/body/meta/actions)', async () => {
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service: approvalService } = makeFakeApprovalService({});
+    const store = createAppStore(authService, approvalService);
+    store.setState({
+      sessionApproval: 'pending',
+      sessionApprovalRequest: makeRequest({ requestedAt: '2026-10-24T09:00:00.000Z' }),
+    });
+    const { container } = render(<OfficeApprovalGate appStore={store} onSignOut={vi.fn()} />);
+
+    expect(screen.getByRole('status')).toHaveClass('office-approval-gate');
+    expect(container.querySelector('.office-approval-card')).toBeInTheDocument();
+    expect(container.querySelector('.office-approval-card__title')).toHaveTextContent(/waiting for admin approval/i);
+    expect(container.querySelector('.office-approval-card__body')).not.toBeEmptyDOMElement();
+    expect(container.querySelector('.office-approval-card__meta')).toHaveTextContent(/request submitted/i);
+    expect(container.querySelector('.office-approval-card__actions')).toBeInTheDocument();
+    // Exactly ONE card — no duplicate/empty panels.
+    expect(container.querySelectorAll('.office-approval-card')).toHaveLength(1);
+  });
+
+  it('error state renders the technical detail as a styled secondary line plus both actions', async () => {
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service: approvalService } = makeFakeApprovalService({});
+    const store = createAppStore(authService, approvalService);
+    store.setState({
+      sessionApproval: 'error',
+      sessionApprovalError: { message: 'record "old" has no field "deleted"', code: 'APPROVAL_STATUS_FAILED' },
+    });
+    const { container } = render(<OfficeApprovalGate appStore={store} onSignOut={vi.fn()} />);
+
+    expect(container.querySelector('.office-approval-card__title')).toHaveTextContent(/cannot verify sign-in approval/i);
+    const detail = container.querySelector('.office-approval-card__detail');
+    expect(detail).toHaveTextContent('record "old" has no field "deleted"');
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /sign out/i })).toBeInTheDocument();
+  });
+
+  it('stylesheet paints the gate from theme tokens and keeps the error line readable', () => {
+    const styles = readFileSync('src/renderer/styles.css', 'utf8');
+
+    // The old broken fallbacks are gone: undefined --surface/--muted/--border
+    // vars produced white-on-white cards in dark mode.
+    expect(styles).not.toContain('var(--surface,');
+    expect(styles).not.toContain('var(--muted,');
+    expect(styles).not.toContain('var(--border, rgba');
+    expect(styles).not.toContain('var(--shadow-lg,');
+
+    expect(styles).toMatch(/\.office-approval-gate\s*\{[^}]*var\(--color-background\)/s);
+    expect(styles).toMatch(/\.office-approval-card\s*\{[^}]*var\(--color-surface\)[^}]*color:\s*var\(--color-text\)/s);
+    expect(styles).toMatch(/\.office-approval-card__meta\s*\{[^}]*var\(--color-text-subtle\)/s);
+    expect(styles).toMatch(
+      /\.office-approval-card__detail\s*\{[^}]*background:\s*var\(--color-surface-muted\)[^}]*color:\s*var\(--color-text-muted\)/s,
+    );
   });
 });

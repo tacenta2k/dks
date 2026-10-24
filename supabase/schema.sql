@@ -123,6 +123,27 @@ create table if not exists public.sync_sessions (
   updated_at timestamptz not null default now()
 );
 
+-- One row per (Office user, signed Auth session) for the sign-in approval
+-- gate. auth_session_id is written server-side from auth.jwt() only; clients
+-- can SELECT their own rows, every write flows through SECURITY DEFINER RPCs.
+create table if not exists public.office_signin_requests (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null
+    references public.profiles(id) on delete cascade,
+  auth_session_id uuid not null,
+  status text not null default 'pending'
+    check (status in ('pending', 'approved', 'denied', 'revoked')),
+  requested_at timestamptz not null default now(),
+  decided_at timestamptz,
+  decided_by uuid references public.profiles(id) on delete set null,
+  expires_at timestamptz,
+  updated_at timestamptz not null default now(),
+  unique (user_id, auth_session_id)
+);
+
+create index if not exists office_signin_requests_status_idx
+  on public.office_signin_requests (status, requested_at desc);
+
 -- ---------------------------------------------------------------------------
 -- Role helpers, timestamp/audit triggers, and guarded RPCs
 -- ---------------------------------------------------------------------------
@@ -403,38 +424,42 @@ begin
      )
    );
 
-   if tg_table_name = 'entries'
-      and tg_op = 'UPDATE'
-      and old.deleted is false
-      and new.deleted is true
-      and public.is_office()
-   then
-     select coalesce(
-       nullif(trim(new.data ->> 'Name'), ''),
-       (
-         select nullif(trim(new.data ->> c.name), '')
-           from public.app_columns c
-          where not c.deleted
-            and c.type in ('text', 'notes')
-          order by c.position
-          limit 1
-       ),
-       new.id::text
-     )
-       into row_label;
+   -- Record-field dereferences (old.deleted / new.deleted) MUST stay nested
+   -- behind scalar-only guards: plpgsql dereferences record fields while
+   -- evaluating an expression, so `tg_table_name = ... and old.deleted ...`
+   -- in ONE combined condition crashes with
+   --   record "old" has no field "deleted"
+   -- whenever this shared audit trigger fires on a table that has no
+   -- "deleted" column (admin_notifications, renewals, app_columns).
+   if tg_table_name = 'entries' and tg_op = 'UPDATE' then
+     if old.deleted is false and new.deleted is true and public.is_office() then
+       select coalesce(
+         nullif(trim(new.data ->> 'Name'), ''),
+         (
+           select nullif(trim(new.data ->> c.name), '')
+             from public.app_columns c
+            where not c.deleted
+              and c.type in ('text', 'notes')
+            order by c.position
+            limit 1
+         ),
+         new.id::text
+       )
+         into row_label;
 
-     insert into public.admin_notifications (type, message, payload, read, entry_id)
-     values (
-       'delete',
-       'Office deleted ' || row_label || ' on ' || to_char(now(), 'YYYY-MM-DD HH24:MI'),
-       jsonb_build_object(
-         'entry_id', new.id,
-         'row_label', row_label,
-         'deleted_by', auth.uid()
-       ),
-       false,
-       new.id
-     );
+       insert into public.admin_notifications (type, message, payload, read, entry_id)
+       values (
+         'delete',
+         'Office deleted ' || row_label || ' on ' || to_char(now(), 'YYYY-MM-DD HH24:MI'),
+         jsonb_build_object(
+           'entry_id', new.id,
+           'row_label', row_label,
+           'deleted_by', auth.uid()
+         ),
+         false,
+         new.id
+       );
+     end if;
    end if;
 
   if tg_op = 'DELETE' then
@@ -458,8 +483,8 @@ begin
     raise exception 'Authentication is required' using errcode = '42501';
   end if;
 
-  if not public.is_admin() and not public.is_office() then
-    raise exception 'Only office or admin users may inspect columns'
+  if not public.is_admin() and not (public.is_office() and public.office_session_is_approved()) then
+    raise exception 'Only office users with an approved session or administrators may inspect columns'
       using errcode = '42501';
   end if;
 
@@ -495,8 +520,8 @@ begin
     raise exception 'Authentication is required' using errcode = '42501';
   end if;
 
-  if not public.is_admin() and not public.is_office() then
-    raise exception 'Only office or admin users may delete columns'
+  if not public.is_admin() and not (public.is_office() and public.office_session_is_approved()) then
+    raise exception 'Only office users with an approved session or administrators may delete columns'
       using errcode = '42501';
   end if;
 
@@ -589,8 +614,8 @@ declare
   old_expiry date;
   renewal_id uuid;
 begin
-  if auth.uid() is null or (not public.is_admin() and not public.is_office()) then
-    raise exception 'Only office or administrator users may renew entries'
+  if auth.uid() is null or (not public.is_admin() and not (public.is_office() and public.office_session_is_approved())) then
+    raise exception 'Only office users with an approved session or administrators may renew entries'
       using errcode = '42501';
   end if;
 
@@ -664,6 +689,227 @@ begin
    where id = p_entry_id;
 
   return renewal_id;
+end;
+$$;
+
+-- ---------------------------------------------------------------------------
+-- Office sign-in approval (session-bound; RLS + RPCs gate Office access)
+-- ---------------------------------------------------------------------------
+
+-- TRUE when the caller is admin, or an office user whose CURRENT signed
+-- session carries an approved, unexpired, un-revoked request row.
+create or replace function public.office_session_is_approved()
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    case
+      when public.is_admin() then true
+      when not public.is_office() then false
+      else exists (
+        select 1
+        from public.office_signin_requests r
+        where r.user_id = auth.uid()
+          and r.auth_session_id = nullif(auth.jwt() ->> 'session_id', '')::uuid
+          and r.status = 'approved'
+          and (r.expires_at is null or r.expires_at > now())
+      )
+    end;
+$$;
+
+comment on function public.office_session_is_approved()
+  is 'Admin always true; Office true only when this signed session has an approved, live grant.';
+
+-- Office: open (or re-open) the pending request for THIS signed session.
+create or replace function public.request_office_signin()
+returns public.office_signin_requests
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_uid uuid := auth.uid();
+  v_session uuid;
+  v_row public.office_signin_requests%rowtype;
+begin
+  if v_uid is null or not public.is_office() then
+    raise exception 'Only Office users may request sign-in approval'
+      using errcode = '42501';
+  end if;
+
+  v_session := nullif(auth.jwt() ->> 'session_id', '')::uuid;
+  if v_session is null then
+    raise exception 'This Supabase Auth session does not carry a signed session_id claim; upgrade Supabase Auth or sign in again. Session-specific approval cannot be verified.'
+      using errcode = '42501';
+  end if;
+
+  select * into v_row
+    from public.office_signin_requests
+   where user_id = v_uid
+     and auth_session_id = v_session
+   for update;
+
+  if found then
+    if v_row.status in ('denied', 'revoked') then
+      update public.office_signin_requests
+         set status = 'pending',
+             requested_at = now(),
+             decided_at = null,
+             decided_by = null,
+             expires_at = null,
+             updated_at = now()
+       where id = v_row.id
+      returning * into v_row;
+    end if;
+    return v_row;
+  end if;
+
+  insert into public.office_signin_requests (user_id, auth_session_id)
+  values (v_uid, v_session)
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
+-- Office: read the status of THIS signed session's request.
+create or replace function public.my_office_signin()
+returns public.office_signin_requests
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.office_signin_requests%rowtype;
+  v_session uuid;
+begin
+  if auth.uid() is null then
+    raise exception 'Not authenticated' using errcode = '42501';
+  end if;
+
+  v_session := nullif(auth.jwt() ->> 'session_id', '')::uuid;
+  if v_session is null then
+    return null;
+  end if;
+
+  select * into v_row
+    from public.office_signin_requests
+   where user_id = auth.uid()
+     and auth_session_id = v_session;
+
+  return v_row;
+end;
+$$;
+
+-- Admin: approve or deny.
+create or replace function public.decide_office_signin(p_request_id uuid, p_decision text)
+returns public.office_signin_requests
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.office_signin_requests%rowtype;
+begin
+  if auth.uid() is null or not public.is_admin() then
+    raise exception 'Only administrators may decide Office sign-in requests'
+      using errcode = '42501';
+  end if;
+
+  if p_decision not in ('approved', 'denied') then
+    raise exception 'Decision must be approved or denied' using errcode = '22023';
+  end if;
+
+  select * into v_row
+    from public.office_signin_requests
+   where id = p_request_id
+   for update;
+
+  if not found then
+    raise exception 'Request not found' using errcode = '22023';
+  end if;
+
+  if v_row.status <> 'pending' then
+    raise exception 'Request is not pending anymore' using errcode = '22023';
+  end if;
+
+  update public.office_signin_requests
+     set status = p_decision,
+         decided_at = now(),
+         decided_by = auth.uid(),
+         updated_at = now()
+   where id = p_request_id
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
+-- Admin: revoke a granted approval (immediate server-side effect via RLS).
+create or replace function public.revoke_office_signin(p_request_id uuid)
+returns public.office_signin_requests
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.office_signin_requests%rowtype;
+begin
+  if auth.uid() is null or not public.is_admin() then
+    raise exception 'Only administrators may revoke Office sessions'
+      using errcode = '42501';
+  end if;
+
+  select * into v_row
+    from public.office_signin_requests
+   where id = p_request_id
+   for update;
+
+  if not found then
+    raise exception 'Request not found' using errcode = '22023';
+  end if;
+
+  if v_row.status <> 'approved' then
+    raise exception 'Only an approved session can be revoked' using errcode = '22023';
+  end if;
+
+  update public.office_signin_requests
+     set status = 'revoked',
+         decided_at = now(),
+         decided_by = auth.uid(),
+         updated_at = now()
+   where id = p_request_id
+  returning * into v_row;
+
+  return v_row;
+end;
+$$;
+
+-- Admin notification on every new pending request (shared Office account —
+-- the message never identifies an individual staff member).
+create or replace function public.office_signin_request_notify_admin()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.admin_notifications (type, message, payload, read, entry_id)
+  values (
+    'office_signin_request',
+    'Office sign-in request — pending approval since ' || to_char(new.requested_at, 'YYYY-MM-DD HH24:MI'),
+    jsonb_build_object(
+      'request_id', new.id,
+      'requested_at', new.requested_at,
+      'user_id', new.user_id
+    ),
+    false,
+    null
+  );
+  return new;
 end;
 $$;
 
@@ -793,6 +1039,11 @@ create trigger admin_notifications_audit
 after insert or update or delete on public.admin_notifications
 for each row execute function public.write_audit_log();
 
+drop trigger if exists office_signin_requests_notify_admin on public.office_signin_requests;
+create trigger office_signin_requests_notify_admin
+after insert on public.office_signin_requests
+for each row execute function public.office_signin_request_notify_admin();
+
 -- ---------------------------------------------------------------------------
 -- Exact Auth-linked profile seeds and application defaults
 -- ---------------------------------------------------------------------------
@@ -842,6 +1093,7 @@ alter table public.admin_notifications enable row level security;
 alter table public.settings enable row level security;
 alter table public.alert_snoozes enable row level security;
 alter table public.sync_sessions enable row level security;
+alter table public.office_signin_requests enable row level security;
 
 grant usage on schema public to authenticated;
 grant select, insert, update, delete on
@@ -857,6 +1109,11 @@ grant select, insert, update, delete on
 to authenticated;
 grant usage, select on all sequences in schema public to authenticated;
 
+-- Office sign-in requests: read-only for the client, writes only via the
+-- SECURITY DEFINER RPCs above (auth_session_id can never be client-supplied).
+grant select on public.office_signin_requests to authenticated;
+revoke insert, update, delete on public.office_signin_requests from authenticated;
+
 revoke all on public.profiles,
   public.app_columns,
   public.entries,
@@ -866,6 +1123,7 @@ revoke all on public.profiles,
   public.settings,
   public.alert_snoozes,
   public.sync_sessions from anon;
+revoke all on public.office_signin_requests from anon;
 revoke all on all tables in schema public from anon;
 revoke all on all sequences in schema public from anon;
 revoke all on all functions in schema public from anon;
@@ -878,6 +1136,11 @@ grant execute on function public.office_delete_empty_column(uuid) to authenticat
 grant execute on function public.restore_entry(uuid) to authenticated;
 grant execute on function public.permanently_delete_entry(uuid) to authenticated;
 grant execute on function public.renew_entry(uuid, date) to authenticated;
+grant execute on function public.office_session_is_approved() to authenticated;
+grant execute on function public.request_office_signin() to authenticated;
+grant execute on function public.my_office_signin() to authenticated;
+grant execute on function public.decide_office_signin(uuid, text) to authenticated;
+grant execute on function public.revoke_office_signin(uuid) to authenticated;
 
 -- Profiles are readable by the signed-in user, while only administrators may
 -- create, change, or remove profiles (and therefore roles).
@@ -902,30 +1165,38 @@ create policy profiles_admin_delete
 on public.profiles for delete to authenticated
 using (public.is_admin());
 
+-- A user may see ONLY its own sign-in requests; Admin sees everything.
+-- All writes flow through the SECURITY DEFINER RPCs above.
+drop policy if exists office_signin_requests_select_own_or_admin on public.office_signin_requests;
+create policy office_signin_requests_select_own_or_admin
+on public.office_signin_requests for select to authenticated
+using (user_id = auth.uid() or public.is_admin());
+
 -- Both roles may work with active column definitions.  Direct DELETE is an
 -- administrator operation; office deletion goes through the empty-column RPC
 -- and the trigger repeats the empty-column check for direct soft deletes.
 drop policy if exists app_columns_select_authenticated on public.app_columns;
 create policy app_columns_select_authenticated
 on public.app_columns for select to authenticated
-using (not deleted or public.is_admin());
+using (public.is_admin() or (not deleted and public.is_office() and public.office_session_is_approved()));
 
 drop policy if exists app_columns_insert_authenticated on public.app_columns;
 create policy app_columns_insert_authenticated
 on public.app_columns for insert to authenticated
 with check (
-  (public.is_admin() or public.is_office())
+  (public.is_admin() or (public.is_office() and public.office_session_is_approved()))
   and created_by = auth.uid()
 );
 
 drop policy if exists app_columns_update_authenticated on public.app_columns;
 create policy app_columns_update_authenticated
 on public.app_columns for update to authenticated
-using (public.is_admin() or (public.is_office() and not deleted))
+using (public.is_admin() or (public.is_office() and public.office_session_is_approved() and not deleted))
 with check (
   public.is_admin()
   or (
     public.is_office()
+    and public.office_session_is_approved()
     and (
       (not deleted and deleted_at is null)
       or (deleted and deleted_at is not null)
@@ -944,14 +1215,14 @@ using (public.is_admin());
 drop policy if exists entries_select_authenticated on public.entries;
 create policy entries_select_authenticated
 on public.entries for select to authenticated
-using (not deleted or public.is_admin());
+using (public.is_admin() or (not deleted and public.is_office() and public.office_session_is_approved()));
 
 drop policy if exists entries_insert_authenticated on public.entries;
 create policy entries_insert_authenticated
 on public.entries for insert to authenticated
 with check (
   auth.uid() is not null
-  and (public.is_admin() or public.is_office())
+  and (public.is_admin() or (public.is_office() and public.office_session_is_approved()))
   and created_by = auth.uid()
   and deleted is false
   and deleted_at is null
@@ -968,12 +1239,13 @@ create policy entries_update_authenticated
 on public.entries for update to authenticated
 using (
   public.is_admin()
-  or (public.is_office() and deleted is false)
+  or (public.is_office() and public.office_session_is_approved() and deleted is false)
 )
 with check (
   public.is_admin()
   or (
     public.is_office()
+    and public.office_session_is_approved()
     and (
       (
         deleted is false
@@ -999,11 +1271,15 @@ create policy renewals_select_authenticated
 on public.renewals for select to authenticated
 using (
   public.is_admin()
-  or exists (
-    select 1
-      from public.entries e
-     where e.id = entry_id
-       and not e.deleted
+  or (
+    public.is_office()
+    and public.office_session_is_approved()
+    and exists (
+      select 1
+        from public.entries e
+       where e.id = entry_id
+         and not e.deleted
+    )
   )
 );
 
@@ -1077,7 +1353,10 @@ grant execute on function public.resolve_duplicate_column(text) to authenticated
 drop policy if exists audit_log_insert_authenticated on public.audit_log;
 create policy audit_log_insert_authenticated
 on public.audit_log for insert to authenticated
-with check (actor = auth.uid() or actor is null);
+with check (
+  (actor = auth.uid() or actor is null)
+  and (public.is_admin() or (public.is_office() and public.office_session_is_approved()))
+);
 
 -- R2-10: clearing the audit log is an administrator-only operation.  There is
 -- deliberately NO delete policy on public.audit_log; the only path is this
@@ -1150,7 +1429,7 @@ using (public.is_admin());
 drop policy if exists settings_select_authenticated on public.settings;
 create policy settings_select_authenticated
 on public.settings for select to authenticated
-using (true);
+using (public.is_admin() or (public.is_office() and public.office_session_is_approved()));
 
 drop policy if exists settings_insert_admin on public.settings;
 create policy settings_insert_admin
@@ -1171,44 +1450,44 @@ using (public.is_admin());
 drop policy if exists alert_snoozes_select_authenticated on public.alert_snoozes;
 create policy alert_snoozes_select_authenticated
 on public.alert_snoozes for select to authenticated
-using (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists alert_snoozes_insert_authenticated on public.alert_snoozes;
 create policy alert_snoozes_insert_authenticated
 on public.alert_snoozes for insert to authenticated
-with check (user_id = auth.uid() or public.is_admin());
+with check ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists alert_snoozes_update_authenticated on public.alert_snoozes;
 create policy alert_snoozes_update_authenticated
 on public.alert_snoozes for update to authenticated
-using (user_id = auth.uid() or public.is_admin())
-with check (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin())
+with check ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists alert_snoozes_delete_authenticated on public.alert_snoozes;
 create policy alert_snoozes_delete_authenticated
 on public.alert_snoozes for delete to authenticated
-using (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists sync_sessions_select_authenticated on public.sync_sessions;
 create policy sync_sessions_select_authenticated
 on public.sync_sessions for select to authenticated
-using (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists sync_sessions_insert_authenticated on public.sync_sessions;
 create policy sync_sessions_insert_authenticated
 on public.sync_sessions for insert to authenticated
-with check (user_id = auth.uid() or public.is_admin());
+with check ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists sync_sessions_update_authenticated on public.sync_sessions;
 create policy sync_sessions_update_authenticated
 on public.sync_sessions for update to authenticated
-using (user_id = auth.uid() or public.is_admin())
-with check (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin())
+with check ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 drop policy if exists sync_sessions_delete_authenticated on public.sync_sessions;
 create policy sync_sessions_delete_authenticated
 on public.sync_sessions for delete to authenticated
-using (user_id = auth.uid() or public.is_admin());
+using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
 -- Realtime is used for cross-PC settings and administrator notifications.
 do $$

@@ -315,13 +315,16 @@ begin
   end if;
 
   -- Widest configured notification window (default 90 days).
-  select greatest(90, coalesce(max(day_value.value), 90))
+  -- jsonb_array_elements_text yields TEXT: keep only numeric elements and
+  -- cast before max() — otherwise COALESCE/MAX type-checking errors out.
+  select greatest(90, coalesce(max(day_value.value::integer), 90))
     into v_window
   from public.settings s
        cross join lateral jsonb_array_elements_text(
          case jsonb_typeof(s.value) when 'array' then s.value else '[]'::jsonb end
        ) as day_value(value)
-  where s.key = 'notification_days';
+  where s.key = 'notification_days'
+    and day_value.value ~ '^[0-9]{1,4}$';
   v_window := coalesce(v_window, 90);
 
   select name into v_primary_name
@@ -424,8 +427,10 @@ exception when others then
 end $$;
 
 -- job URL: NONE by default (worker only fires when the operator sets it).
+-- settings.value is jsonb: the URL must be a JSON string literal, not bare
+-- text (a bare URL makes the whole migration ERROR out and ROLL BACK).
 insert into public.settings (key, value)
-values ('email_worker_url', 'https://<PROJECT_REF>.functions.supabase.co/send-email')
+values ('email_worker_url', to_jsonb('https://<PROJECT_REF>.functions.supabase.co/send-email'::text))
 on conflict (key) do nothing;
 
 commit;

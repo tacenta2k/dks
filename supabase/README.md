@@ -1,10 +1,11 @@
 # DKS STEP 3 — Supabase setup
 
-`schema.sql` is the complete database deliverable. It creates the nine
+`schema.sql` is the complete database deliverable. It creates the ten
 application tables, exact Auth-linked profile seeds, the dynamic column and
-entry contracts, renewal snapshots, audit records, role-safe RPCs, indexes,
-authenticated grants, RLS policies, timestamp/expiry/audit triggers, and the
-realtime notification/settings surfaces. DKS does not use Supabase Storage;
+entry contracts, renewal snapshots, audit records, role-safe RPCs, the
+session-bound Office sign-in approval gate, indexes, authenticated grants, RLS
+policies, timestamp/expiry/audit triggers, and the realtime
+notification/settings surfaces. DKS does not use Supabase Storage;
 data lives in these database tables and the desktop's local SQLite cache.
 
 ## Apply the schema
@@ -24,9 +25,32 @@ data lives in these database tables and the desktop's local SQLite cache.
    one script. If an older DKS deployment created the removed backup bucket,
    delete that bucket and its object policies once from the Storage dashboard
    before applying the current schema.
-4. Run the verification queries below. Query 1 should report nine present and
-   nine RLS-enabled public tables. Query 2 should return the two exact profile
-    rows. Query 3 checks the exact column contracts, RPCs, and default settings.
+4. Run the verification queries below. Query 1 should report ten present and
+   ten RLS-enabled public tables. Query 2 should return the two exact profile
+   rows. Query 3 checks the exact column contracts, RPCs, and default settings.
+
+## Migrations for an EXISTING deployment (side files in ARENA/sql/)
+
+Fresh projects only ever need `schema.sql` above. An existing project gets the
+newer surfaces from the reviewed migration scripts, IN THIS ORDER:
+
+1. `ARENA/sql/office-approval.sql` — Office sign-in approval (table, RPCs,
+   RLS rewrites, admin notification, plus the `write_audit_log` repair in §5c).
+2. `ARENA/sql/office-approval-fix.sql` — ONLY if `office-approval.sql` was
+   applied before the §5c repair existed (symptom: Office waiting screen shows
+   "Cannot verify sign-in approval — record "old" has no field "deleted"").
+   Safe to run more than once; otherwise skip it.
+3. `ARENA/sql/civil-id-type.sql` — Civil ID column type (metadata-only CHECK
+   relaxation).
+4. `ARENA/sql/email-notifications.sql` — optional Resend email outbox +
+   delivery log + triggers (+ pg_cron schedule when the extension is on).
+   If an earlier revision failed with `invalid input syntax for type json`
+   near `email_worker_url`, the whole file rolled back then — simply run the
+   current revision end to end; every object in it is idempotent.
+
+Each script starts with a commented §0 preflight (SELECT-only) and ends with
+verification queries. Run exactly one script at a time, as one batch, in the
+order above.
 
 The `profiles.id` foreign key points to `auth.users(id)` with `ON DELETE
 CASCADE`. The Auth rows therefore must exist before the profile seed statements
@@ -55,6 +79,12 @@ run. The script updates the two profile roles/emails on a repeat run.
   `dismissed_until_expiry_change`, and `expiry_value` for per-entry alerts.
 - `sync_sessions` uses `user_id`, `opened_at`, and `closed_at` for sync
   lifecycle state.
+- `office_signin_requests` binds the Office sign-in approval gate to the
+  signed Auth session (`auth_session_id` from the JWT `session_id` claim).
+  Clients may only SELECT their own rows; status transitions
+  (pending → approved/denied, approved → revoked) run through SECURITY
+  DEFINER RPCs, and every Office RLS clause additionally requires
+  `office_session_is_approved()` for the CURRENT session.
 
 ## Verification query 1 — table and RLS health
 
@@ -62,7 +92,8 @@ run. The script updates the two profile roles/emails on a repeat run.
 with required(name) as (
   values
     ('profiles'), ('app_columns'), ('entries'), ('renewals'), ('audit_log'),
-    ('admin_notifications'), ('settings'), ('alert_snoozes'), ('sync_sessions')
+    ('admin_notifications'), ('settings'), ('alert_snoozes'), ('sync_sessions'),
+    ('office_signin_requests')
 ), present as (
   select c.relname as name, c.relrowsecurity
     from pg_class c

@@ -87,3 +87,78 @@ describe('sign-in form during the Supabase health check', () => {
     expect(screen.getByText('Supabase is reachable.')).toBeInTheDocument();
   });
 });
+
+/**
+ * Password visibility toggle (eye): flips the field between password/text,
+ * updates its label and icon, works with mouse AND keyboard, and never
+ * interferes with autofill or the sign-in submit flow.
+ */
+describe('password visibility toggle', () => {
+  it('starts hidden: type=password with a labelled Show password button', () => {
+    render(<AuthScreen />);
+
+    const input = screen.getByLabelText('Password');
+    expect(input).toHaveAttribute('type', 'password');
+    // Autofill contract must survive the wrapper.
+    expect(input).toHaveAttribute('id', 'dks-password');
+    expect(input).toHaveAttribute('name', 'password');
+    expect(input).toHaveAttribute('autocomplete', 'current-password');
+
+    const toggle = screen.getByRole('button', { name: 'Show password' });
+    expect(toggle).toHaveAttribute('type', 'button');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('click toggles visibility and flips the label back and forth', () => {
+    render(<AuthScreen />);
+
+    const input = screen.getByLabelText('Password');
+    const toggle = screen.getByRole('button', { name: 'Show password' });
+
+    fireEvent.click(toggle);
+    expect(input).toHaveAttribute('type', 'text');
+    expect(screen.getByRole('button', { name: 'Hide password' })).toHaveAttribute('aria-pressed', 'true');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide password' }));
+    expect(input).toHaveAttribute('type', 'password');
+    expect(screen.getByRole('button', { name: 'Show password' })).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('is keyboard operable (Enter and Space), keeping the typed value intact', async () => {
+    const user = await import('@testing-library/user-event').then((module) => module.default.setup());
+    render(<AuthScreen />);
+
+    const input = screen.getByLabelText('Password');
+    fireEvent.change(input, { target: { value: 's3cret!' } });
+
+    const toggle = screen.getByRole('button', { name: 'Show password' });
+    toggle.focus();
+    await user.keyboard('{Enter}');
+    expect(input).toHaveAttribute('type', 'text');
+    expect(input).toHaveValue('s3cret!');
+
+    await user.keyboard(' ');
+    expect(input).toHaveAttribute('type', 'password');
+  });
+
+  it('is type=button so clicking it never submits the sign-in form', () => {
+    const onSignIn = vi.fn();
+    render(<AuthScreen onSignIn={onSignIn} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show password' }));
+    expect(onSignIn).not.toHaveBeenCalled();
+  });
+
+  it('sign-in still submits the typed password while visibility is toggled on', async () => {
+    const onSignIn = vi.fn().mockResolvedValue(undefined);
+    render(<AuthScreen onSignIn={onSignIn} />);
+
+    fireEvent.change(screen.getByLabelText('Email'), { target: { value: 'office@example.com' } });
+    fireEvent.change(screen.getByLabelText('Password'), { target: { value: 'secret' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Show password' }));
+    fireEvent.click(screen.getByRole('button', { name: /sign in/i }));
+
+    await waitFor(() => expect(onSignIn).toHaveBeenCalledWith('office@example.com', 'secret'));
+    expect(screen.getByLabelText('Password')).toHaveAttribute('type', 'text');
+  });
+});

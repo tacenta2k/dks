@@ -2025,3 +2025,101 @@ contains ONLY display labels + expiry + days left (no passport/Civil ID).
 - `npm run build`: clean (renderer + electron path).
 - Windows installer/verify NOT claimed — user runs it with npm run dist.
 - The compiled DB binding is verified happy (node-gyp --nodedir=/usr/local).
+
+---
+
+## 28. Fix round — Office approval SQL crash, waiting-screen contrast, password eye (Round N+1)
+
+Trigger: the user's live test of PR #3 showed the Office waiting screen with
+"Cannot verify sign-in approval — record \"old\" has no field \"deleted\"" and
+an empty Admin approvals area.
+
+### 28.1 Root cause (reproduced against a real PostgreSQL 16 harness)
+
+Bugs live primarily in DB-land, verified by replaying `supabase/schema.sql` +
+the migration files on a sandboxed PostgreSQL (`pgserver` wheel, local
+`/tmp` data dir, stub `auth` schema; RLS enforced by `set role authenticated`):
+
+1. **`write_audit_log()` crash (the exact reported error).** The shared audit
+   trigger is bound to `admin_notifications` too, and its entries-notify branch
+   read `old.deleted`/`new.deleted` in the SAME expression as the scalar
+   guards (`tg_table_name = 'entries' and tg_op = 'UPDATE' and old.deleted …`).
+   plpgsql dereferences record fields WHILE evaluating an expression, so on
+   every `admin_notifications` INSERT it evaluated `OLD.deleted` — the table
+   has no `deleted` column → `record "old" has no field "deleted"`. Every
+   insert into `admin_notifications` therefore failed transactionally,
+   including the one fired by `office_signin_requests_notify_admin` inside
+   `request_office_signin()` → the request row never persisted (also why the
+   Admin approvals panel was always empty). FIRST-TIME requests crashed;
+   re-requests on the existing row return early (no insert, no trigger) —
+   consistent with "stuck Office, silent Admin". plpgsql plan revalidation per
+   trigger-relation explains why normal entry edits never noticed this.
+   Fix: nested guards — scalar-only outer IF, field derefs inside the inner
+   IF. Shipped in `ARENA/sql/office-approval.sql` §5c, standalone repair
+   `ARENA/sql/office-approval-fix.sql` (for DBs that applied the earlier
+   revision), and mirrored in `supabase/schema.sql`.
+2. **`ARENA/sql/email-notifications.sql` rolled back entirely on first run**
+   (`ERROR: invalid input syntax for type json` inserting a bare URL string
+   into jsonb `settings.value` at the `email_worker_url` seed) — so
+   `email_outbox`, the outbox-enqueue trigger and the digest function never
+   existed live. Fixed seed (`to_jsonb('…'::text)`); file is idempotent, safe
+   to re-run end to end.
+3. **`enqueue_expiry_digest()` type crash** (`COALESCE types text and integer
+   cannot be matched`): `jsonb_array_elements_text` yields TEXT. Fixed with
+   `value::integer` + numeric-only guard. Same-day digest dedupe verified
+   (first call inserts 1 row, second call inserts 0).
+
+Verified end-to-end on the harness after fixes: office request → `pending`
+with notify row + email outbox row (+ dedupe), admin list/approve → gate
+`true` + entries visible, OTHER session id still `false`, revoke → gate closes
++ re-request flips to `pending`, deny → `denied`, audit log rows written —
+zero trigger crashes anywhere, including a direct `admin_notifications` insert
+probe that crashed before §1 and passes after.
+
+### 28.2 Also found (NOT changed — pre-existing on main, needs a decision)
+
+Office soft-delete / edit-upsert of an ADMIN-CREATED entry is rejected by RLS
+in stock Postgres semantics: the UPDATE statement gains a select-visibility
+WITH CHECK (Postgres checks the row stays visible to the SELECT policy —
+office's clause requires `not deleted`) and the upsert's INSERT side checks
+`created_by = auth.uid()` speculatively. Symptom would be office edits/deletes
+of admin rows failing at push time. Out of scope here; tracked as RLS-09.
+
+### 28.3 UI fixes (renderer)
+
+- **Waiting/error screen**: `.office-approval-*` previously referenced
+  undefined CSS vars (`--surface`, `--muted`, `--border`, `--shadow-lg`) so
+  the card rendered white-on-white/invisible in both themes. Rewritten with
+  the theme tokens, same backdrop/card language as the sign-in page
+  (`.login-page`/`.login-card`), secondary-line detail style for the raw error
+  text, one card, compact spacing. Admin approvals popover title var fixed too.
+- **Password eye (shared Office/Admin login)**: lucide `Eye`/`EyeOff` toggle
+  inside the password input; `type=button` + `aria-label`/`title`
+  "Show password"/"Hide password" + `aria-pressed`; keyboard operable;
+  `id`/`name`/`autoComplete` untouched so autofill is unaffected.
+- `OfficeApprovalGate.tsx` rewritten to a single copy-map render with classes
+  `office-approval-card__title/__body/__meta/__detail/__actions`.
+
+### 28.4 Files touched this round
+
+- SQL: `ARENA/sql/office-approval.sql` (§5c + audit-actor constraint retained
+  in §4), **NEW** `ARENA/sql/office-approval-fix.sql`, `ARENA/sql/
+  email-notifications.sql` (jsonb seed + digest cast), `supabase/schema.sql`
+  (write_audit_log repair + full approval mirror: table/RPCs/trigger/grants/
+  gated policies + ten-table README text), `supabase/README.md` (run order +
+  repair branch).
+- UI: `src/features/auth/OfficeApprovalGate.tsx`, `src/features/auth/
+  AuthScreen.tsx` (eye), `src/renderer/styles.css` (gate + password-field).
+- Tests: `tests/sql-schema.test.ts` (+12: mirror/gating/audit-trigger-shape/
+  trigger-whitelist/email-jsonb+cast/actor-constraint),
+  `tests/auth-screen.test.tsx` (+5: eye toggle), `tests/office-approval.test.tsx`
+  (+3: gate readability contract).
+
+### 28.5 Gate
+
+- `npm test`, `npm run typecheck`, `npm run build`: see the round report
+  message; better-sqlite3 recompiled for this sandbox via node-gyp
+  (`--nodedir=/usr/local`) — plain `npm rebuild better-sqlite3` is not usable
+  in this sandbox (header download blocked); on Windows the documented
+  `npm rebuild better-sqlite3` remains the right command.
+- Windows/live verification stays USER-ONLY.
