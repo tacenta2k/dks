@@ -21,7 +21,7 @@ import {
   type ColumnDefinition,
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
-import { findDuplicatePassportValues } from '../../lib/validation';
+import { findDuplicateCivilIdValues, findDuplicatePassportValues } from '../../lib/validation';
 import { formatDisplayDate, type StatusThresholds } from '../../lib/date';
 import type { Role } from '../auth/auth-types';
 import { ColumnWizard } from './column-wizard';
@@ -280,6 +280,13 @@ export function SheetPage({
       column.isPassport === true || column.is_passport === true || /passport/i.test(column.name)
     ));
     return passportColumn ? findDuplicatePassportValues(rows, passportColumn) : new Set<string>();
+  }, [rows, activeColumns]);
+
+  // Advisory duplicate Civil ID check — independent from the passport check,
+  // across ACTIVE (non-deleted) rows of the FIRST active civil_id column.
+  const duplicateCivilIdValues = useMemo(() => {
+    const civilIdColumn = activeColumns.find((column) => column.type === 'civil_id');
+    return civilIdColumn ? findDuplicateCivilIdValues(rows, civilIdColumn) : new Set<string>();
   }, [rows, activeColumns]);
 
   const handleDuplicate = useCallback(async (row: SheetRow) => {
@@ -799,6 +806,12 @@ export function SheetPage({
           {duplicatePassportValues.size > 0 ? (
             <div className="sheet-alert sheet-alert--warning" role="alert">
               Duplicate passport warning: {Array.from(duplicatePassportValues).join(', ')}
+            </div>
+          ) : null}
+
+          {duplicateCivilIdValues.size > 0 ? (
+            <div className="sheet-alert sheet-alert--warning" role="alert" aria-label="Duplicate Civil ID warning">
+              Duplicate Civil ID warning: {Array.from(duplicateCivilIdValues).join(', ')}
             </div>
           ) : null}
 

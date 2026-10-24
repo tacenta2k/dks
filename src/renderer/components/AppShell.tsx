@@ -72,6 +72,8 @@ export interface AppShellProps {
   initialSettings?: PartialSettings;
   settingsColumns?: ComponentProps<typeof SettingsPage>['columns'];
   onSettingsChange?: ComponentProps<typeof SettingsPage>['onSettingsChange'];
+  /** Admin-only: client for the "Email notifications" settings section. */
+  emailPrefsClient?: ComponentProps<typeof SettingsPage>['emailPrefsClient'];
   appVersion?: string;
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
   resendNote?: string;
@@ -89,6 +91,8 @@ export interface AppShellProps {
   onNotificationView?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void;
   onNotificationRestore?: (record: Extract<NotificationRecord, { kind: 'office-delete' }>) => void | Promise<void>;
   onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
+  /** Admin-only Office sign-in approvals control (renders next to the bell). */
+  officeApprovalsSlot?: ReactNode;
   onLogout?: () => void | Promise<void>;
 }
 
@@ -309,6 +313,7 @@ export function AppShell({
   initialSettings,
   settingsColumns,
   onSettingsChange,
+  emailPrefsClient = null,
   appVersion,
   onCheckForUpdates,
   resendNote,
@@ -325,6 +330,7 @@ export function AppShell({
   onNotificationView,
   onNotificationRestore,
   onNotificationSnooze,
+  officeApprovalsSlot = null,
   onLogout = () => undefined,
 }: AppShellProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
@@ -558,6 +564,7 @@ export function AppShell({
                 ) : null}
               </div>
             </div>
+            {officeApprovalsSlot ?? null}
             <NotificationBell
               notifications={notifications}
               onMarkRead={onNotificationMarkRead}
@@ -690,6 +697,7 @@ export function AppShell({
                columns={settingsColumns}
                repository={sheetRepository}
                onSettingsChange={onSettingsChange}
+               emailPrefsClient={emailPrefsClient}
                appVersion={appVersion}
                 onCheckForUpdates={onCheckForUpdates}
                 resendNote={resendNote}

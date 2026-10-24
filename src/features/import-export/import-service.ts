@@ -27,11 +27,11 @@ export interface ImportMapping {
   columnName: string;
 }
 
-export type ImportColumnType = 'text' | 'date_start' | 'date_expiry';
+export type ImportColumnType = 'text' | 'date_start' | 'date_expiry' | 'civil_id';
 
 export interface ImportDateSuggestion {
   header: string;
-  type: 'date_start' | 'date_expiry';
+  type: 'date_start' | 'date_expiry' | 'civil_id';
 }
 
 /** A header is mapped onto an existing non-date column that holds date-like values. */
@@ -317,8 +317,13 @@ export function sampleHeaderValues(
 export function suggestImportColumnType(
   header: string,
   sampleValues: readonly unknown[],
-): 'date_start' | 'date_expiry' | null {
+): 'date_start' | 'date_expiry' | 'civil_id' | null {
   const normalized = header.trim().toLowerCase();
+  // Civil ID headers map onto the dedicated string type (plain strings with
+  // leading zeroes preserved, no format rule).
+  if (/civil\s*(id|no|number)|civilid|cpf\b/.test(normalized)) {
+    return 'civil_id';
+  }
   const headerExpiry = /expir|expiration|lapse|valid.*until|due\s*date/.test(normalized);
   const headerStart = /start|issu|join|hire|arrival|onboard|commenc|valid.*from|birth|dob/.test(normalized);
   if (headerExpiry) {

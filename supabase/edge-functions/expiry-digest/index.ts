@@ -134,3 +134,8 @@ Deno.serve(async (request) => {
     return jsonResponse({ error: 'Email delivery failed' }, 502);
   }
 });
+// NOTE (v2): the daily digest is now built server-side by
+// public.enqueue_expiry_digest() into public.email_outbox and delivered by the
+// sibling `send-email` Edge Function. This standalone manual-trigger endpoint
+// stays as an operator fallback (POST a precomputed digest); both paths are
+// optional and fail quietly without RESEND_API_KEY.

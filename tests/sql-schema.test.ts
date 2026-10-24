@@ -106,7 +106,7 @@ describe('Supabase STEP 3 schema', () => {
       /id\s+uuid\s+primary key\s+references auth\.users\s*\(id\)\s+on delete cascade/,
     );
     expect(appColumns).toMatch(
-      /check \(type in \(\s*'text', 'number', 'phone', 'email', 'price', 'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes'\s*\)\)/,
+      /check \(type in \(\s*'text', 'number', 'phone', 'email', 'price', 'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes',\s*'civil_id'\s*\)\)/,
     );
     for (const column of [
       'name text not null',

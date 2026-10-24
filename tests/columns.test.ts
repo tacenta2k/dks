@@ -36,6 +36,7 @@ describe('protected column rules', () => {
       'dropdown',
       'checkbox',
       'notes',
+      'civil_id',
     ]);
   });
 

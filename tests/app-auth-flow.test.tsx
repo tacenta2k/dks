@@ -40,11 +40,34 @@ function makeClient(profile: Record<string, unknown> | null, restoredSession: Se
   return client;
 }
 
+/**
+ * Office sign-ins pass an APPROVED session check (the approval gate is
+ * exercised in office-approval.test.tsx; these tests keep their focus on the
+ * shell/auth behaviors).
+ */
+function approvedApprovalService() {
+  const row = {
+    id: 'req-1',
+    userId: 'user-1',
+    status: 'approved' as const,
+    requestedAt: '2026-10-24T09:00:00.000Z',
+    decidedAt: '2026-10-24T09:30:00.000Z',
+    decidedBy: 'user-admin',
+  };
+  return {
+    requestApproval: vi.fn(async () => ({ data: row, error: null })),
+    fetchMyRequest: vi.fn(async () => ({ data: row, error: null })),
+    listRequests: vi.fn(async () => ({ data: [row], error: null })),
+    decideRequest: vi.fn(async (id: string, decision: 'approved' | 'denied') => ({ data: { ...row, id, status: decision }, error: null })),
+    revokeRequest: vi.fn(async (id: string) => ({ data: { ...row, id, status: 'revoked' as const }, error: null })),
+  };
+}
+
 describe('configured authentication flow', () => {
   it('restores a session and shows the office identity without admin navigation', async () => {
     const service = new AuthService(makeClient({ id: 'user-1', role: 'office' }, session));
 
-    render(<App authService={service} />);
+    render(<App authService={service} approvalService={approvedApprovalService()} />);
 
     expect(await screen.findByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument();
 
@@ -92,7 +115,7 @@ describe('configured authentication flow', () => {
     const client = makeClient({ id: 'user-1', role: 'office' }, session);
     const service = new AuthService(client);
 
-    render(<App authService={service} />);
+    render(<App authService={service} approvalService={approvedApprovalService()} />);
     await screen.findByRole('banner', { name: 'DKS top bar' });
 
     // FIXES_UI §3.5: Log out lives in the avatar popup (no top-bar button).
