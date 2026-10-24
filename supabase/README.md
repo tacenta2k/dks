@@ -193,3 +193,46 @@ this repository, the desktop `.env`, or the renderer bundle.
   (or use a fresh project) before applying this corrected contract.
 - Supabase's service role bypasses RLS by design. The desktop client should use
   only the publishable key and the authenticated role.
+
+## Email notifications — `send-email` Edge Function (optional)
+
+Two kinds of server-side email ride the same queue (`public.email_outbox`),
+populated by database triggers/functions (see `ARENA/sql/email-notifications.sql`):
+
+- **Office sign-in request**: after an Office session opens a pending request,
+  the qualifying trigger enqueues at most ONE email per request (dedupe key =
+  request id) to the configured Admin email from `settings.email_notifications`.
+- **Expiry digest**: `public.enqueue_expiry_digest()` enqueues at most ONE batch
+  email per recipient per local-day (dedupe key = recipient + date).
+
+Both are processed by a scheduled POST to this Edge Function, which claims rows
+server-side (service-role only — a desktop client cannot drive the queue)
+and delivers via Resend.
+
+Deploy (links the function to THIS project — adjust `<PROJECT_REF>`):
+
+```bash
+supabase functions deploy send-email
+# REQUIRED secrets — none of these may end up in the repo / app / installer:
+supabase secrets set RESEND_API_KEY=re_...
+supabase secrets set RESEND_FROM_EMAIL="DKS <noreply@your-domain.example>"
+# A random trigger key the DB cron uses to authorize scheduled calls:
+supabase secrets set DKS_TRIGGER_KEY="$(openssl rand -hex 32)"
+# The function's URL for the in-DB schedule (replace the placeholder in
+# ARENA/sql/email-notifications.sql §5 or set the settings row manually):
+supabase db execute -c "insert into public.settings (key, value) values \
+  ('email_worker_url', to_jsonb('https://<PROJECT_REF>.functions.supabase.co/send-email')) \
+  on conflict (key) do update set value = excluded.value;"
+```
+
+### Notes, free-tier posture, and privacy
+
+- The Resend **onboarding sender (`@resend.dev`)** is test-only: the email
+  MUST come from a Resend-verified domain once you want real delivery.
+- Without `RESEND_API_KEY` the function returns a quiet no-op; the user
+  experience never degrades (local Windows alerts keep working).
+- By default emails NEVER include passport/Civil ID values.
+- Email failure never blocks login, approval, or local saves — failed rows
+  requeue up to 3 attempts and then stay `failed` with a sanitized detail.
+- Free Supabase projects pause after ~7 days of inactivity: the in-DB cron
+  then simply pauses with it; nothing else is affected.

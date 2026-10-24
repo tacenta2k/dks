@@ -17,6 +17,8 @@ export interface CellDiagnostic {
 
 export interface CellValidationOptions {
   duplicatePassportValues?: Iterable<string>;
+  /** Normalized duplicate Civil ID set (used only for civil_id columns). */
+  duplicateCivilIdValues?: Iterable<string>;
   duplicateValues?: Iterable<string>;
   duplicatePassport?: boolean;
 }
@@ -54,6 +56,23 @@ export function normalizePassportValue(value: unknown): string {
 }
 
 export const normalizePassport = normalizePassportValue;
+
+/**
+ * Normalise Civil ID values for duplicate comparisons only.
+ *
+ * Civil ID values are plain strings — leading zeroes and every meaningful
+ * character are preserved exactly as typed (no Oman-only or any other
+ * country-specific format requirement). For the advisory duplicate warning,
+ * surrounding/internal whitespace and letter case are ignored; the stored
+ * text is never rewritten.
+ */
+export function normalizeCivilIdValue(value: unknown): string {
+  return typeof value === 'string'
+    ? value.replace(/\s+/g, '').toUpperCase()
+    : '';
+}
+
+export const normalizeCivilId = normalizeCivilIdValue;
 
 function isFiniteNumber(value: unknown): boolean {
   if (typeof value === 'number') {
@@ -106,6 +125,10 @@ function duplicateSet(values: Iterable<string> | undefined): Set<string> {
   return new Set(Array.from(values ?? [], (value) => normalizePassportValue(value)));
 }
 
+function duplicateSetCivilId(values: Iterable<string> | undefined): Set<string> {
+  return new Set(Array.from(values ?? [], (value) => normalizeCivilIdValue(value)));
+}
+
 /**
  * Return visual diagnostics for a cell.  This helper never throws and keeps
  * duplicate passport values as warnings so office users can still save a row.
@@ -139,6 +162,17 @@ export function validateCell(
       return warning('Duplicate passport value', 'duplicate-passport');
     }
 
+    return ok();
+  }
+
+  if (column.type === 'civil_id') {
+    // Plain string storage (leading zeroes and all meaningful characters
+    // preserved); the only advisory diagnostic is a NON-BLOCKING duplicate
+    // warning — independent from the passport check.
+    const duplicates = options.duplicateCivilIdValues;
+    if (duplicateSetCivilId(duplicates).has(normalizeCivilIdValue(value))) {
+      return warning('Duplicate Civil ID value', 'duplicate-civil-id');
+    }
     return ok();
   }
 
@@ -234,4 +268,39 @@ export function findDuplicatePassportValues(
 
 export const duplicatePassportValues = findDuplicatePassportValues;
 export const findDuplicatePassports = findDuplicatePassportValues;
+
+/**
+ * Return normalized Civil ID values that occur in more than one ACTIVE
+ * (non-deleted) row. Empty values are ignored; the detection is advisory
+ * only (non-blocking) and independent from the passport duplicate check.
+ */
+export function findDuplicateCivilIdValues(
+  rows: readonly (GridRowLike | Record<string, unknown>)[],
+  civilIdColumn: Pick<ColumnDefinition, 'id' | 'name'>,
+): Set<string> {
+  const columnNames = [civilIdColumn.name, civilIdColumn.id];
+  const counts = new Map<string, number>();
+
+  for (const row of rows) {
+    if ('deleted' in row && row.deleted === true) {
+      continue;
+    }
+
+    const data = rowData(row);
+    const raw = columnNames.map((name) => data[name]).find((value) => !isEmpty(value));
+    if (isEmpty(raw)) {
+      continue;
+    }
+
+    const normalized = normalizeCivilIdValue(raw);
+    if (!normalized) {
+      continue;
+    }
+    counts.set(normalized, (counts.get(normalized) ?? 0) + 1);
+  }
+
+  return new Set(Array.from(counts.entries())
+    .filter(([, count]) => count > 1)
+    .map(([value]) => value));
+}
 export const detectDuplicatePassports = findDuplicatePassportValues;

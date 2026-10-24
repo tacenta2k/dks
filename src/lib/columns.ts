@@ -9,6 +9,7 @@ export const COLUMN_TYPES = [
   'dropdown',
   'checkbox',
   'notes',
+  'civil_id',
 ] as const;
 
 export type ColumnType = (typeof COLUMN_TYPES)[number];

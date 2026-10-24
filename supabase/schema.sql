@@ -27,7 +27,8 @@ create table if not exists public.app_columns (
   type text not null default 'text'
     check (type in (
       'text', 'number', 'phone', 'email', 'price',
-      'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes'
+      'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes',
+      'civil_id'
     )),
   options jsonb not null default '{}'::jsonb,
   position integer not null default 0 check (position >= 0),

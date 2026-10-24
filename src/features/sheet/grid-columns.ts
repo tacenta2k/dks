@@ -13,7 +13,7 @@ import {
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
 import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
-import { findDuplicatePassportValues, validateCell } from '../../lib/validation';
+import { findDuplicateCivilIdValues, findDuplicatePassportValues, validateCell } from '../../lib/validation';
 import { DateCellEditor } from './date-editor';
 import { AddColumnHeader } from './add-column-header';
 import { RowActionsCell, type RowActionsContext, type SheetGridRendererData } from './row-actions';
@@ -31,6 +31,7 @@ export interface GridColumnCallbacks extends RowActionsContext {
 export interface BuiltGridRows {
   rows: SheetGridRendererData[];
   duplicatePassportValues: Set<string>;
+  duplicateCivilIdValues: Set<string>;
 }
 
 function columnValue(row: SheetRow, column: ColumnDefinition): unknown {
@@ -61,10 +62,15 @@ export function buildGridRows(
   const duplicatePassportValues = passportColumn
     ? findDuplicatePassportValues(sourceRows, passportColumn)
     : new Set<string>();
+  const civilIdColumn = columns.find((column) => column.type === 'civil_id' && column.deleted !== true);
+  const duplicateCivilIdValues = civilIdColumn
+    ? findDuplicateCivilIdValues(sourceRows, civilIdColumn)
+    : new Set<string>();
   const primaryExpiry = getPrimaryExpiryColumn(columns);
 
   return {
     duplicatePassportValues,
+    duplicateCivilIdValues,
     rows: sourceRows
       .filter((row) => row.deleted !== true)
       .map((row) => {
@@ -77,6 +83,7 @@ export function buildGridRows(
         columns.forEach((column) => {
           diagnostics[column.id] = validateCell(columnValue(row, column), column, {
             duplicatePassportValues,
+            duplicateCivilIdValues,
           });
         });
 

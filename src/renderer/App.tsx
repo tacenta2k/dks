@@ -3,6 +3,9 @@ import { useStore } from 'zustand';
 
 import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
+import { OfficeApprovalGate } from '../features/auth/OfficeApprovalGate';
+import { OfficeApprovalsPanel } from '../features/admin/OfficeApprovalsPanel';
+import type { OfficeApprovalService } from '../features/auth/office-approval-service';
 import {
   hasSavedThemePreference,
   loadThemePreference,
@@ -60,6 +63,11 @@ export interface AppProps {
   initialThemePreference?: ThemePreference;
   startInWorkspace?: boolean;
   authService?: AuthService;
+  /**
+   * Office sign-in approval service (default: the real Supabase-backed one).
+   * Tests inject fakes here to drive pending/approved/denied states.
+   */
+  approvalService?: OfficeApprovalService | null;
   demoMode?: boolean;
   sheetRepository?: SheetRepository;
 }
@@ -81,11 +89,12 @@ export function App({
   initialThemePreference,
   startInWorkspace = false,
   authService: providedAuthService,
+  approvalService: providedApprovalService,
   demoMode,
   sheetRepository: providedSheetRepository,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
-  const [appStore] = useState(() => createAppStore(authService));
+  const [appStore] = useState(() => createAppStore(authService, providedApprovalService));
   const [baseSheetRepository] = useState<SheetRepository>(
     () => providedSheetRepository ?? createElectronSheetRepository({ role: 'office' }),
   );
@@ -189,7 +198,28 @@ export function App({
     saveThemePreference(preference);
   };
 
-  const isWorkspaceVisible = authStatus === 'authenticated' || authStatus === 'demo';
+  // Office-only session approval gate. The signed-in user may still hold a
+  // valid password-authenticated session, but until the SERVER confirms this
+  // session is approved the workspace (Sheet, Dashboard, local cache, sync)
+  // never mounts and its effects never run.
+  const sessionApproval = useStore(appStore, (state) => state.sessionApproval);
+  const isWorkspaceVisible = (authStatus === 'authenticated' || authStatus === 'demo')
+    && (profile?.role !== 'office' || sessionApproval === 'approved');
+
+  // Push the session clearance into the main process so a pending Office
+  // session cannot read/write local cached customer records via IPC either.
+  useEffect(() => {
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    if (!local || typeof local.setSessionClearance !== 'function') {
+      return;
+    }
+    const pending = authStatus === 'authenticated'
+      && profile?.role === 'office'
+      && sessionApproval !== 'approved'
+      && sessionApproval !== 'not-required';
+    void local.setSessionClearance(pending ? 'office-pending' : 'allowed')
+      .catch(() => undefined);
+  }, [authStatus, profile?.role, sessionApproval]);
 
   useEffect(() => {
     if (!isWorkspaceVisible || authStatus === 'demo') {
@@ -773,6 +803,17 @@ export function App({
   };
 
   if (!isWorkspaceVisible) {
+    // A password-authenticated Office session with no approval yet gets the
+    // dedicated gate — never the AuthScreen (that would let it re-sign-in in
+    // a loop) and NEVER any other workspace surface.
+    if (authStatus === 'authenticated' && profile?.role === 'office') {
+      return (
+        <OfficeApprovalGate
+          appStore={appStore}
+          onSignOut={() => void appStore.getState().signOut()}
+        />
+      );
+    }
     return (
       <AuthScreen
         onSignIn={(email, password) => appStore.getState().signIn(email, password)}
@@ -802,6 +843,9 @@ export function App({
       sheetRepository={sheetRepository}
       settings={workspaceSettings}
       onSettingsChange={persistWorkspaceSettings}
+      emailPrefsClient={profile?.role === 'admin'
+        ? (authService.authClient as unknown as import('../features/settings/email-preferences').EmailPrefsClient | null)
+        : null}
       settingsError={settingsLoadError}
       auditProfiles={auditProfiles}
       auditRemoteClient={authService.authClient as unknown as { rpc?: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> } | null}
@@ -813,6 +857,9 @@ export function App({
       onNotificationView={handleNotificationView}
       onNotificationRestore={handleNotificationRestore}
       onNotificationSnooze={handleNotificationSnooze}
+      officeApprovalsSlot={profile?.role === 'admin'
+        ? <OfficeApprovalsPanel />
+        : null}
       onLogout={() => appStore.getState().signOut()}
     />
   );

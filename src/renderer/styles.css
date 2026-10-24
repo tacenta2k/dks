@@ -1479,3 +1479,41 @@ button:focus-visible {
   border-color: var(--color-border-strong);
   background: var(--color-surface-muted);
 }
+
+
+/* Office sign-in approval gate (the only surface a pending Office sees). */
+.office-approval-gate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 1rem;
+}
+.office-approval-card {
+  max-width: 34rem;
+  width: 100%;
+  background: var(--surface, #fff);
+  border: 1px solid var(--border, rgba(0,0,0,.08));
+  border-radius: 1rem;
+  padding: 2rem;
+  box-shadow: var(--shadow-lg, 0 12px 32px rgba(0,0,0,.08));
+}
+.office-approval-card__meta {
+  color: var(--muted, #6b7280);
+  font-size: 0.9rem;
+  margin: 0 0 1rem;
+}
+
+/* Admin approvals popover next to the bell. */
+.office-approvals { position: relative; }
+.office-approvals__panel { min-width: 22rem; max-width: 26rem; }
+.office-approvals__section-title {
+  margin: 0.55rem 0.9rem 0.1rem;
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: var(--muted, #6b7280);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.office-approvals__actions { display: flex; gap: 6px; }
+.office-approvals__actions .button { padding: 4px 10px; font-size: 0.85rem; }

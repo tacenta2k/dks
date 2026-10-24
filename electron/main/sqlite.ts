@@ -16,7 +16,8 @@ type LocalColumnType =
   | 'date_expiry'
   | 'dropdown'
   | 'checkbox'
-  | 'notes';
+  | 'notes'
+  | 'civil_id';
 
 const LOCAL_COLUMN_TYPES: ReadonlySet<string> = new Set([
   'text',
@@ -29,6 +30,7 @@ const LOCAL_COLUMN_TYPES: ReadonlySet<string> = new Set([
   'dropdown',
   'checkbox',
   'notes',
+  'civil_id',
 ]);
 
 interface LocalColumnDefinition {

@@ -1922,3 +1922,106 @@ nothing contains `dks-mark`.
 NOT claimed: Windows verification. The user re-runs the full suite and
 `npm run dist` on Windows; results are expected green but untreated until
 proven there.
+
+---
+
+## 27. Feature round — Office session approval, Civil ID type, server-side email
+
+New round on top of the PR #2 merge (origin/main == a1d40ca contains everything
+through §26). Everything below is UNCOMMITTED at authoring time; the commit
+is tagged in the final report for this round.
+
+### 27.1 Office sign-in approval (Feature A)
+
+**Binding model.** Supabase JWT requires the `session_id` claim
+(`auth.sessions.id`); the renderer base64url-decodes it locally only for
+DIAGNOSTIC display. Every trust decision is server-side:
+`request_office_signin()`/`my_office_signin()`/`decide_office_signin()`/
+`revoke_office_signin()` are SECURITY DEFINER and derive the session from
+`auth.jwt()`, and `office_session_is_approved()` (pure SQL helper) exists only
+for the RLS layer.
+
+| Surface | Where |
+|---|---|
+| renderer gate | `src/features/auth/office-approval-service.ts`, `OfficeApprovalGate.tsx`, store state `sessionApproval`, `src/lib/store.ts`, `src/renderer/App.tsx` |
+| Admin panel | `src/features/admin/OfficeApprovalsPanel.tsx` (slot into `AppShell` next to the bell) |
+| local IPC fence | `electron/main/local-ipc.ts` (`CLEARANCE_EXEMPT_CHANNELS={close}`; push channel `dks:local:set-session-clearance`), `electron/preload/index.ts`, `electron/main/index.ts` |
+| SQL | `ARENA/sql/office-approval.sql` (migration; NOT executed by the agent) |
+| admin in-app notification | trigger `office_signin_requests_notify_admin` inserts `admin_notifications` row (shared Office account wording, request id + time) |
+
+**RLS/policies rewritten** (same policy names, recreated in §4 of the
+migration): entries select/insert/update, app_columns select/insert/update,
+renewals select, audit_log insert, settings select, alert_snoozes select/
+insert/update/delete, sync_sessions select/insert/update/delete — office
+clauses gain `is_office() and office_session_is_approved()`.
+`renew_entry`/`office_delete_empty_column`/`column_is_empty` office branches
+gated too; admin behaviour byte-identical.
+
+**Honest limits.** A PC with local cached data CANNOT be remotely wiped —
+revocation is enforced the moment a new ONLINE request hits the server; the
+local-IPC fence only re-checks the renderer-pushed clearance (a hostile
+localhost extension could flip it, the Supabase RLS boundary cannot be
+bypassed). That trade-off is stated here and in the gate UI.
+
+**Tests:** `tests/office-approval.test.tsx` = 27 (store flow, gate renders,
+Admin panel approve/deny/revoke, IPC clearance, shared-email two-session
+binding). `tests/app-auth-flow.test.tsx` updated to use the approve fake.
+`tests/office-shell.test.tsx` fixed for the new gate (Office tests go through
+an `approvalService` fake).
+
+### 27.2 Civil ID column type + duplicate warning (Feature B)
+
+- `src/lib/columns.ts`: `COLUMN_TYPES` + `civil_id`.
+- `electron/main/sqlite.ts`: `LOCAL_COLUMN_TYPES` + `civil_id`.
+- `src/lib/validation.ts`: `normalizeCivilIdValue` (string-only, whitespace
+  strip + uppercase for COMPARISON; raw string stored verbatim), plus
+  `findDuplicateCivilIdValues(rows, column)` advisory scanner over active rows.
+- Validate path: `validateCell` accepts `duplicateCivilIdValues` →
+  non-blocking `warning('Duplicate Civil ID value', 'duplicate-civil-id')`.
+- `src/features/sheet/grid-columns.ts`: `buildGridRows` computes the civil-id
+  dedupe set in parallel to passports; Wizard/type-label: `'Civil ID'`;
+  `SheetPage.tsx`: banner + per-cell wiring.
+- Import: `suggestImportColumnType` recognizes civil-like headers =>
+  `civil_id` and the AdminTools preview select gains a Civil ID option.
+- Schema: `supabase/schema.sql` app_columns type CHECK updated for fresh
+  installs; live migration file at `ARENA/sql/civil-id-type.sql`
+  (verify-first inside a transaction; drop+re-add CHECK, zero row touches).
+- Tests: `tests/civil-id.test.tsx` = 10 (type listing, chooser, normalizer,
+  duplicates active-vs-deleted, non-blocking save, banner text + removal,
+  CSV import with leading zeroes, repository round-trip).
+
+### 27.3 Server-side email — Resend via Edge Function (Feature C)
+
+- `supabase/edge-functions/send-email/index.ts` — outbox processor. Claims
+  pending rows via service-role RPCs (`claim_email_outbox`/`complete_email_outbox`),
+  header-locked by a SERVER-to-SERVER `x-dks-trigger-key` matching the
+  `DKS_TRIGGER_KEY` Edge-Function secret, sends through Resend, logs only
+  sanitized status (recipient+kind+status+detail) to `email_delivery_log`.
+- `supabase/edge-functions/_shared/email.ts` — pure helpers (recipients
+  parser, canonical email content builders, entry redaction that strips
+  passport/civil-id/national-id keys BEFORE handing to the email layer,
+  per-kind dedupe key shaping).
+- Enqueue path: `ARENA/sql/email-notifications.sql` —
+  `email_outbox(dedupe unique per (kind,dedupe_key))` + delivery log +
+  settings seed rows (`email_notifications`, `email_trigger_key`,
+  `email_worker_url`) + trigger enqueueing ONE email per NEW pending Office
+  request + `enqueue_expiry_digest()` ONE email per recipient per day +
+  cron schedule install guarded for free-tier posture.
+- Admin UI: `EmailNotificationsSection` inside Settings → Notifications
+  (enabled / adminEmail / digestEnabled / recipients; validation blocks a
+  blank Admin email while ON — the onboarding sender is test-only).
+- Deploy docs: `supabase/README.md` §"Email notifications — send-email Edge
+  Function", including secrets and the DKS_TRIGGER_KEY handshake.
+
+**Privacy stance of emails** (asserted in tests/email-notifications.test.ts):
+approval email contains NO credentials/request link/session data; digest
+contains ONLY display labels + expiry + days left (no passport/Civil ID).
+
+### 27.4 Gate (this round's local verification)
+
+- `npm test`: 67 files / 485 tests — 482 passed, 3 skipped (unchanged
+  real-Electron packaging probes), **0 failures**.
+- `npm run typecheck`: clean.
+- `npm run build`: clean (renderer + electron path).
+- Windows installer/verify NOT claimed — user runs it with npm run dist.
+- The compiled DB binding is verified happy (node-gyp --nodedir=/usr/local).
