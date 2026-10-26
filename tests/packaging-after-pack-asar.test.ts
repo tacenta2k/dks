@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { once } from 'node:events';
 import {
   copyFileSync,
   cpSync,
@@ -13,6 +14,8 @@ import {
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join, resolve, sep } from 'node:path';
+import type { Writable } from 'node:stream';
+import { finished } from 'node:stream/promises';
 import { describe, expect, it } from 'vitest';
 
 /**
@@ -76,9 +79,11 @@ interface InspectApi {
 }
 
 interface AsarLib {
-  createPackage(src: string, dest: string): Promise<void>;
+  createPackage(src: string, dest: string): Promise<Writable>;
   listPackage(archive: string): string[];
   extractFile(archive: string, entry: string): Buffer;
+  uncache?(archive: string): boolean;
+  uncacheAll?(): void;
 }
 
 const afterPack = require2(join(ROOT, 'scripts', 'after-pack.cjs')) as (context: unknown) => Promise<void>;
@@ -134,17 +139,91 @@ function readNormalised(file: string): string {
 }
 
 /**
+ * `@electron/asar@3.4.1#createPackage` resolves with its destination
+ * WriteStream immediately after calling `stream.end()`; awaiting only that
+ * promise does not prove the underlying file handle has closed. On Windows,
+ * the still-open `resources/app.asar` then blocks its parent directory's
+ * removal, while synchronous test work/`rmSync` retries can starve the close
+ * callback. Wait for both stream completion and `close` before exposing the
+ * fixture to the test. (`finished` already rejects on a stream error.)
+ */
+async function waitForArchiveStreamClose(stream: Writable): Promise<void> {
+  await finished(stream);
+  if (!stream.closed) {
+    await once(stream, 'close');
+  }
+}
+
+/**
+ * `@electron/asar` caches each archive's parsed header/filesystem object in
+ * memory. Drop it before deleting the archive or a fixture tree containing
+ * one, so later tests cannot observe stale header state for a reused path.
+ */
+function releaseAsarCache(archivePath?: string): void {
+  try {
+    if (archivePath) {
+      asar.uncache?.(archivePath);
+    } else {
+      asar.uncacheAll?.();
+    }
+  } catch {
+    // Cache release is test-fixture hygiene only; removal should still run.
+  }
+}
+
+/**
  * Windows may briefly keep staged `.asar`/`.node` files or their parent
  * directories busy after a child process exits. Node retries rm operations
- * that fail with EBUSY/ENOTEMPTY/EPERM when maxRetries is set.
+ * that fail with EBUSY/ENOTEMPTY/EPERM when maxRetries is set. Setup-time
+ * removals use this throwing helper: if the fixture cannot be put into the
+ * requested state, the test must not silently assert against the wrong tree.
  */
 function removeWithRetries(target: string, options: { recursive?: boolean } = {}): void {
+  if (target.toLowerCase().endsWith('.asar')) {
+    releaseAsarCache(target);
+  } else if (options.recursive) {
+    // Temp fixture roots and staged unpacked trees are removed alongside an
+    // archive that the inspector may have listed or extracted from.
+    releaseAsarCache();
+  }
   rmSync(target, {
     recursive: options.recursive ?? false,
     force: true,
     maxRetries: 5,
     retryDelay: 100,
   });
+}
+
+const CLEANUP_LOCK_CODES = new Set(['EBUSY', 'ENOTEMPTY', 'EPERM']);
+
+function cleanupErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null || !('code' in error)) {
+    return null;
+  }
+  const { code } = error as { code?: unknown };
+  return typeof code === 'string' ? code : null;
+}
+
+/**
+ * Teardown-only removal. Once Node's retries above have been exhausted, a
+ * remaining Windows lock on a throwaway fixture (for example an AV/indexing
+ * handle that outlives the test) must not replace the test's real assertion
+ * result from a `finally` block. Name the leaked path, leave just that temp
+ * tree behind, and let the next OS temp cleanup/reboot remove it. Errors
+ * other than the known lock-shaped codes still surface.
+ */
+function removeFixtureBestEffort(target: string, options: { recursive?: boolean } = {}): void {
+  try {
+    removeWithRetries(target, options);
+  } catch (error) {
+    const code = cleanupErrorCode(error);
+    if (code === null || !CLEANUP_LOCK_CODES.has(code)) {
+      throw error;
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    // eslint-disable-next-line no-console
+    console.warn(`[dks-test cleanup] leaving fixture path in place: ${target} (${code}: ${message})`);
+  }
 }
 
 interface LayoutOptions {
@@ -228,7 +307,8 @@ async function makePackagedLayout(opts: LayoutOptions = {}): Promise<PackagedLay
         { recursive: true },
       );
     }
-    await asar.createPackage(src, appAsar);
+    const archiveStream = await asar.createPackage(src, appAsar);
+    await waitForArchiveStreamClose(archiveStream);
   }
 
   if (withUnpackedModule) {
@@ -259,7 +339,7 @@ async function makePackagedLayout(opts: LayoutOptions = {}): Promise<PackagedLay
     unpacked,
     unpackedModuleDir,
     unpackedNativeBinary,
-    cleanup: () => removeWithRetries(root, { recursive: true }),
+    cleanup: () => removeFixtureBestEffort(root, { recursive: true }),
   };
 }
 
@@ -613,8 +693,8 @@ async function stageIntoRealElectronDist(opts: LayoutOptions = {}) {
     appAsarPackageJson: join(dstAsar, 'package.json'),
     unpackedModuleDir: join(dstUnpacked, 'node_modules', 'better-sqlite3'),
     cleanup: () => {
-      removeWithRetries(dstAsar);
-      removeWithRetries(dstUnpacked, { recursive: true });
+      removeFixtureBestEffort(dstAsar);
+      removeFixtureBestEffort(dstUnpacked, { recursive: true });
     },
   };
 }
