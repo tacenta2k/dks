@@ -7,6 +7,7 @@ import {
   getPrimaryExpiryColumn,
   type ColumnDefinition,
 } from '../../lib/columns';
+import { rowDisplayLabel } from '../../lib/labels';
 
 /** The default milestones are deliberately explicit and stable for sync/idempotency. */
 export const DEFAULT_ALERT_DAYS = Object.freeze([90, 60, 30, 15, 7, 1, 0] as const);
@@ -462,32 +463,76 @@ function existingNotificationList(options: AlertEvaluationOptions): readonly Not
   ];
 }
 
-function rowName(row: AlertRow, label: AlertEvaluationOptions['rowLabel']): string {
-  const supplied = typeof label === 'function' ? label(row) : label;
-  if (typeof supplied === 'string' && supplied.trim()) {
-    return supplied.trim();
+const UNNAMED_RECORD = 'Unnamed record';
+
+function isDateShapedLabel(value: string): boolean {
+  return /^\d{4}-\d{2}-\d{2}/.test(value.trim())
+    || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(value.trim());
+}
+
+/**
+ * A notification label is usable only when it is real human text: never the
+ * raw entry id (a UUID) and never a date value (dates are not names).
+ */
+function usableNotificationLabel(value: unknown, rowId: string): string | null {
+  if (typeof value !== 'string') {
+    return null;
   }
-  // S1: human label from the row's own values — never a raw row UUID and
-  // never a date value (dates are not names).
-  const data = row.data ?? {};
-  const isDateShaped = (value: string) => (
-    /^\d{4}-\d{2}-\d{2}/.test(value.trim()) || /^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(value.trim())
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === rowId || isDateShapedLabel(trimmed)) {
+    return null;
+  }
+  return trimmed;
+}
+
+/**
+ * Human label for an expiry notification, resolved from the shared
+ * `rowDisplayLabel` (the workspace's customer-visible columns, looked up by
+ * column id AND column name). Falls back to a non-date scan of the row's own
+ * values, then its category, then exactly "Unnamed record" — never a UUID.
+ * Note this is intentionally NOT the email-digest label: email payloads use
+ * their own redacted server-side label and are untouched by this path.
+ */
+export function expiryRowLabel(
+  row: AlertRow,
+  columns: readonly AlertColumn[] = [],
+): string {
+  const shared = rowDisplayLabel(
+    { id: row.id, data: row.data ?? {} },
+    columns,
   );
+  if (shared !== UNNAMED_RECORD) {
+    const usable = usableNotificationLabel(shared, row.id);
+    if (usable) {
+      return usable;
+    }
+  }
+  const data = row.data ?? {};
   const preferredKeys = Object.keys(data).filter((key) => /name/i.test(key));
   const otherKeys = Object.keys(data).filter((key) => !preferredKeys.includes(key));
   for (const key of [...preferredKeys, ...otherKeys]) {
     const value = data[key];
-    if (typeof value === 'string' && value.trim() && !isDateShaped(value)) {
-      return value.trim();
+    const usable = usableNotificationLabel(value, row.id);
+    if (usable) {
+      return usable;
     }
     if (typeof value === 'number' && Number.isFinite(value)) {
       return String(value);
     }
   }
-  if (typeof row.category === 'string' && row.category.trim()) {
-    return row.category.trim();
-  }
-  return 'Unnamed record';
+  return usableNotificationLabel(row.category, row.id) ?? UNNAMED_RECORD;
+}
+
+function rowName(
+  row: AlertRow,
+  label: AlertEvaluationOptions['rowLabel'],
+  columns: readonly AlertColumn[] = [],
+): string {
+  const supplied = typeof label === 'function' ? label(row) : label;
+  // A caller-supplied label wins only when it is usable human text — a label
+  // callback that hands back the row id (or a date) must never reach a
+  // notification body.
+  return usableNotificationLabel(supplied, row.id) ?? expiryRowLabel(row, columns);
 }
 
 function dayText(daysLeft: number): string {
@@ -499,6 +544,53 @@ function dayText(daysLeft: number): string {
 
 function expiryDedupeKey(rowId: string, expiryValue: string, alertDay: number): string {
   return `expiry:${rowId}:${expiryValue}:${alertDay}`;
+}
+
+/** The single source for an expiry notification's sentence. */
+export function expiryNotificationBody(label: string, daysLeft: number): string {
+  return `${label} expires ${dayText(daysLeft)}.`;
+}
+
+const GENERATED_EXPIRY_BODY = /^[\s\S]+ expires (?:today|in \d+ days?)\.$/;
+
+/**
+ * Rebuild the DISPLAY text of an already-persisted expiry notification from
+ * the row's current human label. Older records may carry a body baked in
+ * with the raw entry UUID (the label lookup used to fall back to `row.id`);
+ * those must render safely after reload without deleting history.
+ *
+ * Only bodies that match the machine-generated expiry sentence are rebuilt —
+ * anything else is returned verbatim so unexpected text is never rewritten.
+ * Record id, dedupe key, milestone, expiry value, read/dismissed/snooze
+ * state and timestamps are all preserved exactly.
+ */
+export function refreshExpiryNotificationLabel(
+  record: ExpiryNotificationRecord,
+  row: AlertRow | null | undefined,
+  columns: readonly AlertColumn[] = [],
+): ExpiryNotificationRecord {
+  const expected = expiryNotificationBody(
+    row ? expiryRowLabel(row, columns) : UNNAMED_RECORD,
+    record.daysLeft,
+  );
+  if (record.body === expected || !GENERATED_EXPIRY_BODY.test(record.body)) {
+    return record;
+  }
+  return { ...record, body: expected };
+}
+
+/** Refresh every expiry record in a merged notification feed (other kinds pass through). */
+export function refreshExpiryNotificationLabels(
+  records: readonly NotificationRecord[],
+  rows: readonly AlertRow[],
+  columns: readonly AlertColumn[] = [],
+): NotificationRecord[] {
+  const rowsById = new Map(rows.map((row) => [row.id, row]));
+  return records.map((record) => (
+    record.kind === 'expiry'
+      ? refreshExpiryNotificationLabel(record, rowsById.get(record.rowId), columns)
+      : record
+  ));
 }
 
 /**
@@ -553,7 +645,7 @@ export function evaluateAlerts(options: AlertEvaluationOptions): ExpiryNotificat
         return [];
       }
 
-      const label = rowName(row, options.rowLabel);
+      const label = rowName(row, options.rowLabel, options.columns ?? []);
       const record: ExpiryNotificationRecord = {
         id: dedupeKey,
         kind: 'expiry',
@@ -564,7 +656,7 @@ export function evaluateAlerts(options: AlertEvaluationOptions): ExpiryNotificat
         alertDay: daysLeft,
         dedupeKey,
         title: daysLeft === 0 ? 'Expiry due today' : 'Expiry reminder',
-        body: `${label} expires ${dayText(daysLeft)}.`,
+        body: expiryNotificationBody(label, daysLeft),
         createdAt: serialiseDate(now),
         read: false,
         dismissed: false,

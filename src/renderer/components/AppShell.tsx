@@ -68,6 +68,8 @@ export interface AppShellProps {
   dashboardThresholds?: Parameters<typeof DashboardPage>[0]['thresholds'];
   dashboardColors?: Parameters<typeof DashboardPage>[0]['colors'];
   onDashboardFilter?: (filter: DashboardFilterId) => void;
+  /** Pending dashboard-card filter for the Visa Sheet (token re-applies it). */
+  sheetDashboardFilter?: { filter: DashboardFilterId; token: number } | null;
   settings?: PartialSettings;
   initialSettings?: PartialSettings;
   settingsColumns?: ComponentProps<typeof SettingsPage>['columns'];
@@ -309,6 +311,7 @@ export function AppShell({
   dashboardThresholds,
   dashboardColors,
   onDashboardFilter,
+  sheetDashboardFilter = null,
   settings,
   initialSettings,
   settingsColumns,
@@ -658,6 +661,8 @@ export function AppShell({
                repository={sheetRepository}
                role={role}
                refreshToken={pageRefreshToken}
+               dashboardFilter={sheetDashboardFilter?.filter ?? null}
+               dashboardFilterToken={sheetDashboardFilter?.token ?? 0}
                theme={resolvedTheme}
                thresholds={dashboardThresholds}
                toolsMenu={(

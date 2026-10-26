@@ -38,9 +38,14 @@ import {
   QUICK_FILTERS,
   STATUS_FILTER_OPTIONS,
   filterRows,
+  type DaysLeftRange,
   type QuickFilter,
   type StatusFilterValue,
 } from './filters';
+import {
+  dashboardSheetFilter,
+  type DashboardFilterId,
+} from '../dashboard/selectors';
 import {
   buildGridColumns,
   buildGridRows,
@@ -96,6 +101,12 @@ export interface SheetPageProps {
    * so keyboard-editing e2e coverage needs to opt in explicitly).
    */
   renderGridInTests?: boolean;
+  /**
+   * Dashboard card navigation: open the sheet filtered to exactly the rows
+   * the card counted. Re-applied whenever `dashboardFilterToken` changes.
+   */
+  dashboardFilter?: DashboardFilterId | null;
+  dashboardFilterToken?: number;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -162,6 +173,8 @@ export function SheetPage({
   thresholds,
   refreshToken = 0,
   renderGridInTests = false,
+  dashboardFilter = null,
+  dashboardFilterToken = 0,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -174,6 +187,9 @@ export function SheetPage({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
+  // Exact internal window for dashboard cards without a chip (1 day,
+  // 6 months, 1 year). Any chip/status interaction clears it.
+  const [daysRange, setDaysRange] = useState<DaysLeftRange | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>('');
   const [groupByColumnId, setGroupByColumnId] = useState('');
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -236,6 +252,27 @@ export function SheetPage({
     void refresh({ quiet: true });
   }, [refreshToken, refresh]);
 
+  // Dashboard card navigation: apply the card's EXACT filter (existing chip
+  // or status where equivalent, otherwise the internal days range) and clear
+  // any search text so the sheet shows precisely the rows the card counted.
+  // Null sentinel: the sheet remounts when navigating from the dashboard, so
+  // the first effect run must apply the pending card filter too.
+  const lastDashboardFilterToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (lastDashboardFilterToken.current === dashboardFilterToken) {
+      return;
+    }
+    lastDashboardFilterToken.current = dashboardFilterToken;
+    if (!dashboardFilter) {
+      return;
+    }
+    const target = dashboardSheetFilter(dashboardFilter);
+    setSearch('');
+    setQuickFilter(target.quickFilter);
+    setStatusFilter(target.status);
+    setDaysRange(target.daysRange);
+  }, [dashboardFilter, dashboardFilterToken]);
+
   // Render the PERSISTED order: `position` is the saved column order
   // (SQLite/app_columns). Both the real grid and the accessible table read
   // this one list, so the two surfaces can never disagree about order.
@@ -249,11 +286,12 @@ export function SheetPage({
   const matchingRows = useMemo(() => filterRows(rows, activeColumns, {
     search,
     quickFilter,
+    daysRange,
     status: statusFilter,
     today,
     expiringSoonThreshold,
     thresholds,
-  }), [rows, activeColumns, search, quickFilter, statusFilter, today, expiringSoonThreshold, thresholds]);
+  }), [rows, activeColumns, search, quickFilter, daysRange, statusFilter, today, expiringSoonThreshold, thresholds]);
   const matchingIds = useMemo(() => new Set(matchingRows.map((row) => row.id)), [matchingRows]);
   const builtRows = useMemo(() => buildGridRows(rows, activeColumns, { today }), [rows, activeColumns, today]);
   const groupable = useMemo(() => groupableColumns(activeColumns), [activeColumns]);
@@ -783,7 +821,10 @@ export function SheetPage({
                 <select
                   aria-label="Filter by status"
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(selectedValue(event) as StatusFilterValue)}
+                  onChange={(event) => {
+                    setStatusFilter(selectedValue(event) as StatusFilterValue);
+                    setDaysRange(null);
+                  }}
                 >
                   {STATUS_FILTER_OPTIONS.map((option) => (
                     <option value={option.value} key={option.value || 'all'}>{option.label}</option>
@@ -805,7 +846,10 @@ export function SheetPage({
                       type="button"
                       aria-pressed={quickFilter === filter.id}
                       title={filter.label === 'Today' ? 'Days Left = 0' : `Days Left 0–${filter.id}`}
-                      onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
+                      onClick={() => {
+                        setQuickFilter(quickFilter === filter.id ? 'all' : filter.id);
+                        setDaysRange(null);
+                      }}
                     >
                       {filter.label}
                     </button>
@@ -834,6 +878,7 @@ export function SheetPage({
                               aria-checked={quickFilter === filter.id}
                               onClick={() => {
                                 setQuickFilter(quickFilter === filter.id ? 'all' : filter.id);
+                                setDaysRange(null);
                                 setMoreFiltersOpen(false);
                               }}
                             >
