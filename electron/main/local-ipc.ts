@@ -53,6 +53,44 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
 
 export type LocalIpcChannel = (typeof LOCAL_IPC_CHANNELS)[keyof typeof LOCAL_IPC_CHANNELS];
 
+/**
+ * Session clearance for the customer-data channels. The renderer reports the
+ * CURRENT sign-in state whenever it changes; while an Office session awaits
+ * admin approval everything apart from `close` refuses, so a pending Office
+ * user cannot read or mutate local cached customer records — and a prior
+ * Admin session on a shared PC leaves nothing readable behind after sign-out
+ * (the renderer pushes 'allowed' again on admin login or sign-out).
+ *
+ * Defense-in-depth only: the primary enforcement is Supabase RLS against the
+ * signed JWT; a deliberately hostile renderer process can always tell the
+ * main process it is "allowed" — that path is documented in the task notes.
+ */
+export type LocalSessionClearance = 'allowed' | 'office-pending';
+
+/** Channels still allowed from a pending Office session (no customer data). */
+const CLEARANCE_EXEMPT_CHANNELS: ReadonlySet<string> = new Set([
+  LOCAL_IPC_CHANNELS.close,
+]);
+
+export const LOCAL_CLEARANCE_CHANNEL = 'dks:local:set-session-clearance';
+
+export interface LocalSessionClearanceApi {
+  get: () => LocalSessionClearance;
+  set: (next: LocalSessionClearance) => void;
+}
+
+export function createLocalSessionClearance(
+  initial: LocalSessionClearance = 'allowed',
+): LocalSessionClearanceApi {
+  let current: LocalSessionClearance = initial;
+  return {
+    get: () => current,
+    set: (next) => {
+      current = next === 'office-pending' ? 'office-pending' : 'allowed';
+    },
+  };
+}
+
 export interface LocalIpcStore {
   listRows: (includeDeleted?: boolean) => readonly unknown[];
   listEntries?: (includeDeleted?: boolean) => readonly unknown[];
@@ -113,6 +151,11 @@ export interface LocalIpcMain {
 export interface LocalIpcDependencies {
   store: LocalIpcStore;
   now?: () => string;
+  /**
+   * Optional session-clearance hook: when it returns 'office-pending', every
+   * customer-data handler refuses (see LocalSessionClearance docs).
+   */
+  sessionClearance?: () => LocalSessionClearance;
 }
 
 export type LocalIpcHandler = (payload?: unknown, event?: unknown) => unknown;
@@ -909,15 +952,38 @@ export function registerLocalIpcHandlers(
 ): () => void {
   const handlers = createLocalIpcHandlers(dependencies);
   const channels = Object.keys(handlers) as LocalIpcChannel[];
+  const sessionGate = dependencies.sessionClearance ?? (() => 'allowed' as LocalSessionClearance);
 
   for (const channel of channels) {
-    dependencies.ipcMain.handle(channel, (_event, payload) => handlers[channel](payload, _event));
+    dependencies.ipcMain.handle(channel, (_event, payload) => {
+      // Customer-data channels refuse while an Office session awaits admin
+      // approval (`set-session-clearance` push channel drives the state).
+      if (!CLEARANCE_EXEMPT_CHANNELS.has(channel) && sessionGate() === 'office-pending') {
+        throw new Error('Waiting for admin approval — this session cannot access local records.');
+      }
+      return handlers[channel](payload, _event);
+    });
   }
 
   return () => {
     for (const channel of channels) {
       dependencies.ipcMain.removeHandler?.(channel);
     }
+  };
+}
+
+/** Push channel: the renderer reports clearance transitions here. */
+export function registerLocalSessionClearanceChannel(
+  ipcMain: LocalIpcMain,
+  clearance: LocalSessionClearanceApi,
+): () => void {
+  ipcMain.handle(LOCAL_CLEARANCE_CHANNEL, (_event: unknown, payload: unknown) => {
+    clearance.set(payload === 'office-pending' ? 'office-pending' : 'allowed');
+    return clearance.get();
+  });
+  return () => {
+    clearance.set('allowed');
+    ipcMain.removeHandler?.(LOCAL_CLEARANCE_CHANNEL);
   };
 }
 

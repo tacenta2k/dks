@@ -6,7 +6,27 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthService, type AuthClientLike } from '../src/features/auth/auth-service';
 import { App } from '../src/renderer/App';
 import type { ExpiryNotificationRecord } from '../src/features/notifications/alert-service';
+import type { OfficeApprovalService } from '../src/features/auth/office-approval-service';
 import { AppShell } from '../src/renderer/components/AppShell';
+
+/** Office tested flows sit BEYOND the approval gate — this fake approves. */
+function approvedApprovalService(): OfficeApprovalService {
+  const row = {
+    id: 'req-office-1',
+    userId: 'user-office',
+    status: 'approved' as const,
+    requestedAt: '2026-10-24T09:00:00.000Z',
+    decidedAt: '2026-10-24T09:30:00.000Z',
+    decidedBy: 'user-admin',
+  };
+  return {
+    requestApproval: vi.fn(async () => ({ data: row, error: null })),
+    fetchMyRequest: vi.fn(async () => ({ data: row, error: null })),
+    listRequests: vi.fn(async () => ({ data: [row], error: null })),
+    decideRequest: vi.fn(async (id: string, decision: 'approved' | 'denied') => ({ data: { ...row, id, status: decision }, error: null })),
+    revokeRequest: vi.fn(async (id: string) => ({ data: { ...row, id, status: 'revoked' as const }, error: null })),
+  };
+}
 
 /**
  * R2-11 — Office and Admin share the same shell (sidebar, compact top bar,
@@ -69,7 +89,7 @@ const alert: ExpiryNotificationRecord = {
 describe('Office shell parity (R2-11)', () => {
   it('shows the same compact top bar, sync pill, and bell popover for Office', async () => {
     const service = new AuthService(officeClient());
-    render(<App authService={service} initialView="sheet" />);
+    render(<App authService={service} initialView="sheet" approvalService={approvedApprovalService()} />);
 
     expect(await screen.findByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument();
     // Same top-bar controls as Admin.

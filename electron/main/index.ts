@@ -31,7 +31,9 @@ import type { Tray } from 'electron';
 import { createSqliteStore, type SqliteStore } from './sqlite';
 import {
   LOCAL_IPC_CHANNELS,
+  createLocalSessionClearance,
   registerLocalIpcHandlers,
+  registerLocalSessionClearanceChannel,
   registerLocalStoreFailureIpcHandlers,
   type LocalIpcMain,
 } from './local-ipc';
@@ -163,6 +165,8 @@ let updaterService: UpdaterService | undefined;
 let updaterScheduler: UpdaterScheduler | undefined;
 let localStore: SqliteStore | undefined;
 let unregisterLocalIpc: (() => void) | undefined;
+let unregisterLocalClearance: (() => void) | undefined;
+const localSessionClearance = createLocalSessionClearance('allowed');
 /** R7: why the local store is unavailable, shared with the failure stubs. */
 let localStoreFailure: LocalStoreFailure | null = null;
 let unregisterLocalStoreFailureIpc: (() => void) | undefined;
@@ -466,9 +470,17 @@ function openLocalStore(): void {
     localStoreFailure = null;
     unregisterLocalStoreFailureIpc?.();
     unregisterLocalStoreFailureIpc = undefined;
+    // Office sign-in approval: the renderer pushes 'office-pending' until the
+    // server approves the signed session; customer-data channels refuse then.
+    unregisterLocalClearance?.();
+    unregisterLocalClearance = registerLocalSessionClearanceChannel(
+      ipcMain as unknown as LocalIpcMain,
+      localSessionClearance,
+    );
     unregisterLocalIpc = registerLocalIpcHandlers({
       ipcMain: ipcMain as unknown as LocalIpcMain,
       store: localStore,
+      sessionClearance: localSessionClearance.get,
     });
     log.info('[dks] local SQLite store opened and IPC handlers registered');
   } catch (error) {

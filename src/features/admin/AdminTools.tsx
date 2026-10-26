@@ -221,7 +221,7 @@ function ImportPreviewDialog({
                 <span>
                   {suggestion.header}
                   {' — '}
-                  looks like dates
+                  {suggestion.type === 'civil_id' ? 'looks like a Civil ID' : 'looks like dates'}
                 </span>
                 <select
                   aria-label={`Type for ${suggestion.header}`}
@@ -231,6 +231,7 @@ function ImportPreviewDialog({
                   <option value="date_expiry">Date (expiry)</option>
                   <option value="date_start">Date (start)</option>
                   <option value="text">Text</option>
+                  <option value="civil_id">Civil ID</option>
                 </select>
               </label>
             ))}

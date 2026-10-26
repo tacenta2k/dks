@@ -1,10 +1,11 @@
 # DKS STEP 3 — Supabase setup
 
-`schema.sql` is the complete database deliverable. It creates the nine
+`schema.sql` is the complete database deliverable. It creates the ten
 application tables, exact Auth-linked profile seeds, the dynamic column and
-entry contracts, renewal snapshots, audit records, role-safe RPCs, indexes,
-authenticated grants, RLS policies, timestamp/expiry/audit triggers, and the
-realtime notification/settings surfaces. DKS does not use Supabase Storage;
+entry contracts, renewal snapshots, audit records, role-safe RPCs, the
+session-bound Office sign-in approval gate, indexes, authenticated grants, RLS
+policies, timestamp/expiry/audit triggers, and the realtime
+notification/settings surfaces. DKS does not use Supabase Storage;
 data lives in these database tables and the desktop's local SQLite cache.
 
 ## Apply the schema
@@ -24,9 +25,32 @@ data lives in these database tables and the desktop's local SQLite cache.
    one script. If an older DKS deployment created the removed backup bucket,
    delete that bucket and its object policies once from the Storage dashboard
    before applying the current schema.
-4. Run the verification queries below. Query 1 should report nine present and
-   nine RLS-enabled public tables. Query 2 should return the two exact profile
-    rows. Query 3 checks the exact column contracts, RPCs, and default settings.
+4. Run the verification queries below. Query 1 should report ten present and
+   ten RLS-enabled public tables. Query 2 should return the two exact profile
+   rows. Query 3 checks the exact column contracts, RPCs, and default settings.
+
+## Migrations for an EXISTING deployment (side files in ARENA/sql/)
+
+Fresh projects only ever need `schema.sql` above. An existing project gets the
+newer surfaces from the reviewed migration scripts, IN THIS ORDER:
+
+1. `ARENA/sql/office-approval.sql` — Office sign-in approval (table, RPCs,
+   RLS rewrites, admin notification, plus the `write_audit_log` repair in §5c).
+2. `ARENA/sql/office-approval-fix.sql` — ONLY if `office-approval.sql` was
+   applied before the §5c repair existed (symptom: Office waiting screen shows
+   "Cannot verify sign-in approval — record "old" has no field "deleted"").
+   Safe to run more than once; otherwise skip it.
+3. `ARENA/sql/civil-id-type.sql` — Civil ID column type (metadata-only CHECK
+   relaxation).
+4. `ARENA/sql/email-notifications.sql` — optional Resend email outbox +
+   delivery log + triggers (+ pg_cron schedule when the extension is on).
+   If an earlier revision failed with `invalid input syntax for type json`
+   near `email_worker_url`, the whole file rolled back then — simply run the
+   current revision end to end; every object in it is idempotent.
+
+Each script starts with a commented §0 preflight (SELECT-only) and ends with
+verification queries. Run exactly one script at a time, as one batch, in the
+order above.
 
 The `profiles.id` foreign key points to `auth.users(id)` with `ON DELETE
 CASCADE`. The Auth rows therefore must exist before the profile seed statements
@@ -55,6 +79,12 @@ run. The script updates the two profile roles/emails on a repeat run.
   `dismissed_until_expiry_change`, and `expiry_value` for per-entry alerts.
 - `sync_sessions` uses `user_id`, `opened_at`, and `closed_at` for sync
   lifecycle state.
+- `office_signin_requests` binds the Office sign-in approval gate to the
+  signed Auth session (`auth_session_id` from the JWT `session_id` claim).
+  Clients may only SELECT their own rows; status transitions
+  (pending → approved/denied, approved → revoked) run through SECURITY
+  DEFINER RPCs, and every Office RLS clause additionally requires
+  `office_session_is_approved()` for the CURRENT session.
 
 ## Verification query 1 — table and RLS health
 
@@ -62,7 +92,8 @@ run. The script updates the two profile roles/emails on a repeat run.
 with required(name) as (
   values
     ('profiles'), ('app_columns'), ('entries'), ('renewals'), ('audit_log'),
-    ('admin_notifications'), ('settings'), ('alert_snoozes'), ('sync_sessions')
+    ('admin_notifications'), ('settings'), ('alert_snoozes'), ('sync_sessions'),
+    ('office_signin_requests')
 ), present as (
   select c.relname as name, c.relrowsecurity
     from pg_class c
@@ -193,3 +224,46 @@ this repository, the desktop `.env`, or the renderer bundle.
   (or use a fresh project) before applying this corrected contract.
 - Supabase's service role bypasses RLS by design. The desktop client should use
   only the publishable key and the authenticated role.
+
+## Email notifications — `send-email` Edge Function (optional)
+
+Two kinds of server-side email ride the same queue (`public.email_outbox`),
+populated by database triggers/functions (see `ARENA/sql/email-notifications.sql`):
+
+- **Office sign-in request**: after an Office session opens a pending request,
+  the qualifying trigger enqueues at most ONE email per request (dedupe key =
+  request id) to the configured Admin email from `settings.email_notifications`.
+- **Expiry digest**: `public.enqueue_expiry_digest()` enqueues at most ONE batch
+  email per recipient per local-day (dedupe key = recipient + date).
+
+Both are processed by a scheduled POST to this Edge Function, which claims rows
+server-side (service-role only — a desktop client cannot drive the queue)
+and delivers via Resend.
+
+Deploy (links the function to THIS project — adjust `<PROJECT_REF>`):
+
+```bash
+supabase functions deploy send-email
+# REQUIRED secrets — none of these may end up in the repo / app / installer:
+supabase secrets set RESEND_API_KEY=re_...
+supabase secrets set RESEND_FROM_EMAIL="DKS <noreply@your-domain.example>"
+# A random trigger key the DB cron uses to authorize scheduled calls:
+supabase secrets set DKS_TRIGGER_KEY="$(openssl rand -hex 32)"
+# The function's URL for the in-DB schedule (replace the placeholder in
+# ARENA/sql/email-notifications.sql §5 or set the settings row manually):
+supabase db execute -c "insert into public.settings (key, value) values \
+  ('email_worker_url', to_jsonb('https://<PROJECT_REF>.functions.supabase.co/send-email')) \
+  on conflict (key) do update set value = excluded.value;"
+```
+
+### Notes, free-tier posture, and privacy
+
+- The Resend **onboarding sender (`@resend.dev`)** is test-only: the email
+  MUST come from a Resend-verified domain once you want real delivery.
+- Without `RESEND_API_KEY` the function returns a quiet no-op; the user
+  experience never degrades (local Windows alerts keep working).
+- By default emails NEVER include passport/Civil ID values.
+- Email failure never blocks login, approval, or local saves — failed rows
+  requeue up to 3 attempts and then stay `failed` with a sanitized detail.
+- Free Supabase projects pause after ~7 days of inactivity: the in-DB cron
+  then simply pauses with it; nothing else is affected.

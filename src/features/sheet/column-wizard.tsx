@@ -33,6 +33,8 @@ function typeLabel(type: ColumnType): string {
       return 'Checkbox';
     case 'notes':
       return 'Notes';
+    case 'civil_id':
+      return 'Civil ID';
     case 'number':
       return 'Number';
     case 'text':

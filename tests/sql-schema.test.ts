@@ -3,6 +3,8 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const schemaPath = resolve(process.cwd(), 'supabase/schema.sql');
+const arenaSql = (name: string): string =>
+  readFileSync(resolve(process.cwd(), 'ARENA/sql', name), 'utf8').toLowerCase();
 const edgeFunctionPath = resolve(process.cwd(), 'supabase/edge-functions/expiry-digest/index.ts');
 
 function schemaSource(): string {
@@ -106,7 +108,7 @@ describe('Supabase STEP 3 schema', () => {
       /id\s+uuid\s+primary key\s+references auth\.users\s*\(id\)\s+on delete cascade/,
     );
     expect(appColumns).toMatch(
-      /check \(type in \(\s*'text', 'number', 'phone', 'email', 'price', 'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes'\s*\)\)/,
+      /check \(type in \(\s*'text', 'number', 'phone', 'email', 'price', 'date_start', 'date_expiry', 'dropdown', 'checkbox', 'notes',\s*'civil_id'\s*\)\)/,
     );
     for (const column of [
       'name text not null',
@@ -256,5 +258,178 @@ describe('Supabase STEP 3 schema', () => {
     expect(source).toContain('api.resend.com/emails');
     expect(source).not.toMatch(/Bearer\s+re_[a-z0-9_]+/i);
     expect(source).not.toMatch(/RESEND_API_KEY\s*=\s*['"][^'"]+['"]/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Office sign-in approval — schema mirror + migration safety (R5 session gate)
+// ---------------------------------------------------------------------------
+
+describe('Office sign-in approval — schema mirror', () => {
+  it('mirrors the approval table with the session binding and unique constraint', () => {
+    const sql = schemaSource();
+
+    const table = tableDefinition(sql, 'office_signin_requests').replace(/\s+/g, ' ');
+    expect(table).toMatch(/user_id uuid not null\s+references public\.profiles\(id\) on delete cascade/);
+    expect(table).toContain('auth_session_id uuid not null');
+    expect(table).toMatch(/status text not null default 'pending'\s+check \(status in \('pending', 'approved', 'denied', 'revoked'\)\)/);
+    expect(table).toContain('unique (user_id, auth_session_id)');
+
+    for (const fn of [
+      'office_session_is_approved',
+      'request_office_signin',
+      'my_office_signin',
+      'decide_office_signin',
+      'revoke_office_signin',
+      'office_signin_request_notify_admin',
+    ]) {
+      expect(sql).toContain(`function public.${fn}`);
+    }
+
+    expect(sql).toContain('create trigger office_signin_requests_notify_admin');
+    expect(sql).toContain('after insert on public.office_signin_requests');
+    expect(sql).toContain('create policy office_signin_requests_select_own_or_admin');
+    expect(sql).toContain('revoke insert, update, delete on public.office_signin_requests from authenticated');
+    expect(sql).toContain('grant execute on function public.decide_office_signin(uuid, text) to authenticated');
+  });
+
+  it('gates every Office RLS clause and office-callable RPC on the approved session', () => {
+    const sql = schemaSource();
+
+    // Every office clause in the rewritten policies goes through the gate.
+    const gatedOccurrences = sql.match(/is_office\(\) and public\.office_session_is_approved\(\)/g) ?? [];
+    expect(gatedOccurrences.length).toBeGreaterThanOrEqual(9);
+
+    // The policies that were rewritten must not keep a bare office escape.
+    for (const policyStart of [
+      'create policy app_columns_select_authenticated',
+      'create policy app_columns_insert_authenticated',
+      'create policy app_columns_update_authenticated',
+      'create policy entries_select_authenticated',
+      'create policy entries_insert_authenticated',
+      'create policy entries_update_authenticated',
+      'create policy renewals_select_authenticated',
+      'create policy audit_log_insert_authenticated',
+      'create policy settings_select_authenticated',
+      'create policy alert_snoozes_select_authenticated',
+      'create policy alert_snoozes_insert_authenticated',
+      'create policy alert_snoozes_update_authenticated',
+      'create policy alert_snoozes_delete_authenticated',
+      'create policy sync_sessions_select_authenticated',
+      'create policy sync_sessions_insert_authenticated',
+      'create policy sync_sessions_update_authenticated',
+      'create policy sync_sessions_delete_authenticated',
+    ]) {
+      const body = sql.slice(sql.indexOf(policyStart), sql.indexOf(';', sql.indexOf(policyStart)));
+      if (body.includes('is_office()')) {
+        expect(body).toContain('office_session_is_approved()');
+      }
+    }
+  });
+});
+
+// The exact plpgsql failure behind "Cannot verify sign-in approval —
+// record "old" has no field "deleted"": the shared audit trigger dereferenced
+// OLD.deleted in the SAME expression as its scalar table guard, on tables
+// that have no "deleted" column. These assertions pin the repaired shape.
+describe('shared audit trigger — no record-field dereference behind scalar guards', () => {
+  const files: Array<[string, string]> = [
+    ['schema.sql', schemaSource()],
+    ['office-approval.sql', arenaSql('office-approval.sql')],
+    ['office-approval-fix.sql', arenaSql('office-approval-fix.sql')],
+  ];
+  // Comments document the bug itself; only executable SQL counts here.
+  const stripComments = (sql: string): string => sql.replace(/--[^\n]*/g, '');
+  const auditBody = (sql: string): string => {
+    const plain = stripComments(sql);
+    const start = plain.indexOf('function public.write_audit_log');
+    expect(start).toBeGreaterThanOrEqual(0);
+    return plain.slice(start, plain.indexOf('$$;', start) + 3);
+  };
+
+  it.each(files.map(([name]) => name))('never combines tg guards with old.deleted in one expression (%s)', (name) => {
+    const body = auditBody(files.find(([file]) => file === name)?.[1] ?? '');
+
+    // The buggy pattern: tg_op = 'UPDATE' IMMEDIATELY followed by
+    // "and old.deleted" inside the same condition (whitespace/newlines between).
+    expect(body).not.toMatch(/tg_op\s*=\s*'update'\s+and\s+old\.deleted/i);
+  });
+
+  it.each(files.map(([name]) => name))('write_audit_log nests the entries notify branch behind a scalar-only guard (%s)', (name) => {
+    const body = auditBody(files.find(([file]) => file === name)?.[1] ?? '');
+
+    expect(body).toMatch(/tg_table_name\s*=\s*'entries'\s+and\s+tg_op\s*=\s*'update'\s+then/);
+    expect(body).toMatch(/old\.deleted is false and new\.deleted is true and public\.is_office\(\)/);
+  });
+});
+
+describe('office_signin_requests trigger whitelist', () => {
+  it('only the whitelisted NEW-only notification triggers bind to the table', () => {
+    const sources: Array<[string, string]> = [
+      ['schema.sql', schemaSource()],
+      ['office-approval.sql', arenaSql('office-approval.sql')],
+      ['email-notifications.sql', arenaSql('email-notifications.sql')],
+    ];
+    const allowedTriggers = new Set([
+      'office_signin_requests_notify_admin',
+      'office_signin_requests_email_enqueue',
+    ]);
+    const allowedFunctions = new Set([
+      'office_signin_request_notify_admin',
+      'office_signin_request_email_enqueue',
+    ]);
+
+    const found: string[] = [];
+    for (const [, sql] of sources) {
+      const re =
+        /create trigger\s+(\w+)\s+(after|before)[^;]*?on public\.office_signin_requests[^;]*?execute function public\.(\w+)\(\)/gs;
+      for (const match of sql.matchAll(re)) {
+        const [, triggerName, , fnName] = match;
+        found.push(triggerName);
+        expect(allowedTriggers.has(triggerName)).toBe(true);
+        expect(allowedFunctions.has(fnName)).toBe(true);
+
+        // The trigger functions must never touch OLD — the table's rows only
+        // ever flow through NEW on AFTER INSERT, and OLD dereferences were the
+        // production crash of the first migration revision.
+        const fnStart = sql.indexOf(`function public.${fnName}`);
+        expect(fnStart).toBeGreaterThanOrEqual(0);
+        const fnBody = sql.slice(fnStart, sql.indexOf('$$;', fnStart) + 3);
+        expect(fnBody).not.toMatch(/\bold\./);
+      }
+    }
+    expect(found).toContain('office_signin_requests_notify_admin');
+    expect(found).toContain('office_signin_requests_email_enqueue');
+  });
+
+  it('migration RLS rewrites keep the audit actor constraint (no forged attribution)', () => {
+    for (const sql of [arenaSql('office-approval.sql'), schemaSource()]) {
+      const start = sql.indexOf('create policy audit_log_insert_authenticated');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const body = sql.slice(start, sql.indexOf(';', start));
+      expect(body).toContain('actor = auth.uid() or actor is null');
+      expect(body).toContain('office_session_is_approved()');
+    }
+  });
+});
+
+describe('email notifications migration — jsonb seeds and digest typing', () => {
+  it('stores the worker url as a real jsonb string (never a bare literal)', () => {
+    const sql = arenaSql('email-notifications.sql');
+
+    // A bare URL used to ERROR the whole migration ("invalid input syntax for
+    // type json") and roll everything back — including the outbox trigger.
+    expect(sql).toMatch(/values \('email_worker_url', to_jsonb\(/);
+    expect(sql).not.toMatch(/'email_worker_url', 'https/);
+  });
+
+  it('casts notification_days elements before max() (text array elements)', () => {
+    const sql = arenaSql('email-notifications.sql');
+    const start = sql.indexOf('function public.enqueue_expiry_digest');
+    expect(start).toBeGreaterThanOrEqual(0);
+    const body = sql.slice(start, sql.indexOf('$$;', start) + 3);
+
+    expect(body).toContain('day_value.value::integer');
+    expect(body).toMatch(/day_value\.value ~ '\^\[0-9\]\{1,4\}\$'/);
   });
 });

@@ -187,6 +187,11 @@ export interface DksLocalOutboxItem {
 
 export interface DksLocalApi {
   getSnapshot: () => Promise<DksLocalSnapshot>;
+  /**
+   * Office sign-in approval: push the current session clearance
+   * ('office-pending' while waiting for admin approval).
+   */
+  setSessionClearance: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
@@ -284,6 +289,7 @@ const LOCAL_CHANNELS = {
   setSyncStatus: 'dks:local:set-sync-status',
   flushSync: 'dks:local:flush-sync',
   close: 'dks:local:close',
+  setSessionClearance: 'dks:local:set-session-clearance',
 } as const;
 
 const LOCAL_SYNC_STATUSES: readonly DksLocalSyncStatus[] = [
@@ -596,6 +602,13 @@ const localApi: DksLocalApi = Object.freeze({
   setSyncStatus: (input: DksLocalSyncState | DksLocalSyncStatus) => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.setSyncStatus, input, validateSyncStatus),
   flushSync: () => invokeLocal<DksLocalSyncState>(LOCAL_CHANNELS.flushSync, undefined),
   close: () => invokeLocal<DksLocalCloseResult>(LOCAL_CHANNELS.close, undefined),
+  /**
+   * Office sign-in approval: 'office-pending' while an Office session awaits
+   * admin approval (customer-data channels refuse in the main process);
+   * 'allowed' for Admin/demo/sign-out.
+   */
+  setSessionClearance: (state: 'office-pending' | 'allowed') =>
+    invokeLocal<'office-pending' | 'allowed'>(LOCAL_CHANNELS.setSessionClearance, state, undefined),
 });
 
 function getAppVersion(): string {

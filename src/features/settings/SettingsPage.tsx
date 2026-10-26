@@ -16,6 +16,8 @@ import {
   openExternalUrl,
   resolveAppVersion,
 } from '../../lib/app-info';
+import { EmailNotificationsSection } from './EmailNotificationsSection';
+import type { EmailPrefsClient } from './email-preferences';
 import type { ThemePreference } from '../../lib/types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -73,6 +75,12 @@ export interface SettingsPageProps {
   repository?: SheetRepository;
   onSettingsChange?: (settings: DksSettings) => void | Promise<void>;
   onChange?: (settings: DksSettings) => void | Promise<void>;
+  /**
+   * Admin-only: the Supabase settings client used by the "Email
+   * notifications" section (recipients/toggles for the server-side email
+   * worker). The Resend key is never available here.
+   */
+  emailPrefsClient?: EmailPrefsClient | null;
   appVersion?: string;
   version?: string;
   onCheckForUpdates?: () => void | Promise<void>;
@@ -223,6 +231,7 @@ export function SettingsPage({
   repository,
   onSettingsChange,
   onChange,
+  emailPrefsClient = null,
   appVersion,
   version,
   onCheckForUpdates,
@@ -525,6 +534,12 @@ export function SettingsPage({
                   <p className="settings-muted">Day and time use this device&apos;s local time zone.</p>
                 </div>
               </div>
+
+              {/* Admin-only server email config (recipients/toggles); the
+                  Resend key never appears — it is a Supabase Function secret. */}
+              {role === 'admin' ? (
+                <EmailNotificationsSection client={emailPrefsClient ?? null} />
+              ) : null}
             </section>
           ) : null}
 

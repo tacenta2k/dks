@@ -4,6 +4,11 @@ import { useStore } from 'zustand';
 
 import type { ThemePreference } from './types';
 import { AuthService } from '../features/auth/auth-service';
+import {
+  createOfficeApprovalService,
+  type OfficeApprovalService,
+  type OfficeSigninRequest,
+} from '../features/auth/office-approval-service';
 import type {
   AuthError,
   AuthStatus,
@@ -13,6 +18,27 @@ import type {
 
 export type SyncStatus = 'offline' | 'checking' | 'healthy' | 'error';
 
+/**
+ * Office sign-in approval — the office-sign-in gate runs only after password
+ * authentication, adds ZERO trust to any client value.
+ *
+ *   'not-required'  Admin session (or demo) — never gated.
+ *   'checking'      server round-trip in progress (never renders workspace).
+ *   'pending'       waiting for Admin's decision (waiting screen).
+ *   'approved'      server confirmed this signed session is approved.
+ *   'denied'        Admin denied the request (blocked screen).
+ *   'revoked'       Admin revoked an earlier approval (blocked screen).
+ *   'error'         the approval flow failed (cannot verify; never opens).
+ */
+export type SessionApprovalState =
+  | 'not-required'
+  | 'checking'
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'revoked'
+  | 'error';
+
 export interface AppStore {
   session: Session | null;
   profile: Profile | null;
@@ -21,12 +47,23 @@ export interface AppStore {
   syncStatus: SyncStatus;
   theme: ThemePreference;
   health: SupabaseHealth;
+  /** Office-only sign-in approval state; meaningless for Admin/demo. */
+  sessionApproval: SessionApprovalState;
+  sessionApprovalRequest: OfficeSigninRequest | null;
+  sessionApprovalError: AuthError | null;
   signIn: (email: string, password: string) => Promise<void>;
   restoreSession: () => Promise<void>;
   signOut: () => Promise<void>;
   setDemoSession: (email?: string) => void;
   setTheme: (theme: ThemePreference) => void;
   reset: () => void;
+  /**
+   * Office flow only: ask the server for the CURRENT signed session's
+   * approval status (and, on the very first login, submit the request).
+   * Never asserts access itself — server response drives the transition.
+   */
+  submitOfficeApprovalRequest: () => Promise<void>;
+  refreshSessionApproval: () => Promise<void>;
 }
 
 const EMPTY_HEALTH: SupabaseHealth = {
@@ -36,9 +73,18 @@ const EMPTY_HEALTH: SupabaseHealth = {
   error: null,
 };
 
+const EMPTY_SESSION_APPROVAL: Pick<
+  AppStore,
+  'sessionApproval' | 'sessionApprovalRequest' | 'sessionApprovalError'
+> = {
+  sessionApproval: 'not-required',
+  sessionApprovalRequest: null,
+  sessionApprovalError: null,
+};
+
 function initialState(health: SupabaseHealth): Pick<
   AppStore,
-  'session' | 'profile' | 'authStatus' | 'authError' | 'syncStatus' | 'theme' | 'health'
+  'session' | 'profile' | 'authStatus' | 'authError' | 'syncStatus' | 'theme' | 'health' | 'sessionApproval' | 'sessionApprovalRequest' | 'sessionApprovalError'
 > {
   return {
     session: null,
@@ -48,6 +94,7 @@ function initialState(health: SupabaseHealth): Pick<
     syncStatus: 'offline',
     theme: 'system',
     health,
+    ...EMPTY_SESSION_APPROVAL,
   };
 }
 
@@ -60,12 +107,52 @@ function errorHealth(health: SupabaseHealth, error: AuthError | null): SupabaseH
   };
 }
 
-export function createAppStore(authService = new AuthService()): StoreApi<AppStore> {
+export function createAppStore(
+  authService = new AuthService(),
+  approvalService: OfficeApprovalService | null = createOfficeApprovalService(),
+): StoreApi<AppStore> {
   let authRequestId = 0;
   const serviceHealth: SupabaseHealth = {
     ...EMPTY_HEALTH,
     configured: authService.isConfigured,
   };
+
+  /**
+   * Applies the server-reported approval status for an Office profile.
+   * Never touches Admin sessions and never trusts client data — the status
+   * is whatever the RPC said about THIS signed session.
+   */
+  function applyApprovalStatus(
+    set: (partial: Partial<AppStore>) => void,
+    request: OfficeSigninRequest | null,
+    error: AuthError | null,
+  ): void {
+    if (error) {
+      set({
+        sessionApproval: 'error',
+        sessionApprovalRequest: null,
+        sessionApprovalError: error,
+      });
+      return;
+    }
+    if (!request) {
+      set({
+        sessionApproval: 'error',
+        sessionApprovalRequest: null,
+        sessionApprovalError: {
+          message: 'No approval status was returned for this session.',
+          code: 'APPROVAL_STATUS_MISSING',
+        },
+      });
+      return;
+    }
+    set({
+      sessionApproval: request.status,
+      sessionApprovalRequest: request,
+      sessionApprovalError: null,
+    });
+  }
+
   const store = createStore<AppStore>((set, get) => ({
     ...initialState(serviceHealth),
 
@@ -84,6 +171,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           authStatus: result.error?.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
           authError: result.error,
           health: errorHealth(get().health, result.error),
+          ...EMPTY_SESSION_APPROVAL,
         });
         return;
       }
@@ -99,7 +187,14 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           authenticated: true,
           error: null,
         },
+        ...EMPTY_SESSION_APPROVAL,
       });
+
+      // Office-only: this signed session needs Admin approval BEFORE any
+      // workspace traffic (server-side RLS enforces the same boundary).
+      if (result.data.profile.role === 'office') {
+        void get().submitOfficeApprovalRequest();
+      }
     },
 
     restoreSession: async () => {
@@ -133,6 +228,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
             authenticated: false,
             error: null,
           },
+          ...EMPTY_SESSION_APPROVAL,
         });
         return;
       }
@@ -148,7 +244,14 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           authenticated: true,
           error: null,
         },
+        ...EMPTY_SESSION_APPROVAL,
       });
+
+      // Office-only: a persisted, still-valid approved session re-validates
+      // on restart (no new request); revoked/denied stops the workspace here.
+      if (result.data.profile.role === 'office') {
+        void get().refreshSessionApproval();
+      }
     },
 
     signOut: async () => {
@@ -167,6 +270,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           authenticated: false,
           error: null,
         },
+        ...EMPTY_SESSION_APPROVAL,
       });
     },
 
@@ -193,6 +297,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
         authStatus: 'demo',
         authError: null,
         health: { ...EMPTY_HEALTH },
+        ...EMPTY_SESSION_APPROVAL,
       });
     },
 
@@ -201,6 +306,60 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
     reset: () => {
       authRequestId += 1;
       set(initialState(serviceHealth));
+    },
+
+    submitOfficeApprovalRequest: async () => {
+      if (get().profile?.role !== 'office') {
+        set({ ...EMPTY_SESSION_APPROVAL });
+        return;
+      }
+      if (!approvalService) {
+        set({
+          sessionApproval: 'error',
+          sessionApprovalRequest: null,
+          sessionApprovalError: {
+            message: 'Supabase is not configured — the approval request cannot reach the server.',
+            code: 'APPROVAL_NOT_CONFIGURED',
+          },
+        });
+        return;
+      }
+      set({ sessionApproval: 'checking', sessionApprovalError: null });
+      const result = await approvalService.requestApproval();
+      applyApprovalStatus(set, result.data, result.error);
+    },
+
+    refreshSessionApproval: async () => {
+      if (get().profile?.role !== 'office') {
+        set({ ...EMPTY_SESSION_APPROVAL });
+        return;
+      }
+      if (!approvalService) {
+        set({
+          sessionApproval: 'error',
+          sessionApprovalRequest: null,
+          sessionApprovalError: {
+            message: 'Supabase is not configured — the approval status cannot reach the server.',
+            code: 'APPROVAL_NOT_CONFIGURED',
+          },
+        });
+        return;
+      }
+      set({ sessionApprovalError: null });
+      const result = await approvalService.fetchMyRequest();
+      if (result.error) {
+        applyApprovalStatus(set, null, result.error);
+        return;
+      }
+      // No row at all for this session: the flow never started (edge case —
+      // e.g. DB was re-initialised since login) → open the request now.
+      if (!result.data) {
+        set({ sessionApproval: 'checking' });
+        const requested = await approvalService.requestApproval();
+        applyApprovalStatus(set, requested.data, requested.error);
+        return;
+      }
+      applyApprovalStatus(set, result.data, null);
     },
   }));
 
@@ -216,6 +375,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           ...store.getState().health,
           authenticated: false,
         },
+        ...EMPTY_SESSION_APPROVAL,
       });
       return;
     }
@@ -231,6 +391,7 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           profile: null,
           authStatus: result.error?.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
           authError: result.error,
+          ...EMPTY_SESSION_APPROVAL,
         });
         return;
       }
@@ -247,6 +408,14 @@ export function createAppStore(authService = new AuthService()): StoreApi<AppSto
           error: null,
         },
       });
+
+      // Token refresh / profile re-sync: an office session re-validates its
+      // approval so a revocation takes effect promptly on this window.
+      if (result.data.role === 'office') {
+        void store.getState().refreshSessionApproval();
+      } else {
+        store.setState({ ...EMPTY_SESSION_APPROVAL });
+      }
     });
   });
 

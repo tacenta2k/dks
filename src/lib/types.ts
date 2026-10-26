@@ -190,6 +190,11 @@ export interface DksLocalOutboxItem {
 
 export interface DksLocalApi {
   getSnapshot: () => Promise<DksLocalSnapshot>;
+  /**
+   * Office sign-in approval: push the current session clearance into the main
+   * process ('office-pending' while an Office session awaits admin approval).
+   */
+  setSessionClearance?: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
