@@ -15,6 +15,11 @@ function adapter(overrides: Partial<UpdaterAdapter> = {}): UpdaterAdapter {
   };
 }
 
+/** Windows checkouts may use CRLF; the configuration assertions are line-oriented. */
+function readTextFileNormalised(path: string): string {
+  return readFileSync(path, 'utf8').replace(/\r\n?/g, '\n');
+}
+
 describe('updater foundation', () => {
   it('quietly reports no release without attempting a download', async () => {
     const download = vi.fn(async () => undefined);
@@ -175,8 +180,8 @@ describe('updater foundation', () => {
 
 describe('release provider configuration', () => {
   const root = process.cwd();
-  const builderYml = readFileSync(resolve(root, 'electron-builder.yml'), 'utf8');
-  const packageJson = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8')) as {
+  const builderYml = readTextFileNormalised(resolve(root, 'electron-builder.yml'));
+  const packageJson = JSON.parse(readTextFileNormalised(resolve(root, 'package.json'))) as {
     repository?: { type?: string; url?: string } | string;
     scripts?: Record<string, string>;
   };
@@ -206,7 +211,7 @@ describe('release provider configuration', () => {
     // Prose mentions in comments are fine; a token VALUE/key is not.
     expect(builderYml).not.toMatch(/^\s*token:\s*\S/m);
     expect(builderYml).not.toMatch(/GH_TOKEN\s*[:=]\s*\S/);
-    const updaterSource = readFileSync(resolve(root, 'electron/main/updater.ts'), 'utf8');
+    const updaterSource = readTextFileNormalised(resolve(root, 'electron/main/updater.ts'));
     expect(updaterSource).not.toMatch(/GH_TOKEN|setFeedURL/);
   });
 });

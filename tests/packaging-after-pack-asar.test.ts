@@ -133,6 +133,20 @@ function readNormalised(file: string): string {
   return readFileSync(resolve(ROOT, file), 'utf8').replace(/\r\n?/g, '\n');
 }
 
+/**
+ * Windows may briefly keep staged `.asar`/`.node` files or their parent
+ * directories busy after a child process exits. Node retries rm operations
+ * that fail with EBUSY/ENOTEMPTY/EPERM when maxRetries is set.
+ */
+function removeWithRetries(target: string, options: { recursive?: boolean } = {}): void {
+  rmSync(target, {
+    recursive: options.recursive ?? false,
+    force: true,
+    maxRetries: 5,
+    retryDelay: 100,
+  });
+}
+
 interface LayoutOptions {
   withAppAsarFile?: boolean;
   appAsarAsDirectory?: boolean;
@@ -232,7 +246,7 @@ async function makePackagedLayout(opts: LayoutOptions = {}): Promise<PackagedLay
       }
     }
     if (!withUnpackedBinary) {
-      rmSync(unpackedNativeBinary, { force: true });
+      removeWithRetries(unpackedNativeBinary);
     }
   }
 
@@ -245,7 +259,7 @@ async function makePackagedLayout(opts: LayoutOptions = {}): Promise<PackagedLay
     unpacked,
     unpackedModuleDir,
     unpackedNativeBinary,
-    cleanup: () => rmSync(root, { recursive: true, force: true }),
+    cleanup: () => removeWithRetries(root, { recursive: true }),
   };
 }
 
@@ -587,8 +601,8 @@ async function stageIntoRealElectronDist(opts: LayoutOptions = {}) {
   const dstAsar = join(realDistResources, 'app.asar');
   const dstUnpacked = join(realDistResources, 'app.asar.unpacked');
   // Always start from a clean slate in case a previous run was interrupted.
-  rmSync(dstAsar, { force: true });
-  rmSync(dstUnpacked, { recursive: true, force: true });
+  removeWithRetries(dstAsar);
+  removeWithRetries(dstUnpacked, { recursive: true });
   copyFileSync(layout.appAsar, dstAsar);
   cpSync(layout.unpacked, dstUnpacked, { recursive: true });
   layout.cleanup();
@@ -599,8 +613,8 @@ async function stageIntoRealElectronDist(opts: LayoutOptions = {}) {
     appAsarPackageJson: join(dstAsar, 'package.json'),
     unpackedModuleDir: join(dstUnpacked, 'node_modules', 'better-sqlite3'),
     cleanup: () => {
-      rmSync(dstAsar, { force: true });
-      rmSync(dstUnpacked, { recursive: true, force: true });
+      removeWithRetries(dstAsar);
+      removeWithRetries(dstUnpacked, { recursive: true });
     },
   };
 }
@@ -713,7 +727,7 @@ describe.skipIf(!realElectron || !supportedForRealElectron)(
         const electronVersion = electronVersionFromNodeModules();
         let staged = false;
         if (existsSync(prebuildBin) && electronVersion) {
-          rmSync(join(fixture.unpackedModuleDir, 'build'), { recursive: true, force: true });
+          removeWithRetries(join(fixture.unpackedModuleDir, 'build'), { recursive: true });
           const attempt = spawnSync(
             process.execPath,
             [prebuildBin, '--runtime', 'electron', '--target', electronVersion],
