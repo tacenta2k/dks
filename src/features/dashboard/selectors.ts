@@ -16,6 +16,7 @@ import type { DaysLeftRange, QuickFilter, StatusFilterValue } from '../sheet/fil
 
 export type DashboardFilterId =
   | 'all'
+  | 'expiresToday'
   | 'expiresIn1Day'
   | 'expiringThisWeek'
   | 'expiringThisMonth'
@@ -56,16 +57,19 @@ export interface DashboardSelectorOptions {
 }
 
 /**
- * The exact eight summary cards, in display order. Windows are CUMULATIVE
+ * The exact nine summary cards, in display order. Windows are CUMULATIVE
  * and start at day 0: an entry expiring today is inside the 1-day, week,
  * month, 3-month, 6-month and 1-year cards (it is never "Expired" — that
- * card is strictly daysLeft < 0). Entries with no usable expiry count only
- * toward "Total entries".
+ * card is strictly daysLeft < 0), and additionally has its own
+ * "Expires today" card (daysLeft === 0; the overlap with the 1-day card is
+ * intentional). Entries with no usable expiry count only toward
+ * "Total entries".
  */
 export const DASHBOARD_CARD_DEFINITIONS: ReadonlyArray<
   Pick<DashboardCard, 'id' | 'label'>
 > = Object.freeze([
   { id: 'all', label: 'Total entries' },
+  { id: 'expiresToday', label: 'Expires today' },
   { id: 'expiresIn1Day', label: 'Expires in 1 day' },
   { id: 'expiringThisWeek', label: 'This week' },
   { id: 'expiringThisMonth', label: 'This month' },
@@ -103,6 +107,9 @@ export function dashboardSheetFilter(filter: DashboardFilterId): DashboardSheetF
   switch (filter) {
     case 'all':
       return { quickFilter: 'all', status: '', daysRange: null };
+    case 'expiresToday':
+      // The existing "Today" chip is exactly daysLeft === 0.
+      return { quickFilter: 'today', status: '', daysRange: null };
     case 'expiresIn1Day':
       return { quickFilter: 'all', status: '', daysRange: { min: 0, max: 1 } };
     case 'expiringThisWeek':
@@ -212,6 +219,7 @@ export function getDashboardSummary(
   const expiredCount = daysByRow.filter(({ days }) => days !== null && days < 0).length;
   const cardCounts: Record<DashboardFilterId, number> = {
     all: activeRows.length,
+    expiresToday: daysByRow.filter(({ days }) => days === 0).length,
     expiresIn1Day: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiresIn1Day!),
     expiringThisWeek: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiringThisWeek!),
     expiringThisMonth: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiringThisMonth!),

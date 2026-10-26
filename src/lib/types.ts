@@ -241,6 +241,30 @@ export interface DksLocalApi {
   close: () => Promise<DksLocalCloseResult>;
 }
 
+/** Mirror of the main-process updater state (renderer-safe, serializable). */
+export type DksUpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'not-available'
+  | 'error'
+  | 'disabled';
+
+export interface DksUpdateState {
+  status: DksUpdateStatus;
+  version?: string;
+  /** Download completion 0–100 while downloading (when reported). */
+  progress?: number;
+}
+
+export interface DksUpdaterApi {
+  checkForUpdates: () => Promise<DksUpdateState>;
+  restartToUpdate: () => Promise<boolean>;
+  onStatus: (listener: (state: DksUpdateState) => void) => () => void;
+}
+
 export interface DksWindowApi {
   platform: string;
   appVersion: string;
@@ -248,6 +272,7 @@ export interface DksWindowApi {
   minimizeToTray: () => void;
   quit: () => void;
   local?: DksLocalApi;
+  updater?: DksUpdaterApi;
 }
 
 declare global {

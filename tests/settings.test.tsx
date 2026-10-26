@@ -191,3 +191,77 @@ describe('About & updates (R2-06)', () => {
     expect(screen.getByText('Version 9.9.9')).toBeInTheDocument();
   });
 });
+
+describe('settings application updates (mocked bridge)', () => {
+  function fakeBridge(state: { status: string; version?: string; progress?: number }) {
+    let listener: ((next: typeof state) => void) | undefined;
+    return {
+      bridge: {
+        checkForUpdates: vi.fn(async () => state),
+        restartToUpdate: vi.fn(async () => true),
+        onStatus: vi.fn((next: (typeof listener)) => {
+          listener = next as typeof listener;
+          return () => undefined;
+        }),
+      },
+      emit: (next: typeof state) => listener?.(next),
+    };
+  }
+
+  it('reports up to date only after a real bridge check', async () => {
+    const { bridge } = fakeBridge({ status: 'not-available' });
+    render(<SettingsPage role="admin" updater={bridge as never} />);
+
+    nav('About & updates');
+
+    expect(await screen.findByText('DKS is up to date.')).toBeInTheDocument();
+    expect(bridge.checkForUpdates).toHaveBeenCalled();
+    expect(screen.queryByRole('button', { name: 'Restart to install' })).not.toBeInTheDocument();
+  });
+
+  it('shows download progress, then offers an explicit user-approved restart', async () => {
+    const { bridge, emit } = fakeBridge({ status: 'downloading', version: '0.2.0', progress: 42 });
+    render(<SettingsPage role="admin" updater={bridge as never} />);
+
+    nav('About & updates');
+    expect(await screen.findByText('Downloading update 0.2.0… 42%')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restart to install' })).not.toBeInTheDocument();
+    expect(bridge.restartToUpdate).not.toHaveBeenCalled();
+
+    emit({ status: 'downloaded', version: '0.2.0' });
+    expect(await screen.findByText(/Update 0\.2\.0 is ready to install/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart to install' }));
+    expect(bridge.restartToUpdate).toHaveBeenCalledTimes(1);
+  });
+
+  it('says plainly that development builds cannot check for updates', async () => {
+    const { bridge } = fakeBridge({ status: 'disabled' });
+    render(<SettingsPage role="admin" updater={bridge as never} />);
+
+    nav('About & updates');
+
+    expect(await screen.findByText(/not available in this development build/i)).toBeInTheDocument();
+    expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
+  });
+
+  it('turns bridge failures into a retryable error message', async () => {
+    const { bridge } = fakeBridge({ status: 'error' });
+    render(<SettingsPage role="admin" updater={bridge as never} />);
+
+    nav('About & updates');
+
+    expect(await screen.findByText(/Update check failed/i)).toBeInTheDocument();
+  });
+
+  it('never claims a check happened without a desktop bridge', async () => {
+    render(<SettingsPage role="admin" updater={null} />);
+
+    nav('About & updates');
+    fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
+
+    expect(await screen.findByText(/not available in this development build/i)).toBeInTheDocument();
+    expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
+    expect(screen.queryByText('Update check requested.')).not.toBeInTheDocument();
+  });
+});

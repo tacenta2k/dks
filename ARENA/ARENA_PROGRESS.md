@@ -2193,3 +2193,63 @@ pushed before test work; this section describes the completed state.
 - Pop!_OS / Windows / live-Supabase / Office-approval verification remains
   USER-ONLY. Owner earlier confirmed: civil-id-type.sql applied live; sync
   "Saved to cloud", 0 pending.
+
+---
+
+## 30. "Expires today" dashboard card + in-app update readiness (2026-10-26)
+
+Branch `arena/9376f77d-dks` stacked on the owner-tested `ee1e5b6` (new
+commits only; the tested history is not rewritten). Owner confirmed the
+§29 behaviors manually before this round.
+
+### 30.1 Dashboard ninth card
+
+- `Expires today` (daysLeft === 0) inserted as card #2 of nine; all other
+  counts/charts unchanged. Clicking it opens the Visa Sheet on the existing
+  "Today" chip (exactly day 0) via `dashboardSheetFilter()`. Boundary tests
+  cover −1/0/1/2, the intentional overlap with the 1-day card, nine-card
+  order, sheet-flow and chip-pressed state. DASH-02 updated.
+
+### 30.2 Updater audit (PKG-14) — what already worked
+
+- Main-process state machine around electron-updater with validated IPC
+  (`dks:updater:*`), hourly + launch checks in packaged builds only,
+  `autoDownload=false`/`autoInstallOnAppQuit=false`, NSIS packaging with
+  `deleteAppDataOnUninstall: false` (SQLite in userData survives updates),
+  `npm run dist` (`--publish never`) / `npm run release` (`--publish always`).
+- Repository `tacenta2k/dks` is PUBLIC (verified via GitHub API), so the
+  GitHub provider works for installed clients with no embedded credential.
+
+### 30.3 Verified gaps fixed
+
+1. **Renderer never called the updater.** Settings "Check for updates"
+   showed "Update check requested." and did nothing; no status and no
+   install action existed, so background downloads could never install.
+   Settings → About now drives the real bridge: truthful state line
+   (checking / available / downloading +% / ready / up to date / failed /
+   dev-disabled) and an explicit "Restart to install" button in the
+   downloaded state only.
+2. **`isUpdateAvailable` ignored.** electron-updater 6.8.9 returns the
+   latest version even when current; the service treated any version as an
+   update (same-version download loop). Now `isUpdateAvailable === false`
+   → `not-available`, with download-progress forwarded to the UI.
+3. **Dev builds lied.** Disabled checks reported `not-available`
+   ("up to date") without contacting any feed. New `disabled` status end to
+   end (service → preload whitelist → renderer copy).
+4. **Implicit release provider.** `publish` named no owner/repo and
+   package.json had no `repository`. Now explicit `github tacenta2k/dks`
+   with `releaseType: draft` + package.json `repository`; README release
+   procedure updated (version bump → draft upload of installer +
+   `latest.yml` + `.blockmap` → owner presses "Publish release").
+
+### 30.4 Gate (sandbox Node 22 / ABI 127; better-sqlite3 Node build)
+
+- `verify:native` (Electron ABI 132) deliberately NOT run before tests.
+- typecheck PASS; `npm test` 70 files, 567 passed | 3 skipped (+13:
+  updater disabled/isUpdateAvailable/progress/no-early-restart/config,
+  Settings mocked-bridge states + restart approval, dashboard today card);
+  build PASS. Locked `@supabase/*@2.118.0` declares `node >=22` (EBADENGINE
+  warning expected under the owner's pinned Node 20.19.0) — unrelated to the
+  updater; no dependency or Node change made.
+- Still USER-ONLY: real Windows installed-old → newer update, SmartScreen,
+  packaged `npm run dist`/`release`, live GitHub release publish.

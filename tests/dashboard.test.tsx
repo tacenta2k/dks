@@ -25,7 +25,9 @@ describe('dashboard page', () => {
 
     expect(await screen.findByTestId('dashboard-card-total')).toHaveTextContent('9');
     // Cumulative 0-based windows: the entry expiring today (day 0) is inside
-    // every upcoming card, and only the past date counts as Expired.
+    // every upcoming card (and has its own Expires today card), and only the
+    // past date counts as Expired.
+    expect(screen.getByTestId('dashboard-card-today')).toHaveTextContent('1');
     expect(screen.getByTestId('dashboard-card-1-day')).toHaveTextContent('1');
     expect(screen.getByTestId('dashboard-card-week')).toHaveTextContent('2');
     expect(screen.getByTestId('dashboard-card-month')).toHaveTextContent('3');
@@ -33,16 +35,15 @@ describe('dashboard page', () => {
     expect(screen.getByTestId('dashboard-card-6-months')).toHaveTextContent('6');
     expect(screen.getByTestId('dashboard-card-1-year')).toHaveTextContent('7');
     expect(screen.getByTestId('dashboard-card-expired')).toHaveTextContent('1');
-    // The removed cards must not come back.
-    expect(screen.queryByTestId('dashboard-card-today')).toBeNull();
+    // The removed "Within 2 months" card must not come back.
     expect(screen.queryByTestId('dashboard-card-2-months')).toBeNull();
-    expect(screen.queryByText('Expiring today')).toBeNull();
     expect(screen.queryByText('Within 2 months')).toBeNull();
-    // Exact card set and order.
+    // Exact nine-card set and order (Expires today second, by owner decision).
     const cardIds = Array.from(document.querySelectorAll('[data-testid^="dashboard-card-"]'))
       .map((node) => node.getAttribute('data-testid'));
     expect(cardIds).toEqual([
       'dashboard-card-total',
+      'dashboard-card-today',
       'dashboard-card-1-day',
       'dashboard-card-week',
       'dashboard-card-month',
@@ -54,11 +55,15 @@ describe('dashboard page', () => {
     for (const label of ['Total entries', 'Expires in 1 day', 'This week', 'This month', '3 months', '6 months', '1 year']) {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
+    // "Expires today" appears as the card label and in the status legend.
+    expect(screen.getAllByText('Expires today').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getByTestId('dashboard-card-today')).toHaveTextContent('Expires today');
     expect(screen.getByRole('img', { name: 'Status breakdown' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Expiries over the next 12 months' })).toBeInTheDocument();
     expect(screen.getByText('Valid')).toBeInTheDocument();
     expect(screen.getAllByText('Expired').length).toBeGreaterThanOrEqual(1);
-    expect(screen.getByText('Expires today')).toBeInTheDocument();
+    // Legend keeps its own "Expires today" status entry alongside the card.
+    expect(screen.getAllByText('Expires today').length).toBeGreaterThanOrEqual(2);
   });
 
   it('calls the injected filter callback when an expiry card is selected', async () => {

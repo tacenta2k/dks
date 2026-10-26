@@ -48,9 +48,10 @@ function cardCount(id: DashboardFilterId, rows: SheetRow[]): number {
 }
 
 describe('dashboard cumulative card set', () => {
-  it('defines exactly the eight cards in the specified order', () => {
+  it('defines exactly the nine cards in the specified order', () => {
     expect(DASHBOARD_CARD_DEFINITIONS).toEqual([
       { id: 'all', label: 'Total entries' },
+      { id: 'expiresToday', label: 'Expires today' },
       { id: 'expiresIn1Day', label: 'Expires in 1 day' },
       { id: 'expiringThisWeek', label: 'This week' },
       { id: 'expiringThisMonth', label: 'This month' },
@@ -60,13 +61,13 @@ describe('dashboard cumulative card set', () => {
       { id: 'expired', label: 'Expired' },
     ]);
     const labels = DASHBOARD_CARD_DEFINITIONS.map((card) => card.label);
-    expect(labels).not.toContain('Expiring today');
     expect(labels).not.toContain('Within 2 months');
   });
 
   it('counts every window boundary exactly (0-based cumulative)', () => {
     const rows = boundaryRows();
     expect(cardCount('all', rows)).toBe(16);
+    expect(cardCount('expiresToday', rows)).toBe(1); // day 0 only
     expect(cardCount('expiresIn1Day', rows)).toBe(2); // days 0, 1
     expect(cardCount('expiringThisWeek', rows)).toBe(4); // + 2, 7
     expect(cardCount('expiringThisMonth', rows)).toBe(6); // + 8, 30
@@ -78,11 +79,24 @@ describe('dashboard cumulative card set', () => {
 
   it('puts day 0 in every upcoming card and never in Expired', () => {
     const rows: SheetRow[] = [{ id: 'today', data: { visa_expiry: TODAY } }];
-    for (const id of ['expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year'] as const) {
+    for (const id of ['expiresToday', 'expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year'] as const) {
       expect(cardCount(id, rows)).toBe(1);
     }
     expect(cardCount('expired', rows)).toBe(0);
     expect(cardCount('all', rows)).toBe(1);
+  });
+
+  it('counts Expires today as exactly day 0 (not -1, 1, or 2)', () => {
+    const rows: SheetRow[] = [-1, 0, 1, 2].map((days) => ({
+      id: `d${days}`,
+      data: { visa_expiry: isoPlusDays(days) },
+    }));
+    expect(cardCount('expiresToday', rows)).toBe(1);
+    // The intentional overlap: day 0 is ALSO inside the 1-day card (0..1).
+    expect(cardCount('expiresIn1Day', rows)).toBe(2);
+    expect(cardCount('expired', rows)).toBe(1);
+    const todaySet = filterRows(rows, columns, { today: TODAY, ...dashboardSheetFilter('expiresToday') });
+    expect(todaySet.map((row) => row.id)).toEqual(['d0']);
   });
 
   it('counts null/invalid expiry only in Total entries', () => {
@@ -93,14 +107,14 @@ describe('dashboard cumulative card set', () => {
       { id: 'garbage', data: { visa_expiry: 'not-a-date' } },
     ];
     expect(cardCount('all', rows)).toBe(4);
-    for (const id of ['expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year', 'expired'] as const) {
+    for (const id of ['expiresToday', 'expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year', 'expired'] as const) {
       expect(cardCount(id, rows)).toBe(0);
     }
   });
 
-  it('keeps cumulative nesting: 1 day ⊆ week ⊆ month ⊆ 3m ⊆ 6m ⊆ 1y', () => {
+  it('keeps cumulative nesting: today ⊆ 1 day ⊆ week ⊆ month ⊆ 3m ⊆ 6m ⊆ 1y', () => {
     const rows = boundaryRows();
-    const sets = (['expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year'] as const)
+    const sets = (['expiresToday', 'expiresIn1Day', 'expiringThisWeek', 'expiringThisMonth', 'within3Months', 'within6Months', 'within1Year'] as const)
       .map((id) => new Set(filterRows(rows, columns, { today: TODAY, ...dashboardSheetFilter(id) }).map((row) => row.id)));
     for (let index = 1; index < sets.length; index += 1) {
       for (const rowId of sets[index - 1]) {
@@ -132,6 +146,8 @@ describe('dashboard cumulative card set', () => {
   });
 
   it('reuses existing sheet filters where they are exactly equivalent', () => {
+    // The Today chip is exactly daysLeft === 0.
+    expect(dashboardSheetFilter('expiresToday')).toEqual({ quickFilter: 'today', status: '', daysRange: null });
     expect(dashboardSheetFilter('expiringThisWeek')).toEqual({ quickFilter: '7', status: '', daysRange: null });
     expect(dashboardSheetFilter('expiringThisMonth')).toEqual({ quickFilter: '30', status: '', daysRange: null });
     expect(dashboardSheetFilter('within3Months')).toEqual({ quickFilter: '90', status: '', daysRange: null });

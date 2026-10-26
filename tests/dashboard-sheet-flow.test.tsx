@@ -24,6 +24,26 @@ describe('dashboard card sheet filters', () => {
     return repository;
   }
 
+  it('opens the Expires today card with day 0 only (Today chip)', async () => {
+    const repository = await seededRepository();
+    render(
+      <SheetPage
+        repository={repository}
+        role="office"
+        today="2026-01-01"
+        dashboardFilter="expiresToday"
+        dashboardFilterToken={1}
+      />,
+    );
+
+    expect(await screen.findByText('Day Zero')).toBeInTheDocument();
+    for (const hidden of ['Day One', 'Day Five', 'Day Forty', 'Long Gone', 'Far Future', 'No Expiry']) {
+      expect(screen.queryByText(hidden)).not.toBeInTheDocument();
+    }
+    // The reused chip is visibly active, so the filter is not a mystery state.
+    expect(screen.getByRole('button', { name: 'Today' })).toHaveAttribute('aria-pressed', 'true');
+  });
+
   it('opens the 1-day card with day 0 and day 1 only', async () => {
     const repository = await seededRepository();
     render(

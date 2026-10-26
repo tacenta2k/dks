@@ -117,9 +117,19 @@ npm run dist
 Artifacts are written to `release/`. The builder metadata uses app id
 `com.dks.tracker` and product name `DKS`.
 
-To publish a GitHub release, configure the repository owner/name through the
-repository metadata or the electron-builder environment, then provide a
-short-lived token only in the shell and run:
+The release provider is configured explicitly in `electron-builder.yml`
+(`publish: provider github, owner tacenta2k, repo dks`) and mirrored by the
+`repository` field in `package.json`. The packaged app reads that same
+configuration from its generated `app-update.yml`, so installed copies check
+GitHub Releases for `tacenta2k/dks`. The repository is public, which is what
+lets installed clients read release metadata with no credential — never embed
+a token in the app. (If the repository ever becomes private, this update
+mechanism stops working for installed clients until releases are hosted
+somewhere publicly readable.)
+
+To publish an update: bump `version` in `package.json` (electron-updater only
+offers strictly newer versions), then provide a short-lived token only in
+the shell and run:
 
 PowerShell:
 
@@ -138,6 +148,14 @@ set GH_TOKEN=
 ```
 
 Never save `GH_TOKEN` in `.env`, `package.json`, CI logs, or committed files.
+The upload creates a **draft** GitHub release containing the NSIS installer,
+`latest.yml`, and the `.blockmap` — all three are required by
+electron-updater. Installed apps only see the update **after you press
+"Publish release"** on that draft in GitHub. The app then checks on launch
+and hourly (and from Settings → About & updates → "Check for updates"),
+downloads in the background, and installs only when the user clicks
+"Restart to install". Local records live in the per-user app data folder
+(`%APPDATA%\DKS`), outside the install directory, and survive updates.
 Linux can run the compile and tests; producing the configured Windows NSIS
 installer requires Windows tooling (or a separately configured Wine build
 environment).

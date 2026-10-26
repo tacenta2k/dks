@@ -655,7 +655,7 @@ function normaliseUpdateState(value: unknown): UpdateState {
     return { status: 'error' };
   }
 
-  const record = value as { status?: unknown; version?: unknown };
+  const record = value as { status?: unknown; version?: unknown; progress?: unknown };
   const statuses: UpdateState['status'][] = [
     'idle',
     'checking',
@@ -664,15 +664,21 @@ function normaliseUpdateState(value: unknown): UpdateState {
     'downloaded',
     'not-available',
     'error',
+    'disabled',
   ];
 
   if (typeof record.status !== 'string' || !statuses.includes(record.status as UpdateState['status'])) {
     return { status: 'error' };
   }
 
-  return typeof record.version === 'string' && record.version.trim()
-    ? { status: record.status as UpdateState['status'], version: record.version }
-    : { status: record.status as UpdateState['status'] };
+  const state: UpdateState = { status: record.status as UpdateState['status'] };
+  if (typeof record.version === 'string' && record.version.trim()) {
+    state.version = record.version;
+  }
+  if (typeof record.progress === 'number' && Number.isFinite(record.progress)) {
+    state.progress = Math.max(0, Math.min(100, Math.round(record.progress)));
+  }
+  return state;
 }
 
 function normaliseNotificationResult(value: unknown): DksNotificationResult {

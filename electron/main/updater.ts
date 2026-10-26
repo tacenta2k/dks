@@ -7,14 +7,29 @@ export type UpdateStatus =
   | 'downloading'
   | 'downloaded'
   | 'not-available'
-  | 'error';
+  | 'error'
+  /**
+   * Update checks are disabled in this build (development/unpackaged).
+   * Distinct from 'not-available': the release feed was never contacted, so
+   * the UI must not claim the app is up to date.
+   */
+  | 'disabled';
 
 export interface UpdateState {
   status: UpdateStatus;
   version?: string;
+  /** Download completion 0–100 while status is 'downloading' (when reported). */
+  progress?: number;
 }
 
 export interface UpdateCheckResult {
+  /**
+   * electron-updater's own verdict. When false, `updateInfo.version` still
+   * names the latest release (the running version) — it must NOT be treated
+   * as an available update. Optional only so minimal test adapters may omit
+   * it; the real adapter always forwards the boolean.
+   */
+  isUpdateAvailable?: boolean;
   updateInfo?: {
     version?: string;
   };
@@ -24,6 +39,8 @@ export interface UpdaterAdapter {
   checkForUpdates: () => Promise<UpdateCheckResult | null | undefined>;
   downloadUpdate?: () => Promise<unknown>;
   quitAndInstall?: () => void;
+  /** Register a download-progress listener (percent 0–100), when supported. */
+  onDownloadProgress?: (listener: (percent: number) => void) => void;
 }
 
 export interface UpdaterServiceOptions {
@@ -62,13 +79,26 @@ function createDefaultAdapter(): UpdaterAdapter {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
 
+    let progressListener: ((percent: number) => void) | undefined;
+    autoUpdater.on('download-progress', (info) => {
+      const percent = typeof info?.percent === 'number' ? info.percent : NaN;
+      if (Number.isFinite(percent)) {
+        progressListener?.(percent);
+      }
+    });
+
     return {
       checkForUpdates: async () => {
         const result = await autoUpdater.checkForUpdates();
         return result as UpdateCheckResult | null | undefined;
       },
       downloadUpdate: () => autoUpdater.downloadUpdate(),
+      // Explicit user action only: quit, install, relaunch. Local SQLite
+      // data lives in userData and is untouched by the installer.
       quitAndInstall: () => autoUpdater.quitAndInstall(),
+      onDownloadProgress: (listener) => {
+        progressListener = listener;
+      },
     };
   } catch {
     return {
@@ -78,7 +108,14 @@ function createDefaultAdapter(): UpdaterAdapter {
 }
 
 function cloneState(state: UpdateState): UpdateState {
-  return state.version ? { status: state.status, version: state.version } : { status: state.status };
+  const clone: UpdateState = { status: state.status };
+  if (state.version) {
+    clone.version = state.version;
+  }
+  if (typeof state.progress === 'number' && Number.isFinite(state.progress)) {
+    clone.progress = Math.max(0, Math.min(100, Math.round(state.progress)));
+  }
+  return clone;
 }
 
 function updateVersion(result: UpdateCheckResult | null | undefined): string | undefined {
@@ -116,9 +153,23 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     return cloneState(state);
   };
 
+  // Download progress is meaningful only mid-download; stale events after a
+  // completed/failed download are ignored rather than resurrecting the state.
+  try {
+    adapter.onDownloadProgress?.((percent) => {
+      if (state.status === 'downloading') {
+        setState({ status: 'downloading', version: state.version, progress: percent });
+      }
+    });
+  } catch {
+    // Progress is cosmetic; never let it break the state machine.
+  }
+
   const checkForUpdates = async (): Promise<UpdateState> => {
     if (!enabled) {
-      return setState({ status: 'not-available' });
+      // Development/unpackaged: no feed is contacted. Report 'disabled' —
+      // never 'not-available', which would falsely claim "up to date".
+      return setState({ status: 'disabled' });
     }
 
     if (checkPromise) {
@@ -132,7 +183,10 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
         const result = await adapter.checkForUpdates();
         const version = updateVersion(result);
 
-        if (!version) {
+        // electron-updater reports the latest version even when it equals
+        // the running one; `isUpdateAvailable === false` means UP TO DATE,
+        // not a download candidate.
+        if (!version || result?.isUpdateAvailable === false) {
           return setState({ status: 'not-available' });
         }
 
