@@ -90,6 +90,13 @@ export interface SettingsPageProps {
    * validated preload API); injected in tests. `null` forces "no bridge".
    */
   updater?: DksUpdaterApi | null;
+  /**
+   * Controlled updater state from the app-level subscription. When supplied,
+   * Settings renders this same status source as the top-bar update pill and
+   * does not create a second bridge subscription.
+   */
+  updateState?: DksUpdateState;
+  onUpdateStateChange?: (state: DksUpdateState) => void;
   resendNote?: string;
   settingsError?: string | null;
   onClose?: () => void;
@@ -271,6 +278,8 @@ export function SettingsPage({
   onCheckForUpdates,
   onUpdate,
   updater: providedUpdater,
+  updateState: providedUpdateState,
+  onUpdateStateChange,
   resendNote = 'Resend is optional for hosted email notifications; local alerts continue to work without a Resend API key.',
   settingsError = null,
   onClose,
@@ -281,22 +290,32 @@ export function SettingsPage({
   ));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('expiry');
-  const [updateState, setUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+  const [localUpdateState, setLocalUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+  const updateState = providedUpdateState ?? localUpdateState;
+  const setUpdateState = (state: DksUpdateState) => {
+    setLocalUpdateState(state);
+    onUpdateStateChange?.(state);
+  };
   const mountedRef = useRef(false);
   const aboutCheckRef = useRef(false);
 
-  const updaterBridge: DksUpdaterApi | null = providedUpdater
-    ?? (typeof window !== 'undefined' ? window.dks?.updater : undefined)
-    ?? null;
+  const updaterBridge: DksUpdaterApi | null = providedUpdater !== undefined
+    ? providedUpdater
+    : ((typeof window !== 'undefined' ? window.dks?.updater : undefined) ?? null);
 
   // Live updater state (manual checks AND the packaged app's background
-  // checks) flows through the validated preload bridge.
+  // checks) flows through the validated preload bridge. In the full app this
+  // state is controlled by App's single subscription; the local subscription
+  // below is only the standalone-component fallback.
   useEffect(() => {
-    if (!updaterBridge) {
+    if (!updaterBridge || providedUpdateState !== undefined) {
       return undefined;
     }
     return updaterBridge.onStatus(setUpdateState);
-  }, [updaterBridge]);
+    // `setUpdateState` also mirrors the latest controlled-state callback;
+    // this fallback subscription itself depends on the bridge identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providedUpdateState, updaterBridge]);
 
   // Opening About surfaces the current updater truth once — including an
   // update the background check already downloaded. In a development build

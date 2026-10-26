@@ -12,7 +12,13 @@ import {
   resolveTheme,
   saveThemePreference,
 } from '../lib/theme';
-import type { AppView, DksLocalSyncState, ThemePreference } from '../lib/types';
+import type {
+  AppView,
+  DksLocalSyncState,
+  DksUpdateState,
+  DksUpdaterApi,
+  ThemePreference,
+} from '../lib/types';
 import { localStoreErrorMessage } from '../lib/local-store-error';
 import { sanitizeSyncError } from '../lib/sync-error';
 import { rowDisplayLabel } from '../lib/labels';
@@ -73,6 +79,11 @@ export interface AppProps {
   approvalService?: OfficeApprovalService | null;
   demoMode?: boolean;
   sheetRepository?: SheetRepository;
+  /**
+   * Desktop updater bridge (default: the frozen `window.dks.updater` preload
+   * API). Tests inject a fake here; `null` forces the no-bridge state.
+   */
+  updater?: DksUpdaterApi | null;
 }
 
 function getSystemDarkPreference(): boolean {
@@ -95,6 +106,7 @@ export function App({
   approvalService: providedApprovalService,
   demoMode,
   sheetRepository: providedSheetRepository,
+  updater: providedUpdater,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [appStore] = useState(() => createAppStore(authService, providedApprovalService));
@@ -130,6 +142,22 @@ export function App({
     setDashboardSheetFilter((current) => ({ filter, token: (current?.token ?? 0) + 1 }));
     setActiveView('sheet');
   }, []);
+  const [updaterBridge] = useState<DksUpdaterApi | null>(() => (
+    providedUpdater !== undefined
+      ? providedUpdater
+      : (typeof window !== 'undefined' ? window.dks?.updater ?? null : null)
+  ));
+  const [updateState, setUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+
+  // Single renderer subscription to the main-process updater status event.
+  // The shell's update-ready pill and the Admin Settings panel both render
+  // from this one state value; neither polls or opens another IPC channel.
+  useEffect(() => {
+    if (!updaterBridge) {
+      return undefined;
+    }
+    return updaterBridge.onStatus(setUpdateState);
+  }, [updaterBridge]);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
     initialThemePreference ?? loadThemePreference(),
   );
@@ -875,6 +903,9 @@ export function App({
       userEmail={session?.user.email ?? null}
       health={health}
       syncStatus={syncStatus}
+      updateState={updateState}
+      updater={updaterBridge}
+      onUpdateStateChange={setUpdateState}
       pendingOutbox={pendingOutbox}
       localStoreError={localStoreError}
       isDemoMode={authStatus === 'demo'}

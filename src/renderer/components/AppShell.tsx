@@ -5,8 +5,14 @@ import { formatLocalDateTime } from '../../lib/date';
 import { resolveSyncIndicator } from '../../lib/sync-indicator';
 import { LOCAL_STORE_ERROR_HEADLINE } from '../../lib/local-store-error';
 import type { Profile, SupabaseHealth } from '../../features/auth/auth-types';
-import type { AppView, ResolvedTheme, ThemePreference } from '../../lib/types';
-import type { DksLocalSyncState } from '../../lib/types';
+import type {
+  AppView,
+  DksLocalSyncState,
+  DksUpdateState,
+  DksUpdaterApi,
+  ResolvedTheme,
+  ThemePreference,
+} from '../../lib/types';
 import { DashboardPage } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
 import dksLogo from '../../assets/dks-logo.png';
@@ -32,6 +38,7 @@ import {
 } from '../../features/settings/SettingsPage';
 import type { AuditProfile } from '../../features/audit/AuditLogPage';
 import type { AuditClearRemoteClient } from '../../features/audit/audit-service';
+import { ConfirmDialog } from '../../features/ui/ConfirmDialog';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -55,6 +62,11 @@ export interface AppShellProps {
   userEmail?: string | null;
   health?: SupabaseHealth;
   syncStatus?: DksLocalSyncState;
+  /** App-owned updater status; the ready pill is shown for both roles. */
+  updateState?: DksUpdateState;
+  /** Existing validated updater bridge shared with Settings → About. */
+  updater?: DksUpdaterApi | null;
+  onUpdateStateChange?: (state: DksUpdateState) => void;
   /** Per-item pending outbox details (sanitised) for the sync status panel. */
   pendingOutbox?: readonly SyncPendingItem[];
   /**
@@ -303,6 +315,9 @@ export function AppShell({
     lastError: null,
     pendingCount: 0,
   },
+  updateState,
+  updater,
+  onUpdateStateChange,
   pendingOutbox = [],
   localStoreError = null,
   isDemoMode = false,
@@ -342,6 +357,8 @@ export function AppShell({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(loadSidebarCollapsed);
   const [syncOpen, setSyncOpen] = useState(false);
   const [avatarOpen, setAvatarOpen] = useState(false);
+  const [restartPromptVersion, setRestartPromptVersion] = useState<string | null>(null);
+  const [restartError, setRestartError] = useState<string | null>(null);
   const syncRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
 
@@ -414,6 +431,31 @@ export function AppShell({
   const pendingSuffix = syncIndicator.pendingSuffix;
   const syncLabel = syncIndicator.label;
   const brandCaption = profile?.role === 'admin' ? 'Admin workspace' : 'Office workspace';
+  const updateReadyVersion = updateState?.status === 'downloaded'
+    ? updateState.version?.trim() || null
+    : null;
+  const openRestartPrompt = () => {
+    setRestartError(null);
+    setRestartPromptVersion(updateReadyVersion ?? '');
+  };
+  const closeRestartPrompt = () => {
+    setRestartError(null);
+    setRestartPromptVersion(null);
+  };
+  const confirmRestartToUpdate = async () => {
+    setRestartError(null);
+    let started = false;
+    try {
+      started = updater ? await updater.restartToUpdate() : false;
+    } catch {
+      started = false;
+    }
+    if (started) {
+      setRestartPromptVersion(null);
+      return;
+    }
+    setRestartError('DKS could not restart to install the update. Please try again.');
+  };
 
   return (
     <div className="app-shell">
@@ -523,6 +565,21 @@ export function AppShell({
             <h1 className="top-bar__title">{copy.title}</h1>
           </div>
           <div className="top-bar__actions">
+            {updateState?.status === 'downloaded' ? (
+              <div className="topbar-update" role="status">
+                <span className="topbar-update__dot" aria-hidden="true" />
+                <span className="topbar-update__label">
+                  Update{updateReadyVersion ? ` ${updateReadyVersion}` : ''} ready
+                </span>
+                <button
+                  className="topbar-update__button"
+                  type="button"
+                  onClick={openRestartPrompt}
+                >
+                  Restart to install
+                </button>
+              </div>
+            ) : null}
             <div className="topbar-sync" ref={syncRef}>
               <button
                 className="topbar-sync__button"
@@ -622,6 +679,18 @@ export function AppShell({
           </div>
         </header>
 
+        <ConfirmDialog
+          open={restartPromptVersion !== null}
+          title="Restart to install update?"
+          confirmLabel="Restart now"
+          error={restartError}
+          onConfirm={confirmRestartToUpdate}
+          onCancel={closeRestartPrompt}
+        >
+          Restart DKS to install update{restartPromptVersion ? ` ${restartPromptVersion}` : ''}?
+          Your work is already saved on this device. DKS will close and reopen.
+        </ConfirmDialog>
+
         <main
           className={`content${effectiveView === 'sheet' ? ' content--sheet' : ''}`}
           aria-label={copy.title}
@@ -704,6 +773,9 @@ export function AppShell({
                onSettingsChange={onSettingsChange}
                emailPrefsClient={emailPrefsClient}
                appVersion={appVersion}
+               updater={updater}
+               updateState={updateState}
+               onUpdateStateChange={onUpdateStateChange}
                 onCheckForUpdates={onCheckForUpdates}
                 resendNote={resendNote}
                 settingsError={settingsError}

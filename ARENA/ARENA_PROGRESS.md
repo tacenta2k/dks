@@ -2253,3 +2253,36 @@ commits only; the tested history is not rewritten). Owner confirmed the
   updater; no dependency or Node change made.
 - Still USER-ONLY: real Windows installed-old → newer update, SmartScreen,
   packaged `npm run dist`/`release`, live GitHub release publish.
+
+### 30.5 Downloaded updates installable by approved Office users
+
+- The §30.3 install action initially lived only in Admin-only Settings →
+  About. The packaged launch/hourly scheduler already calls the same service
+  check with `downloadInBackground` defaulting to true, so a background check
+  reaches `downloaded` without a separate Download action; with
+  `autoInstallOnAppQuit=false`, however, an Office PC previously had no
+  reachable install action.
+- `App` now owns the single renderer subscription to the existing validated
+  `window.dks.updater.onStatus` bridge (backed by `dks:updater:status`) and
+  passes that one `DksUpdateState` to both the shell and Settings → About. No
+  polling and no new IPC channel were added. Settings keeps its full Admin
+  check/progress/error/restart panel and only uses a local subscription when
+  rendered standalone without the controlled App state.
+- `AppShell` shows a compact, theme-token top-bar pill beside sync only for
+  `downloaded`: "Update <version> ready" + "Restart to install". It does not
+  use `can()` or any Settings/admin capability, so Admin and approved Office
+  see it in the signed-in workspace; idle/checking/available/downloading/
+  not-available/disabled/error show no top-bar pill.
+- The pill opens the existing `ConfirmDialog`; Cancel invokes nothing, while
+  "Restart now" invokes the existing `window.dks.updater.restartToUpdate()`
+  (`dks:updater:restart`) exactly once. Office permissions, the approval
+  gate, check cadence, `autoInstallOnAppQuit`, publish config, dashboard,
+  sheet and sync are unchanged.
+- Offline mocked-bridge coverage includes all non-ready pill states, Admin
+  and Office ready states, approved-Office end-to-end install approval
+  through `App`, shared Settings status with no second subscription, and
+  dark-theme token parity for `.topbar-update`. Gate: typecheck PASS; full
+  `npm test` 71 files, 578 passed | 3 skipped; build PASS (sandbox Node
+  22.22.3 / Node ABI 127; `verify:native` was not run immediately before
+  tests). Seeing/installing a real update on a Windows Office PC remains
+  USER-ONLY.

@@ -1,5 +1,5 @@
 import type { Session } from '@supabase/supabase-js';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -134,4 +134,51 @@ describe('Office shell parity (R2-11)', () => {
     expect(screen.queryByRole('button', { name: 'View' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Restore' })).not.toBeInTheDocument();
   });
+
+  it('lets an approved Office user install a downloaded update without Settings access', async () => {
+    let emitStatus: ((state: { status: string; version?: string }) => void) | undefined;
+    const restartToUpdate = vi.fn(async () => true);
+    const updater = {
+      checkForUpdates: vi.fn(async () => ({ status: 'idle' })),
+      restartToUpdate,
+      onStatus: vi.fn((listener: typeof emitStatus) => {
+        emitStatus = listener;
+        return () => {
+          emitStatus = undefined;
+        };
+      }),
+    };
+    const service = new AuthService(officeClient());
+
+    render(
+      <App
+        authService={service}
+        approvalService={approvedApprovalService()}
+        updater={updater as never}
+      />,
+    );
+
+    expect(await screen.findByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument();
+    expect(updater.onStatus).toHaveBeenCalledTimes(1);
+    expect(updater.checkForUpdates).not.toHaveBeenCalled();
+    expect(screen.queryByText('Update 0.1.1 ready')).not.toBeInTheDocument();
+
+    act(() => emitStatus?.({ status: 'downloaded', version: '0.1.1' }));
+
+    expect(screen.getByText('Update 0.1.1 ready')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Restart to install' }));
+    const dialog = screen.getByRole('dialog', { name: 'Restart to install update?' });
+    expect(dialog).toHaveTextContent('Restart DKS to install update 0.1.1?');
+
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(restartToUpdate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restart to install' }));
+    fireEvent.click(
+      within(screen.getByRole('dialog', { name: 'Restart to install update?' }))
+        .getByRole('button', { name: 'Restart now' }),
+    );
+    await waitFor(() => expect(restartToUpdate).toHaveBeenCalledTimes(1));
+  }, 20_000);
 });
