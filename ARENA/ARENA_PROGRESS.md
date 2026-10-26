@@ -2286,3 +2286,70 @@ commits only; the tested history is not rewritten). Owner confirmed the
   22.22.3 / Node ABI 127; `verify:native` was not run immediately before
   tests). Seeing/installing a real update on a Windows Office PC remains
   USER-ONLY.
+
+## 31. One-click GitHub Actions Windows release (2026-10-26)
+
+Arena branch `arena/0705096c-dks` was fast-forwarded to `origin/main`
+`2dca7b4` before this change, so the release automation is stacked on the
+merged PKG-14 updater work. Arena retains its fixed session branch name; no
+work was pushed or merged to `main`, and no workflow, tag, or release was run
+from this session.
+
+### 31.1 Workflow
+
+- Added `.github/workflows/release.yml` (`Release DKS`): manual
+  `workflow_dispatch` only, `patch|minor|major` choice defaulting to
+  `patch`, non-cancelling `release-dks` concurrency, and exactly
+  `permissions: contents: write`.
+- The Windows job requires `refs/heads/main`, checks out full history,
+  explicitly switches to local `main`, uses Node from `.nvmrc`, and runs
+  `npm ci`. It probes `better-sqlite3` under Node and conditionally runs
+  `npm rebuild better-sqlite3`, then runs typecheck and
+  `npm test -- --testTimeout=60000` before any Electron-ABI packaging.
+- `github-actions[bot]` runs `npm version <bump>`; the workflow writes only
+  `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` from Actions
+  secrets to an ignored runner `.env`, then pushes `main --follow-tags` so
+  the GitHub release tag points at the version-bump commit.
+- The existing `npm run release` path remains authoritative: production
+  build, `verify:native`, electron-builder `--publish always`, and the
+  `afterPack` ASAR/ABI probe. `electron-builder.yml` still uploads
+  `releaseType: draft`. The workflow verifies the draft tag, draft/non-
+  prerelease state, exact installer/blockmap/`latest.yml` asset set, and
+  that downloaded `latest.yml` names the same version and installer. Only
+  then does it run `gh release edit --draft=false --latest`, upload the
+  installer as an artifact, and write the job summary.
+- Authentication is the built-in `GITHUB_TOKEN` exposed as `GH_TOKEN` for
+  electron-builder and `gh`. No PAT, service-role key, database password,
+  Resend key, signing credential, or literal secret was added. App code,
+  updater cadence/`autoInstallOnAppQuit`, permissions, Office approval,
+  sync, dashboard, and SQL are unchanged.
+
+### 31.2 Tests and documentation
+
+- `tests/release-workflow.test.ts` parses both YAML files with the already
+  locked transitive `js-yaml` package and locks trigger/choices,
+  `windows-latest`, exact permissions, `.nvmrc`, step ordering, main-only
+  checkout, Node-ABI test-before-packaging order, approved secret names,
+  absence of literal credential patterns, draft verification before
+  publication, artifact/summary steps, and builder draft/ASAR guard config.
+- README now has a “One-click release” section covering the two repository
+  secrets, **Read and write** workflow permissions, GitHub UI and
+  `gh workflow run release.yml -f bump=patch` operation, published-only
+  client visibility, failure-after-push recovery without automatic tag
+  deletion, and the unsigned SmartScreen **More info → Run anyway** note.
+  The local Windows release procedure remains documented separately.
+- ARENA tracking: PKG-15 added.
+
+### 31.3 Gate and remaining verification
+
+- Local gate: `npm run typecheck` PASS; `npm test` 72 files, 586 passed |
+  3 skipped; `npm run build` PASS. The sandbox only has Node 22.22.3, so
+  dependencies were installed from the lockfile with scripts deferred and
+  `better-sqlite3` was built against local Node headers;
+  `verify:native` was not run before tests. `actionlint` is not installed
+  in the sandbox.
+- USER-ONLY / first-real-run verification remains: repository secret and
+  workflow-permission setup, an actual `windows-latest` Actions run under
+  Node 20.19.0, bot push to protected/unprotected `main`, electron-builder
+  draft upload and asset names on GitHub, publish-as-latest, SmartScreen,
+  and an installed DKS old-to-new update.

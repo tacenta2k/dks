@@ -127,9 +127,76 @@ a token in the app. (If the repository ever becomes private, this update
 mechanism stops working for installed clients until releases are hosted
 somewhere publicly readable.)
 
-To publish an update: bump `version` in `package.json` (electron-updater only
-offers strictly newer versions), then provide a short-lived token only in
-the shell and run:
+### One-click release (GitHub Actions)
+
+The `Release DKS` workflow builds and publishes the Windows installer from
+`windows-latest`, so the owner does not need a local Windows build or a
+personal access token. It uses only GitHub's built-in `GITHUB_TOKEN` with
+`contents: write` permission.
+
+One-time repository setup:
+
+1. In **Settings → Secrets and variables → Actions → New repository secret**,
+   add `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY`. Use the same
+   public Supabase client values that belong in a local `.env`; never add a
+   service-role key, database password, Resend key, personal token, or signing
+   credential as a workflow secret for this release process.
+2. In **Settings → Actions → General → Workflow permissions**, select
+   **Read and write permissions**. The workflow needs that access to push the
+   version commit/tag to `main` and publish the verified release. If branch
+   protection is enabled for `main`, it must not block the
+   `github-actions[bot]` version commit.
+
+To release, merge the workflow to `main`, then use **Actions → Release DKS →
+Run workflow**, choose `main`, select `patch`, `minor`, or `major`, and run it.
+From a terminal in a checkout of `main`, the equivalent command is:
+
+```bash
+gh workflow run release.yml -f bump=patch
+```
+
+The workflow checks out `main` with full history, uses Node from `.nvmrc`,
+runs `npm ci`, the typecheck, and the test suite with the Node build of
+`better-sqlite3`, then creates and pushes the version commit and `v<version>`
+tag. It writes the two public Vite values to an uncommitted runner-only
+`.env`, runs the existing `npm run release` pipeline (including
+`verify:native`, Electron ABI verification, and the `afterPack` ASAR probe),
+and uploads a **draft** release. Only after it verifies that the draft has
+exactly the installer, its `.blockmap`, and a `latest.yml` for the same
+version does it publish the release as the latest release. The installer is
+also saved as a workflow artifact.
+
+Installed apps can see an update only after that publish step. They check on
+launch and hourly, download in the background, and still install only when the
+user chooses **Restart to install**. Draft, failed, or half-uploaded releases
+do not reach installed clients.
+
+If a run fails after the version commit and tag have been pushed, the workflow
+does not delete them automatically. The simplest recovery is to fix the cause
+and run the workflow again: it will bump to the next version and skip the
+failed one. Delete any leftover draft release when convenient. To reuse the
+same version number instead, first delete the unpublished draft and remote
+tag, then revert the bot's version-bump commit on `main` before rerunning:
+
+```bash
+gh release delete v<version> --yes
+git push origin :refs/tags/v<version>
+git tag -d v<version>
+```
+
+If the failure happened after the publish step, treat the release as already
+live and inspect it before deleting anything.
+
+The installer is currently unsigned. On first install, Windows SmartScreen
+may require **More info → Run anyway**; only do that for an installer obtained
+from this repository's official GitHub release. Code signing can remove that
+warning later, but is not part of this workflow.
+
+### Local Windows release
+
+To publish an update manually: bump `version` in `package.json`
+(electron-updater only offers strictly newer versions), then provide a
+short-lived token only in the shell and run:
 
 PowerShell:
 
