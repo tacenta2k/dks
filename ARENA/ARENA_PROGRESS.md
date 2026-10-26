@@ -2353,3 +2353,74 @@ from this session.
   Node 20.19.0, bot push to protected/unprotected `main`, electron-builder
   draft upload and asset names on GitHub, publish-as-latest, SmartScreen,
   and an installed DKS old-to-new update.
+
+## 32. Release workflow Windows native-toolchain fix (2026-10-26)
+
+Arena branch `arena/06d185f7-dks` was fast-forwarded to `origin/main`
+`9a92da1` (the merge of PKG-15) before this targeted CI fix. No workflow was
+run, and no tag or release was created from this session.
+
+### 32.1 Actual first-run failure and fix
+
+- The first real `Release DKS` run correctly installed project Node
+  `v20.19.0`, but `npm ci` had to compile `better-sqlite3` because no
+  matching Windows Node prebuild was available. The locked
+  `node-gyp@9.4.1` could not recognize the moving `windows-latest` image's
+  `C:\Program Files\Microsoft Visual Studio\18\Enterprise`, and the runner
+  Python was 3.12.10—also outside node-gyp 9's compatible range.
+- The job is now pinned to `windows-2022`, whose Visual Studio 2022 (17.x)
+  C++ toolchain is discoverable by node-gyp 9. `actions/setup-python@v7`
+  installs Python `3.11` before `npm ci`; a following step writes
+  `npm_config_python` from that action's actual `python-path` output (no
+  hosted-toolcache path is hardcoded) and `npm_config_msvs_version=2022`
+  to `GITHUB_ENV`, so the values apply to `npm ci`, any Node rebuild, and
+  the later `npm run release` Electron-native rebuild.
+- A pre-install diagnostics step fails early unless Node is exactly
+  `v20.19.0`, the selected Python is 3.11, both node-gyp environment values
+  propagated, and `vswhere` finds a VS2022 x64 C++ installation plus
+  `cl.exe`. It prints only Node/npm/Python versions and selected/toolchain
+  paths—no secrets, `.env`, or full environment.
+- Separately, upstream action runtimes were verified through each action's
+  `action.yml` on 2026-10-26: `actions/checkout@v7`,
+  `actions/setup-node@v7`, and `actions/setup-python@v7` declare
+  `runs.using: node24` and retain the inputs/outputs used here. They were
+  updated from v4 where applicable. That Node 24 is only the JavaScript
+  runtime GitHub uses to execute the actions; `setup-node` still installs
+  the project runtime from `.nvmrc` (20.19.0). `actions/upload-artifact@v4`
+  was left unchanged as outside this targeted install failure.
+- Preserved release contract: normal lifecycle-enabled `npm ci`, Node-
+  compatible SQLite before Vitest, complete typecheck/test gate before
+  versioning/packaging, existing `npm run release`, `verify:native`,
+  `afterPack`, draft-first upload, exact asset verification, then publish.
+  No dependencies, lockfile, `.nvmrc`, application code, updater, SQLite
+  data/SQL, roles, or Office approval changed; no `--force`,
+  engine-warning suppression, workflow `--ignore-scripts`, skipped test, or
+  disabled native probe was added.
+
+### 32.2 Separate Supabase runtime mismatch (report only)
+
+The lockfile's `@supabase/*@2.118.0` packages declare `node >=22.0.0`,
+while DKS and `.nvmrc` deliberately pin Node 20.19.0. This may produce
+EBADENGINE warnings under the pinned runtime. It is a separate dependency
+compatibility decision and was neither hidden nor changed by this Windows
+toolchain fix.
+
+### 32.3 Local gate and remaining verification
+
+- `tests/release-workflow.test.ts` now asserts `windows-2022`, the v7
+  checkout/setup actions, Python 3.11 setup and node-gyp environment
+  propagation before `npm ci`, diagnostics contents/boundaries, and no
+  hardcoded hosted-toolcache path, while retaining the prior safety and
+  ordering assertions. README and PKG-15 record the rationale.
+- Local Linux sandbox gate: `npm run typecheck` PASS; `npm test` 72
+  files, 586 passed | 3 skipped; `npm run build` PASS. The sandbox has
+  only Node 22.22.3, not pinned Node 20.19.0. Local locked dependencies
+  were installed with lifecycle scripts deferred, then `better-sqlite3`
+  was source-built inside its package against local Node headers solely to
+  run the Linux test suite; this was not a workflow change and does not
+  prove Windows compilation. `actionlint` and PowerShell are unavailable
+  in the sandbox.
+- Still requires a real GitHub Actions rerun on `windows-2022`: VS2022 +
+  Python 3.11 discovery by node-gyp 9, lifecycle-enabled `npm ci` under
+  Node 20.19.0, complete Windows tests, Electron-ABI rebuild/ASAR probe,
+  draft asset verification/publication, and installed-app update.

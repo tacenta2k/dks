@@ -86,16 +86,16 @@ describe('one-click Release DKS workflow', () => {
     });
     expect(workflow.permissions).toEqual({ contents: 'write' });
     expect(Object.keys(jobs)).toEqual(['release']);
-    expect(releaseJob['runs-on']).toBe('windows-latest');
+    expect(releaseJob['runs-on']).toBe('windows-2022');
     expect(releaseJob.permissions).toBeUndefined();
     expect(releaseJob.env).toEqual({
       GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}',
     });
   });
 
-  it('checks out full history from main and sets up the pinned Node version', () => {
+  it('checks out full history from main and sets up the pinned Node and Python toolchains', () => {
     const checkoutIndex = stepIndex(
-      (step) => step.uses === 'actions/checkout@v4',
+      (step) => step.uses === 'actions/checkout@v7',
       'actions/checkout',
     );
     const guardIndex = stepIndex(
@@ -103,8 +103,24 @@ describe('one-click Release DKS workflow', () => {
       'main branch guard',
     );
     const setupNodeIndex = stepIndex(
-      (step) => step.uses === 'actions/setup-node@v4',
+      (step) => step.uses === 'actions/setup-node@v7',
       'actions/setup-node',
+    );
+    const setupPythonIndex = stepIndex(
+      (step) => step.uses === 'actions/setup-python@v7',
+      'actions/setup-python',
+    );
+    const configureToolchainIndex = stepIndex(
+      (step) => step.name === 'Configure node-gyp toolchain',
+      'node-gyp toolchain configuration',
+    );
+    const diagnosticsIndex = stepIndex(
+      (step) => step.name === 'Show native build toolchain',
+      'native build diagnostics',
+    );
+    const installIndex = stepIndex(
+      (step) => runIncludes(step, 'npm ci'),
+      'npm ci',
     );
 
     expect(checkoutIndex).toBe(0);
@@ -119,6 +135,46 @@ describe('one-click Release DKS workflow', () => {
       cache: 'npm',
     });
     expect(readFileSync(resolve(root, '.nvmrc'), 'utf8').trim()).toBe('20.19.0');
+
+    expect(setupPythonIndex).toBeGreaterThan(setupNodeIndex);
+    expect(steps[setupPythonIndex].id).toBe('setup-python');
+    expect(steps[setupPythonIndex].with).toMatchObject({
+      'python-version': '3.11',
+    });
+
+    expect(configureToolchainIndex).toBeGreaterThan(setupPythonIndex);
+    expect(steps[configureToolchainIndex].env).toEqual({
+      SELECTED_PYTHON: '${{ steps.setup-python.outputs.python-path }}',
+    });
+    expect(steps[configureToolchainIndex].run).toContain('Test-Path -LiteralPath $env:SELECTED_PYTHON');
+    expect(steps[configureToolchainIndex].run).toContain(
+      '"npm_config_python=$env:SELECTED_PYTHON" | Out-File -FilePath $env:GITHUB_ENV',
+    );
+    expect(steps[configureToolchainIndex].run).toContain(
+      '"npm_config_msvs_version=2022" | Out-File -FilePath $env:GITHUB_ENV',
+    );
+
+    expect(diagnosticsIndex).toBeGreaterThan(configureToolchainIndex);
+    expect(diagnosticsIndex).toBeLessThan(installIndex);
+    expect(steps[diagnosticsIndex].env).toEqual({
+      SELECTED_PYTHON: '${{ steps.setup-python.outputs.python-path }}',
+    });
+    const diagnostics = steps[diagnosticsIndex].run ?? '';
+    expect(diagnostics).toContain('node --version');
+    expect(diagnostics).toContain('npm --version');
+    expect(diagnostics).toContain('python --version');
+    expect(diagnostics).toContain('& $env:SELECTED_PYTHON --version');
+    expect(diagnostics).toContain('v20.19.0');
+    expect(diagnostics).toContain('^Python 3\\.11\\.');
+    expect(diagnostics).toContain('$env:npm_config_python');
+    expect(diagnostics).toContain('$env:npm_config_msvs_version');
+    expect(diagnostics).toContain('vswhere.exe');
+    expect(diagnostics).toContain("'[17.0,18.0)'");
+    expect(diagnostics).toContain('Microsoft.VisualStudio.Component.VC.Tools.x86.x64');
+    expect(diagnostics).toContain('cl.exe');
+    expect(diagnostics).not.toContain('Get-Content .env');
+    expect(diagnostics).not.toContain('Get-ChildItem Env:');
+    expect(workflowText).not.toContain('hostedtoolcache');
   });
 
   it('installs, typechecks, and tests with the Node native binding before packaging', () => {

@@ -23,14 +23,14 @@ permissions:
 jobs:
   release:
     name: Build and publish Windows release
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 60
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           fetch-depth: 0
 
@@ -46,10 +46,87 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
           cache: npm
+
+      - name: Set up Python for node-gyp
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Configure node-gyp toolchain
+        shell: pwsh
+        env:
+          SELECTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SELECTED_PYTHON) -or -not (Test-Path -LiteralPath $env:SELECTED_PYTHON)) {
+            Write-Error "actions/setup-python did not provide an existing python-path output."
+            exit 1
+          }
+
+          "npm_config_python=$env:SELECTED_PYTHON" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "npm_config_msvs_version=2022" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Show native build toolchain
+        shell: pwsh
+        env:
+          SELECTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          $nodeVersion = (node --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $npmVersion = (npm --version).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $pathPythonVersion = (python --version 2>&1).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $selectedPythonVersion = (& $env:SELECTED_PYTHON --version 2>&1).Trim()
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if ($nodeVersion -ne 'v20.19.0') {
+            Write-Error "Expected project Node v20.19.0 from .nvmrc, got $nodeVersion."
+            exit 1
+          }
+          if ($selectedPythonVersion -notmatch '^Python 3\.11\.') {
+            Write-Error "Expected Python 3.11 for node-gyp, got $selectedPythonVersion."
+            exit 1
+          }
+          if ($env:npm_config_python -ne $env:SELECTED_PYTHON) {
+            Write-Error "npm_config_python does not match the Python selected by actions/setup-python."
+            exit 1
+          }
+          if ($env:npm_config_msvs_version -ne '2022') {
+            Write-Error "npm_config_msvs_version must be 2022 for this release runner."
+            exit 1
+          }
+
+          $programFilesX86 = [System.Environment]::GetEnvironmentVariable('ProgramFiles(x86)')
+          $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if ([string]::IsNullOrWhiteSpace($programFilesX86) -or -not (Test-Path -LiteralPath $vswhere)) {
+            Write-Error "Visual Studio Installer tool was not found at $vswhere."
+            exit 1
+          }
+
+          $vsInstallPath = & $vswhere -latest -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $clPath = & $vswhere -latest -products * -version '[17.0,18.0)' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -find 'VC\Tools\MSVC\**\bin\Hostx64\x64\cl.exe' | Select-Object -First 1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          if ([string]::IsNullOrWhiteSpace($vsInstallPath) -or [string]::IsNullOrWhiteSpace($clPath) -or -not (Test-Path -LiteralPath $clPath)) {
+            Write-Error "Visual Studio 2022 C++ x64 toolchain was not found on this runner."
+            exit 1
+          }
+
+          Write-Host "Node: $nodeVersion"
+          Write-Host "npm: $npmVersion"
+          Write-Host "Python on PATH: $pathPythonVersion"
+          Write-Host "Selected Python: $selectedPythonVersion"
+          Write-Host "Selected Python path: $env:SELECTED_PYTHON"
+          Write-Host "npm_config_python: $env:npm_config_python"
+          Write-Host "npm_config_msvs_version: $env:npm_config_msvs_version"
+          Write-Host "Visual Studio 2022: $vsInstallPath"
+          Write-Host "Visual Studio 2022 C++ compiler: $clPath"
 
       - name: Install dependencies
         shell: pwsh

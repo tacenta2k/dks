@@ -130,9 +130,22 @@ somewhere publicly readable.)
 ### One-click release (GitHub Actions)
 
 The `Release DKS` workflow builds and publishes the Windows installer from
-`windows-latest`, so the owner does not need a local Windows build or a
+`windows-2022`, so the owner does not need a local Windows build or a
 personal access token. It uses only GitHub's built-in `GITHUB_TOKEN` with
 `contents: write` permission.
+
+The runner is deliberately pinned to `windows-2022`, rather than the moving
+`windows-latest` image, because the locked native toolchain
+(`node-gyp@9.4.1`) recognizes Visual Studio 2022 but failed against the newer
+image's Visual Studio 18 and Python 3.12. `actions/setup-python` selects
+Python 3.11, and the workflow passes that executable's actual
+`python-path` output as `npm_config_python`, together with
+`npm_config_msvs_version=2022`, to subsequent steps. Before `npm ci`, it
+prints only Node/npm/Python versions, the selected Python path, and the
+Visual Studio 2022 C++ compiler path—never secrets or `.env` contents. The
+v7 checkout/setup actions execute with GitHub's Node 24 **action runtime**;
+that is separate from the project runtime, which `actions/setup-node` still
+installs from `.nvmrc` as Node 20.19.0.
 
 One-time repository setup:
 
@@ -155,7 +168,8 @@ From a terminal in a checkout of `main`, the equivalent command is:
 gh workflow run release.yml -f bump=patch
 ```
 
-The workflow checks out `main` with full history, uses Node from `.nvmrc`,
+The workflow checks out `main` with full history, uses Node from `.nvmrc`
+and Python 3.11 for node-gyp, verifies the Visual Studio 2022 C++ toolchain,
 runs `npm ci`, the typecheck, and the test suite with the Node build of
 `better-sqlite3`, then creates and pushes the version commit and `v<version>`
 tag. It writes the two public Vite values to an uncommitted runner-only
