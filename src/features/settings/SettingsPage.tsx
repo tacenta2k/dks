@@ -803,13 +803,21 @@ export function SettingsPage({
                       </span>
                     </p>
                   </div>
-                  <button className="button" type="button" onClick={handleCheckForUpdates}>Check for updates</button>
-                  <p className="settings-muted" role="status">{updateStatusMessage(updateState)}</p>
-                  {updateState.status === 'downloaded' ? (
-                    <button className="button" type="button" onClick={handleRestartToUpdate}>
-                      Restart to install
+                  {/* The check button and its status line are one right-aligned
+                      column so they stay aligned with each other and centred
+                      against the identity block; layout only — the updater
+                      state, disabled behaviour, and copy are unchanged. */}
+                  <div className="settings-about__actions">
+                    <button className="button button--secondary" type="button" onClick={handleCheckForUpdates}>
+                      Check for updates
                     </button>
-                  ) : null}
+                    <p className="settings-muted settings-about__status" role="status">{updateStatusMessage(updateState)}</p>
+                    {updateState.status === 'downloaded' ? (
+                      <button className="button button--secondary" type="button" onClick={handleRestartToUpdate}>
+                        Restart to install
+                      </button>
+                    ) : null}
+                  </div>
                 </div>
               </div>
             </section>
