@@ -9,18 +9,7 @@ import {
   type EmailPrefsClient,
 } from './email-preferences';
 
-/**
- * Admin-only email notification settings (Settings → Notifications).
- *
- * The preferences live in the SUPABASE settings table — they configure
- * server-side email. The Resend API key is a Supabase Edge Function secret
- * and NEVER appears here; fields are limited to who gets what.
- *
- * Privacy + free-tier notes are shown inline so the operator sees them once:
- *  - the Resend onboarding sender is test-only (see deploy docs);
- *  - digest bodies carry row labels + expiry only (no passport/Civil ID);
- *  - failure never blocks sign-in or local saves.
- */
+/** Admin-only email notification preferences. */
 export interface EmailNotificationsSectionProps {
   client: EmailPrefsClient | null;
 }
@@ -106,25 +95,21 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
   if (!client) {
     return (
       <p className="settings-empty" role="status">
-        Email notifications require Supabase connection (offline configuration is local-only).
+        Email notifications are unavailable right now.
       </p>
     );
   }
 
   return (
-    <section className="settings-email" aria-label="Email notifications">
+    <section className="settings-email" aria-labelledby="email-notifications-title">
       <h3 id="email-notifications-title">Email notifications</h3>
-      <p className="settings-help">
-        Server-side email via a private Edge Function — the Resend API key lives in Supabase
-        Edge Function secrets only, never in this app. Email failing never blocks sign-in,
-        approvals, or local saves.
-      </p>
 
       {error ? <p className="sheet-form__error" role="alert">{error}</p> : null}
       {message ? <p className="settings-alert" role="status">{message}</p> : null}
 
-      <label className="settings-email__toggle">
+      <label className="settings-email__toggle" htmlFor="settings-email-approvals-enabled">
         <input
+          id="settings-email-approvals-enabled"
           type="checkbox"
           checked={prefs.enabled}
           onChange={(event) => setPrefs((current) => ({ ...current, enabled: event.target.checked }))}
@@ -132,9 +117,10 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
         <span>Email me when an Office sign-in needs approval</span>
       </label>
 
-      <label>
-        Administrator email (approval requests)
+      <label className="settings-email__field" htmlFor="settings-email-admin-email">
+        <span>Administrator email (approval requests)</span>
         <input
+          id="settings-email-admin-email"
           type="email"
           value={prefs.adminEmail ?? ''}
           placeholder="admin@example.com"
@@ -145,19 +131,21 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
         />
       </label>
 
-      <label className="settings-email__toggle">
+      <label className="settings-email__toggle" htmlFor="settings-email-digest-enabled">
         <input
+          id="settings-email-digest-enabled"
           type="checkbox"
           checked={prefs.expiryDigestEnabled}
           disabled={!prefs.enabled}
           onChange={(event) => setPrefs((current) => ({ ...current, expiryDigestEnabled: event.target.checked }))}
         />
-        <span>Send me the daily expiry digest (at most one per day)</span>
+        <span>Send a daily expiry digest</span>
       </label>
 
-      <label>
-        Digest recipients (one per line)
+      <label className="settings-email__field" htmlFor="settings-email-digest-recipients">
+        <span>Digest recipients (one per line)</span>
         <textarea
+          id="settings-email-digest-recipients"
           rows={4}
           value={recipientsText}
           disabled={!prefs.enabled || !prefs.expiryDigestEnabled}
@@ -167,11 +155,10 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
       </label>
 
       <p className="settings-help" role="note">
-        Email is best-effort and optional: local alerts keep working even when configured email
-        is unreachable. The onboarding Resend sender is test-only until a domain is verified.
+        Local alerts keep working even if email cannot be sent.
       </p>
 
-      <div>
+      <div className="settings-email__actions">
         <button type="button" className="button button--primary" disabled={busy} onClick={() => void save()}>
           {busy ? 'Saving…' : 'Save email preferences'}
         </button>

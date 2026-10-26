@@ -200,7 +200,7 @@ describe('admin renderer integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /Restore Ada Lovelace/i }));
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
     // SET-11: an in-app confirmation dialog (native window.confirm is gone).
     const restoreDialog = await screen.findByRole('dialog', { name: 'Restore this record?' });
     fireEvent.click(within(restoreDialog).getByRole('button', { name: 'Restore' }));
@@ -210,7 +210,7 @@ describe('admin renderer integration', () => {
 
     await repository.softDeleteRow(row.id);
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
-    fireEvent.click(await screen.findByRole('button', { name: /Permanently delete Ada Lovelace/i }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Delete' }));
     const deleteDialog = await screen.findByRole('dialog', { name: 'Permanently delete this record?' });
     fireEvent.click(within(deleteDialog).getByRole('button', { name: 'Delete permanently' }));
     await waitFor(async () => {

@@ -7,6 +7,8 @@
 export interface AuditEntry {
   id?: string;
   action: string;
+  entityType?: string | null;
+  entityId?: string | null;
   actorId?: string | null;
   actor?: string | { name?: string | null; email?: string | null } | null;
   actorName?: string | null;

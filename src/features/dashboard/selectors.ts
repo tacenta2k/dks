@@ -69,6 +69,7 @@ export const DASHBOARD_CARD_DEFINITIONS: ReadonlyArray<
   Pick<DashboardCard, 'id' | 'label'>
 > = Object.freeze([
   { id: 'all', label: 'Total entries' },
+  { id: 'expired', label: 'Expired' },
   { id: 'expiresToday', label: 'Expires today' },
   { id: 'expiresIn1Day', label: 'Expires in 1 day' },
   { id: 'expiringThisWeek', label: 'This week' },
@@ -76,7 +77,6 @@ export const DASHBOARD_CARD_DEFINITIONS: ReadonlyArray<
   { id: 'within3Months', label: '3 months' },
   { id: 'within6Months', label: '6 months' },
   { id: 'within1Year', label: '1 year' },
-  { id: 'expired', label: 'Expired' },
 ]);
 
 /** Inclusive upper bound (days left) for each cumulative upcoming window. */

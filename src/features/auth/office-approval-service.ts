@@ -23,6 +23,12 @@ export interface OfficeSigninRequest {
   authSessionId?: string;
 }
 
+export interface OfficeSessionSignOutSummary {
+  officeUsers: number;
+  authSessionsDeleted: number;
+  requestsRevoked: number;
+}
+
 export type ApprovalServiceError = AuthError;
 
 export interface RpcErrorLike {
@@ -79,6 +85,24 @@ function requestFromRow(row: Record<string, unknown>): OfficeSigninRequest | nul
   };
 }
 
+function nonNegativeCount(value: unknown): number {
+  const count = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+}
+
+function signOutSummaryFromRow(row: unknown): OfficeSessionSignOutSummary | null {
+  const source = Array.isArray(row) ? row[0] : row;
+  if (!source || typeof source !== 'object') {
+    return null;
+  }
+  const record = source as Record<string, unknown>;
+  return {
+    officeUsers: nonNegativeCount(record.office_users),
+    authSessionsDeleted: nonNegativeCount(record.auth_sessions_deleted),
+    requestsRevoked: nonNegativeCount(record.requests_revoked),
+  };
+}
+
 /**
  * Base64url-decode the JWT payload and expose the claims for LOCAL DISPLAY /
  * DEBUG only (e.g. "session id unavailable" diagnostics). The value returned
@@ -123,6 +147,8 @@ export interface OfficeApprovalService {
   decideRequest(requestId: string, decision: 'approved' | 'denied'): Promise<AuthResult<OfficeSigninRequest>>;
   /** Admin: revoke a granted approval (immediate online effect via RLS). */
   revokeRequest(requestId: string): Promise<AuthResult<OfficeSigninRequest>>;
+  /** Admin: delete every Office Auth session and revoke Office approvals. */
+  signOutAllOfficeSessions(): Promise<AuthResult<OfficeSessionSignOutSummary>>;
 }
 
 export function createOfficeApprovalService(
@@ -240,6 +266,31 @@ export function createOfficeApprovalService(
         return { data: request, error: null };
       } catch (caught) {
         return { data: null, error: toError(caught, 'The session could not be revoked.', 'APPROVAL_REVOKE_FAILED') };
+      }
+    },
+
+    async signOutAllOfficeSessions(): Promise<AuthResult<OfficeSessionSignOutSummary>> {
+      try {
+        const result = await resolved.rpc('sign_out_all_office_sessions');
+        if (result.error) {
+          return {
+            data: null,
+            error: toError(result.error, 'Office sessions could not be signed out.', 'OFFICE_SESSIONS_SIGN_OUT_FAILED'),
+          };
+        }
+        const summary = signOutSummaryFromRow(result.data);
+        if (!summary) {
+          return {
+            data: null,
+            error: { message: 'The Office sign-out returned no usable summary.', code: 'APPROVAL_RESPONSE' },
+          };
+        }
+        return { data: summary, error: null };
+      } catch (caught) {
+        return {
+          data: null,
+          error: toError(caught, 'Office sessions could not be signed out.', 'OFFICE_SESSIONS_SIGN_OUT_FAILED'),
+        };
       }
     },
   };

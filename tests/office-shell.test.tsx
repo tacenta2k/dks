@@ -25,6 +25,10 @@ function approvedApprovalService(): OfficeApprovalService {
     listRequests: vi.fn(async () => ({ data: [row], error: null })),
     decideRequest: vi.fn(async (id: string, decision: 'approved' | 'denied') => ({ data: { ...row, id, status: decision }, error: null })),
     revokeRequest: vi.fn(async (id: string) => ({ data: { ...row, id, status: 'revoked' as const }, error: null })),
+    signOutAllOfficeSessions: vi.fn(async () => ({
+      data: { officeUsers: 1, authSessionsDeleted: 0, requestsRevoked: 0 },
+      error: null,
+    })),
   };
 }
 

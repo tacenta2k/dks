@@ -1,5 +1,7 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
@@ -17,6 +19,7 @@ describe('settings page', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/administrators only/i);
     expect(screen.queryByLabelText('Green status color')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Backup Now' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Sign out all office sessions' })).not.toBeInTheDocument();
   });
 
   it('renders injectable admin settings and emits local-first changes and actions', () => {
@@ -60,7 +63,7 @@ describe('settings page', () => {
 
     nav('About & updates');
     expect(screen.getByText('Version 1.2.3')).toBeInTheDocument();
-    expect(screen.getByText('Resend:', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/Resend/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/backup/i)).not.toBeInTheDocument();
 
     // Local-first changes across sections, plus the update action.
@@ -124,6 +127,167 @@ describe('settings page', () => {
     });
   });
 
+  it('associates notification labels with controls and stacks notification layout on narrow screens', () => {
+    render(<SettingsPage role="admin" />);
+
+    nav('Notifications');
+    const controls: Array<[string, string]> = [
+      ['Notification day 1', 'settings-notification-day-0'],
+      ['Daily summary', 'settings-daily-summary-enabled'],
+      ['Weekly summary', 'settings-weekly-summary-enabled'],
+      ['Daily summary time', 'settings-daily-summary-time'],
+      ['Weekly summary day', 'settings-weekly-summary-day'],
+      ['Weekly summary time', 'settings-weekly-summary-time'],
+    ];
+    for (const [label, id] of controls) {
+      expect(document.querySelector(`label[for="${id}"]`)).not.toBeNull();
+      expect(document.getElementById(id)).toBe(screen.getByLabelText(label));
+    }
+
+    // jsdom has no layout engine, so this locks the responsive CSS contract:
+    // the side-by-side notification groups and field grids must collapse
+    // instead of squeezing labels into controls, and the email form has a
+    // real grid/field layout rather than unstyled inline labels.
+    const css = readFileSync(
+      resolve(__dirname, '../src/features/settings/settings.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/\.settings-email\s*\{[^}]*display:\s*grid/s);
+    expect(css).toMatch(/\.settings-email__field\s*\{[^}]*display:\s*grid/s);
+    expect(css).toContain('.settings-email__field textarea');
+    expect(css).toMatch(
+      /@media \(max-width: 900px\)[\s\S]*\.settings-alert-options\s*\{[^}]*grid-template-columns:\s*1fr/,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 560px\)[\s\S]*\.settings-field-grid--four,[\s\S]*grid-template-columns:\s*1fr/,
+    );
+  });
+
+  it('preserves every email preference and its save payload without provider copy', async () => {
+    const upsert = vi.fn(async () => ({ data: [], error: null }));
+    const emailPrefsClient = {
+      from: vi.fn(() => ({
+        select: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            maybeSingle: vi.fn(async () => ({
+              data: {
+                key: 'email_notifications',
+                value: {
+                  enabled: true,
+                  admin_email: 'admin@example.com',
+                  expiry_digest_enabled: true,
+                  expiry_recipients: ['digest@example.com'],
+                },
+              },
+              error: null,
+            })),
+          })),
+        })),
+        upsert,
+      })),
+    };
+
+    render(
+      <SettingsPage
+        role="admin"
+        emailPrefsClient={emailPrefsClient as never}
+      />,
+    );
+    nav('Notifications');
+
+    const approvals = await screen.findByLabelText('Email me when an Office sign-in needs approval');
+    const adminEmail = screen.getByLabelText('Administrator email (approval requests)');
+    const digest = screen.getByLabelText('Send a daily expiry digest');
+    const recipients = screen.getByLabelText('Digest recipients (one per line)');
+    expect(approvals).toBeChecked();
+    expect(adminEmail).toHaveValue('admin@example.com');
+    expect(digest).toBeChecked();
+    expect(recipients).toHaveValue('digest@example.com');
+    expect(document.querySelector('label[for="settings-email-admin-email"]')).not.toBeNull();
+    expect(document.getElementById('settings-email-admin-email')).toBe(adminEmail);
+    expect(screen.queryByText(/Resend|API key|Edge Function/i)).not.toBeInTheDocument();
+
+    fireEvent.change(adminEmail, { target: { value: 'new-admin@example.com' } });
+    fireEvent.change(recipients, {
+      target: { value: 'one@example.com\ntwo@example.com' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Save email preferences' }));
+
+    expect(await screen.findByText('Email preferences saved.')).toBeInTheDocument();
+    expect(upsert).toHaveBeenCalledWith([{
+      key: 'email_notifications',
+      value: {
+        enabled: true,
+        admin_email: 'new-admin@example.com',
+        expiry_digest_enabled: true,
+        expiry_recipients: ['one@example.com', 'two@example.com'],
+      },
+    }], { onConflict: 'key' });
+  });
+
+  it('confirms before signing out all Office sessions and keeps the administrator signed in', async () => {
+    const onSignOutAllOfficeSessions = vi.fn(async () => ({
+      officeUsers: 1,
+      authSessionsDeleted: 3,
+      requestsRevoked: 2,
+    }));
+    render(
+      <SettingsPage
+        role="admin"
+        onSignOutAllOfficeSessions={onSignOutAllOfficeSessions}
+      />,
+    );
+
+    nav('Workspace');
+    expect(screen.getByText(/You stay signed in, and business records are not changed/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all office sessions' }));
+
+    let dialog = screen.getByRole('dialog', { name: 'Sign out all office sessions?' });
+    expect(within(dialog).getByText(/every Office user on every device/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/You stay signed in/i)).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(onSignOutAllOfficeSessions).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: 'Sign out all office sessions?' })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all office sessions' }));
+    dialog = screen.getByRole('dialog', { name: 'Sign out all office sessions?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out all office sessions' }));
+
+    expect(await screen.findByText('All Office sessions are signed out. 3 sessions ended.')).toBeInTheDocument();
+    expect(onSignOutAllOfficeSessions).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('dialog', { name: 'Sign out all office sessions?' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the Office sign-out confirmation open with the server error on failure', async () => {
+    const onSignOutAllOfficeSessions = vi.fn(async () => {
+      throw new Error('Only administrators may sign out Office sessions');
+    });
+    render(
+      <SettingsPage
+        role="admin"
+        onSignOutAllOfficeSessions={onSignOutAllOfficeSessions}
+      />,
+    );
+
+    nav('Workspace');
+    fireEvent.click(screen.getByRole('button', { name: 'Sign out all office sessions' }));
+    const dialog = screen.getByRole('dialog', { name: 'Sign out all office sessions?' });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Sign out all office sessions' }));
+
+    expect(await within(dialog).findByRole('alert')).toHaveTextContent(
+      'Only administrators may sign out Office sessions',
+    );
+    expect(dialog).toBeInTheDocument();
+  });
+
+  it('disables Office session sign-out when the host does not supply the server action', () => {
+    render(<SettingsPage role="admin" />);
+
+    nav('Workspace');
+    expect(screen.getByRole('button', { name: 'Sign out all office sessions' })).toBeDisabled();
+    expect(screen.getByText('Office session sign-out is unavailable right now.')).toBeInTheDocument();
+  });
+
   it('keeps the stale primary expiry id fallback honest for unknown columns (B4)', () => {
     render(
       <SettingsPage
@@ -160,7 +324,7 @@ describe('About & updates (R2-06)', () => {
     delete (window as unknown as { dks?: unknown }).dks;
   });
 
-  it('shows the real app version, Tacenta credit and opens GitHub externally', async () => {
+  it('shows the real app version and Tacenta credit with a decorative GitHub mark', async () => {
     const openExternal = vi.fn().mockResolvedValue(true);
     (window as unknown as { dks: Record<string, unknown> }).dks = {
       appVersion: '4.2.0',
@@ -172,13 +336,19 @@ describe('About & updates (R2-06)', () => {
 
     expect(screen.getByText('DKS')).toBeInTheDocument();
     expect(screen.getByLabelText('Version 4.2.0')).toHaveTextContent('Version 4.2.0');
-    expect(screen.getByText(/Made by Tacenta/)).toBeInTheDocument();
+    const author = screen.getByText(/Made by Tacenta/);
+    expect(author).toBeInTheDocument();
 
-    const link = screen.getByRole('link', { name: 'Tacenta on GitHub' });
-    fireEvent.click(link);
-
-    expect(openExternal).toHaveBeenCalledTimes(1);
-    expect(openExternal).toHaveBeenCalledWith('https://github.com/tacenta2k');
+    const githubMark = author.querySelector('.settings-about__github');
+    expect(githubMark).not.toBeNull();
+    expect(githubMark?.querySelector('svg')).not.toBeNull();
+    expect(githubMark?.closest('a, button')).toBeNull();
+    expect(screen.queryByRole('link', { name: /GitHub/i })).not.toBeInTheDocument();
+    if (githubMark) {
+      fireEvent.click(githubMark);
+    }
+    expect(openExternal).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Resend/i)).not.toBeInTheDocument();
     // The About card keeps the update check.
     expect(screen.getByRole('button', { name: 'Check for updates' })).toBeInTheDocument();
   });
@@ -229,19 +399,21 @@ describe('settings application updates (mocked bridge)', () => {
     expect(bridge.restartToUpdate).not.toHaveBeenCalled();
 
     emit({ status: 'downloaded', version: '0.2.0' });
-    expect(await screen.findByText(/Update 0\.2\.0 is ready to install/)).toBeInTheDocument();
+    expect(await screen.findByText('Update 0.2.0 is ready to install.')).toBeInTheDocument();
+    expect(screen.queryByText(/Your records stay on this device/i)).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Restart to install' }));
     expect(bridge.restartToUpdate).toHaveBeenCalledTimes(1);
   });
 
-  it('says plainly that development builds cannot check for updates', async () => {
+  it('says update checks are unavailable without claiming DKS is up to date', async () => {
     const { bridge } = fakeBridge({ status: 'disabled' });
     render(<SettingsPage role="admin" updater={bridge as never} />);
 
     nav('About & updates');
 
-    expect(await screen.findByText(/not available in this development build/i)).toBeInTheDocument();
+    expect(await screen.findByText('Update checks are unavailable right now.')).toBeInTheDocument();
+    expect(screen.queryByText(/development build/i)).not.toBeInTheDocument();
     expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
   });
 
@@ -260,7 +432,8 @@ describe('settings application updates (mocked bridge)', () => {
     nav('About & updates');
     fireEvent.click(screen.getByRole('button', { name: 'Check for updates' }));
 
-    expect(await screen.findByText(/not available in this development build/i)).toBeInTheDocument();
+    expect(await screen.findByText('Update checks are unavailable right now.')).toBeInTheDocument();
+    expect(screen.queryByText(/development build/i)).not.toBeInTheDocument();
     expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
     expect(screen.queryByText('Update check requested.')).not.toBeInTheDocument();
   });

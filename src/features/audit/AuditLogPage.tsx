@@ -1,8 +1,11 @@
 import { useMemo, useState } from 'react';
 
-import { formatLocalDateTime } from '../../lib/date';
+import type { ColumnDefinition } from '../../lib/columns';
+import { formatDisplayDate, formatLocalDateTime } from '../../lib/date';
+import { rowDisplayLabel } from '../../lib/labels';
 import { can } from '../../lib/permissions';
 import type { Role } from '../auth/auth-types';
+import type { SheetRow } from '../sheet/types';
 import type { AuditEntry } from './audit-types';
 
 /** Profile rows used to resolve audit actors (S3). */
@@ -36,6 +39,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   record_conflict: 'Recorded conflict',
   merge_conflict: 'Merged conflict',
   clear_audit: 'Cleared the audit log',
+  office_sessions_signed_out: 'Signed out all Office sessions',
 };
 
 /** Friendly action name (S3) — raw codes only for actions we have no name for. */
@@ -131,74 +135,485 @@ export function formatAuditDetails(details: unknown): string {
   }
 }
 
-/** Short human summary of an audit details payload (S3). */
-export function summarizeAuditDetails(details: unknown): string {
-  if (details === null || details === undefined || details === '') {
+export interface AuditDisplayContext {
+  profiles?: readonly AuditProfile[];
+  columns?: readonly ColumnDefinition[];
+  rows?: readonly SheetRow[];
+  entityType?: string | null;
+  entityId?: string | null;
+}
+
+export interface AuditFieldLine {
+  field: string;
+  text: string;
+}
+
+const MISSING_AUDIT_VALUE = Symbol('missing audit value');
+const MAX_AUDIT_VALUE_LENGTH = 120;
+const SENSITIVE_AUDIT_KEY = /token|password|passwd|secret|api[-_]?key|authorization|credential|private[-_]?key/i;
+const SNAPSHOT_OMITTED_KEYS = new Set([
+  'id',
+  'actor',
+  'actorId',
+  'actor_id',
+  'createdAt',
+  'updatedAt',
+  'created_at',
+  'updated_at',
+  'createdBy',
+  'updatedBy',
+  'created_by',
+  'updated_by',
+  'deletedAt',
+  'deleted_at',
+  'version',
+  'table',
+]);
+const FIELD_LABELS: Readonly<Record<string, string>> = {
+  rowId: 'Record',
+  row_id: 'Record',
+  entryId: 'Record',
+  entry_id: 'Record',
+  recordId: 'Record',
+  record_id: 'Record',
+  columnId: 'Column',
+  column_id: 'Column',
+  userId: 'User',
+  user_id: 'User',
+  actorId: 'User',
+  actor_id: 'User',
+  fileName: 'File',
+  file_name: 'File',
+  importedRows: 'Imported records',
+  imported_rows: 'Imported records',
+  sourceRows: 'Source rows',
+  source_rows: 'Source rows',
+  deleted: 'Record state',
+  order: 'Column order',
+  civilId: 'Civil ID',
+  civil_id: 'Civil ID',
+  officeUsers: 'Office users',
+  office_users: 'Office users',
+  authSessionsDeleted: 'Sessions ended',
+  auth_sessions_deleted: 'Sessions ended',
+  refreshTokensDeleted: 'Refresh tokens removed',
+  refresh_tokens_deleted: 'Refresh tokens removed',
+  requestsRevoked: 'Approvals revoked',
+  requests_revoked: 'Approvals revoked',
+};
+
+function isAuditRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function truncateAuditText(value: string, maxLength = MAX_AUDIT_VALUE_LENGTH): string {
+  const text = value.replace(/\s+/g, ' ').trim();
+  return text.length > maxLength ? `${text.slice(0, maxLength - 1)}…` : text;
+}
+
+function normalizedAuditKey(key: string): string {
+  return key.replace(/[\s_-]+/g, '').toLowerCase();
+}
+
+function auditFieldLabel(key: string, context: AuditDisplayContext): string {
+  const column = context.columns?.find((candidate) => candidate.id === key || candidate.name === key);
+  if (column) {
+    return column.name;
+  }
+  if (FIELD_LABELS[key]) {
+    return FIELD_LABELS[key];
+  }
+  if (isUuid(key)) {
+    return 'Record field';
+  }
+  const words = key
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/[_-]+/g, ' ')
+    .trim();
+  if (!words) {
+    return 'Details';
+  }
+  return words
+    .replace(/^./, (letter) => letter.toUpperCase())
+    .replace(/\bId\b/g, 'ID');
+}
+
+function resolveAuditRow(id: string, context: AuditDisplayContext): string | null {
+  const row = context.rows?.find((candidate) => candidate.id === id);
+  return row ? truncateAuditText(rowDisplayLabel(row, context.columns ?? [])) : null;
+}
+
+function resolveAuditColumn(id: string, context: AuditDisplayContext): string | null {
+  const column = context.columns?.find((candidate) => candidate.id === id || candidate.name === id);
+  return column ? truncateAuditText(column.name) : null;
+}
+
+function resolveAuditProfile(id: string, context: AuditDisplayContext): string | null {
+  const profile = context.profiles?.find((candidate) => candidate.id === id);
+  if (!profile) {
+    return null;
+  }
+  if ((profile.role ?? '').toLowerCase() === 'office') {
+    return 'Office (shared account)';
+  }
+  return truncateAuditText(profileName(profile));
+}
+
+function isRowIdKey(key: string): boolean {
+  return ['rowid', 'entryid', 'recordid'].includes(normalizedAuditKey(key));
+}
+
+function isColumnIdKey(key: string): boolean {
+  return normalizedAuditKey(key) === 'columnid';
+}
+
+function isUserIdKey(key: string): boolean {
+  return [
+    'userid',
+    'actorid',
+    'actor',
+    'decidedby',
+    'createdby',
+    'updatedby',
+    'deletedby',
+    'renewedby',
+  ].includes(normalizedAuditKey(key));
+}
+
+function formatAuditValue(key: string, value: unknown, context: AuditDisplayContext): string {
+  if (value === MISSING_AUDIT_VALUE || value === null || value === undefined || value === '') {
     return '—';
   }
-  if (typeof details === 'string') {
-    return details;
+  if (SENSITIVE_AUDIT_KEY.test(key)) {
+    return 'Hidden';
   }
-  if (typeof details === 'object' && !Array.isArray(details)) {
-    const record = details as Record<string, unknown>;
-    const parts = Object.entries(record)
-      .filter(([, value]) => value !== undefined)
-      .map(([key, value]) => {
-        const label = key.replace(/_/g, ' ');
-        const shown = value === null || value === ''
-          ? '—'
-          : typeof value === 'object' && value !== null
-            ? ((value as { data?: unknown }).data && typeof (value as { data?: unknown }).data === 'object'
-              ? JSON.stringify(((value as { data?: unknown }).data as Record<string, unknown>))
-              : JSON.stringify(value))
-            : String(value);
-        return `${label}: ${shown}`;
-      });
-    return parts.join(' · ');
+  if (typeof value === 'boolean') {
+    if (normalizedAuditKey(key) === 'deleted') {
+      return value ? 'In Recycle Bin' : 'Active';
+    }
+    return value ? 'Yes' : 'No';
   }
-  return String(details);
+  if (typeof value === 'number' || typeof value === 'bigint') {
+    return String(value);
+  }
+  if (Array.isArray(value)) {
+    if (value.length === 0) {
+      return 'None';
+    }
+    const itemKey = normalizedAuditKey(key) === 'order' ? 'columnId' : key;
+    const shown = value.slice(0, 4).map((item) => formatAuditValue(itemKey, item, context));
+    if (value.length > shown.length) {
+      shown.push(`${value.length - shown.length} more`);
+    }
+    return truncateAuditText(shown.join(', '));
+  }
+  if (isAuditRecord(value)) {
+    if ('old' in value || 'new' in value) {
+      const oldValue = 'old' in value ? value.old : MISSING_AUDIT_VALUE;
+      const newValue = 'new' in value ? value.new : MISSING_AUDIT_VALUE;
+      return `${formatAuditValue(key, oldValue, context)} → ${formatAuditValue(key, newValue, context)}`;
+    }
+    const count = Object.entries(value).filter(([entryKey, entryValue]) => (
+      entryValue !== undefined && !SNAPSHOT_OMITTED_KEYS.has(entryKey)
+    )).length;
+    return count === 0 ? '—' : count === 1 ? '1 detail recorded' : `${count} details recorded`;
+  }
+  if (typeof value === 'string') {
+    const text = value.trim();
+    if (!text) {
+      return '—';
+    }
+    if (isRowIdKey(key)) {
+      return resolveAuditRow(text, context) ?? 'Record no longer available';
+    }
+    if (isColumnIdKey(key)) {
+      return resolveAuditColumn(text, context) ?? 'Column no longer available';
+    }
+    if (isUserIdKey(key) && isUuid(text)) {
+      return resolveAuditProfile(text, context) ?? 'User no longer available';
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+      return formatDisplayDate(text);
+    }
+    if (/^\d{4}-\d{2}-\d{2}T/.test(text)) {
+      return formatLocalDateTime(text);
+    }
+    if (isUuid(text)) {
+      const resolved = resolveAuditRow(text, context)
+        ?? resolveAuditColumn(text, context)
+        ?? resolveAuditProfile(text, context);
+      if (resolved) {
+        return resolved;
+      }
+      return normalizedAuditKey(key).endsWith('id')
+        ? 'Linked item no longer available'
+        : 'Unavailable';
+    }
+    return truncateAuditText(text);
+  }
+  return truncateAuditText(String(value));
+}
+
+function stableAuditValue(value: unknown, seen = new WeakSet<object>()): string {
+  if (Array.isArray(value)) {
+    if (seen.has(value)) {
+      return '"[circular]"';
+    }
+    seen.add(value);
+    const result = `[${value.map((item) => stableAuditValue(item, seen)).join(',')}]`;
+    seen.delete(value);
+    return result;
+  }
+  if (isAuditRecord(value)) {
+    if (seen.has(value)) {
+      return '"[circular]"';
+    }
+    seen.add(value);
+    const result = `{${Object.keys(value).sort().map((key) => (
+      `${JSON.stringify(key)}:${stableAuditValue(value[key], seen)}`
+    )).join(',')}}`;
+    seen.delete(value);
+    return result;
+  }
+  return JSON.stringify(value) ?? String(value);
+}
+
+function sameAuditValue(left: unknown, right: unknown): boolean {
+  return Object.is(left, right) || stableAuditValue(left) === stableAuditValue(right);
+}
+
+function snapshotFields(snapshot: unknown): Map<string, unknown> {
+  const fields = new Map<string, unknown>();
+  if (!isAuditRecord(snapshot)) {
+    return fields;
+  }
+  const add = (key: string, value: unknown) => {
+    if (value !== undefined && !SNAPSHOT_OMITTED_KEYS.has(key)) {
+      fields.set(key, value);
+    }
+  };
+  if (isAuditRecord(snapshot.data)) {
+    Object.entries(snapshot.data).forEach(([key, value]) => add(key, value));
+  }
+  Object.entries(snapshot).forEach(([key, value]) => {
+    if (key !== 'data') {
+      add(key, value);
+    }
+  });
+  return fields;
+}
+
+function diffAuditSnapshots(
+  before: unknown,
+  after: unknown,
+  context: AuditDisplayContext,
+): AuditFieldLine[] {
+  const beforeFields = snapshotFields(before);
+  const afterFields = snapshotFields(after);
+  const keys: string[] = [];
+  const addKey = (key: string) => {
+    if (!keys.includes(key)) {
+      keys.push(key);
+    }
+  };
+
+  context.columns?.forEach((column) => {
+    if (beforeFields.has(column.id) || afterFields.has(column.id)) {
+      addKey(column.id);
+    } else if (beforeFields.has(column.name) || afterFields.has(column.name)) {
+      addKey(column.name);
+    }
+  });
+  beforeFields.forEach((_value, key) => addKey(key));
+  afterFields.forEach((_value, key) => addKey(key));
+
+  const lines: AuditFieldLine[] = [];
+  keys.forEach((key) => {
+    const hasBefore = beforeFields.has(key);
+    const hasAfter = afterFields.has(key);
+    const beforeValue = hasBefore ? beforeFields.get(key) : MISSING_AUDIT_VALUE;
+    const afterValue = hasAfter ? afterFields.get(key) : MISSING_AUDIT_VALUE;
+    if (hasBefore && hasAfter && sameAuditValue(beforeValue, afterValue)) {
+      return;
+    }
+    lines.push({
+      field: auditFieldLabel(key, context),
+      text: `${formatAuditValue(key, beforeValue, context)} → ${formatAuditValue(key, afterValue, context)}`,
+    });
+  });
+  return lines;
+}
+
+function genericAuditFieldLines(
+  record: Record<string, unknown>,
+  context: AuditDisplayContext,
+  prefix = '',
+  depth = 0,
+): AuditFieldLine[] {
+  const lines: AuditFieldLine[] = [];
+  Object.entries(record).forEach(([key, value]) => {
+    if (value === undefined || key === 'table') {
+      return;
+    }
+    if (key === 'data' && isAuditRecord(value)) {
+      lines.push(...genericAuditFieldLines(value, context, prefix, depth + 1));
+      return;
+    }
+
+    const ownLabel = auditFieldLabel(key, context);
+    const field = prefix ? `${prefix} · ${ownLabel}` : ownLabel;
+
+    if (isAuditRecord(value) && ('old' in value || 'new' in value)) {
+      lines.push({ field, text: formatAuditValue(key, value, context) });
+      return;
+    }
+    if (isAuditRecord(value) && ('before' in value || 'after' in value)) {
+      const diff = diffAuditSnapshots(value.before, value.after, context);
+      if (diff.length > 0) {
+        if (normalizedAuditKey(key) === 'snapshot') {
+          lines.push(...diff);
+        } else {
+          lines.push(...diff.map((line) => ({ field: `${field} · ${line.field}`, text: line.text })));
+        }
+      } else {
+        lines.push({ field, text: 'No field changes recorded.' });
+      }
+      return;
+    }
+    if (isAuditRecord(value)) {
+      if (depth >= 2) {
+        lines.push({ field, text: formatAuditValue(key, value, context) });
+        return;
+      }
+      const nested = genericAuditFieldLines(value, context, field, depth + 1);
+      if (nested.length > 0) {
+        lines.push(...nested);
+      } else {
+        lines.push({ field, text: '—' });
+      }
+      return;
+    }
+
+    lines.push({ field, text: formatAuditValue(key, value, context) });
+  });
+  return lines;
+}
+
+function snapshotRecordData(snapshot: unknown): Record<string, unknown> | null {
+  if (!isAuditRecord(snapshot)) {
+    return null;
+  }
+  return isAuditRecord(snapshot.data) ? snapshot.data : snapshot;
+}
+
+function entityAuditFieldLine(
+  details: unknown,
+  context: AuditDisplayContext,
+): AuditFieldLine | null {
+  if (!context.entityId) {
+    return null;
+  }
+  const entityId = context.entityId;
+  const type = (context.entityType ?? '').toLowerCase();
+  const detailsRecord = isAuditRecord(details) ? details : null;
+  const before = detailsRecord?.before;
+  const after = detailsRecord?.after;
+
+  if (type.includes('column')) {
+    const snapshotName = [after, before].find((snapshot) => (
+      isAuditRecord(snapshot) && typeof snapshot.name === 'string' && snapshot.name.trim()
+    ));
+    const label = resolveAuditColumn(entityId, context)
+      ?? (isAuditRecord(snapshotName) ? truncateAuditText(String(snapshotName.name)) : null);
+    return { field: 'Column', text: label ?? 'Column no longer available' };
+  }
+
+  if (type.includes('entry') || type.includes('record') || type.includes('row')) {
+    const resolved = resolveAuditRow(entityId, context);
+    if (resolved) {
+      return { field: 'Record', text: resolved };
+    }
+    const snapshotData = snapshotRecordData(after) ?? snapshotRecordData(before);
+    if (snapshotData) {
+      const label = rowDisplayLabel({ id: entityId, data: snapshotData }, context.columns ?? []);
+      if (label !== 'Unnamed record') {
+        return { field: 'Record', text: truncateAuditText(label) };
+      }
+    }
+    return { field: 'Record', text: 'Record no longer available' };
+  }
+
+  const rowLabel = resolveAuditRow(entityId, context);
+  if (rowLabel) {
+    return { field: 'Record', text: rowLabel };
+  }
+  const columnLabel = resolveAuditColumn(entityId, context);
+  return columnLabel ? { field: 'Column', text: columnLabel } : null;
 }
 
 /**
- * FIXES_UI §8 (AUDIT-04): render a details payload as `field: old → new`
- * lines. Fields are resolved from the event metadata — values that carry an
- * explicit `{ old, new }` pair are shown as a transition; everything else is
- * shown as a plain value. We never invent historical column names: keys are
- * rendered as-is (with `_` replaced by spaces) and unknown/raw ids are kept
- * literal rather than mapped to a made-up label.
+ * Render an audit payload as readable field lines. Real `{ before, after }`
+ * snapshots are diffed field by field; other payloads are flattened without
+ * ever falling back to JSON in the normal user view.
  */
 export function formatAuditFieldLines(
   details: unknown,
-): Array<{ field: string; text: string }> {
-  if (!details || typeof details !== 'object' || Array.isArray(details)) {
+  context: AuditDisplayContext = {},
+): AuditFieldLine[] {
+  if (details === null || details === undefined || details === '') {
     return [];
   }
-  const show = (value: unknown): string => {
-    if (value === null || value === undefined || value === '') {
-      return '—';
+  if (!isAuditRecord(details)) {
+    return [{ field: 'Details', text: formatAuditValue('details', details, context) }];
+  }
+
+  let lines: AuditFieldLine[];
+  if ('before' in details || 'after' in details) {
+    const { before, after, ...rest } = details;
+    lines = [
+      ...genericAuditFieldLines(rest, context),
+      ...diffAuditSnapshots(before, after, context),
+    ];
+    if (lines.length === 0) {
+      lines = [{ field: 'Changes', text: 'No field changes recorded.' }];
     }
-    if (typeof value === 'object') {
-      try {
-        return JSON.stringify(value);
-      } catch {
-        return String(value);
-      }
+  } else if (isAuditRecord(details.snapshot) && ('before' in details.snapshot || 'after' in details.snapshot)) {
+    const { snapshot, ...rest } = details;
+    lines = [
+      ...genericAuditFieldLines(rest, context),
+      ...diffAuditSnapshots(snapshot.before, snapshot.after, context),
+    ];
+    if (lines.length === 0) {
+      lines = [{ field: 'Changes', text: 'No field changes recorded.' }];
     }
-    return String(value);
-  };
-  return Object.entries(details as Record<string, unknown>).map(([key, value]) => {
-    const field = key.replace(/_/g, ' ');
-    if (
-      value &&
-      typeof value === 'object' &&
-      !Array.isArray(value) &&
-      ('old' in value || 'new' in value)
-    ) {
-      const pair = value as { old?: unknown; new?: unknown };
-      return { field, text: `${show(pair.old)} → ${show(pair.new)}` };
-    }
-    return { field, text: show(value) };
-  });
+  } else {
+    lines = genericAuditFieldLines(details, context);
+  }
+
+  const entityLine = entityAuditFieldLine(details, context);
+  if (entityLine && !lines.some((line) => line.field === entityLine.field)) {
+    lines = [entityLine, ...lines];
+  }
+  return lines;
+}
+
+/** Short human summary of an audit details payload (S3). */
+export function summarizeAuditDetails(
+  details: unknown,
+  context: AuditDisplayContext = {},
+): string {
+  if (details === null || details === undefined || details === '') {
+    return 'No details recorded.';
+  }
+  const lines = formatAuditFieldLines(details, context);
+  if (lines.length === 0) {
+    return 'No details recorded.';
+  }
+  const parts = lines.slice(0, 3).map((line) => `${line.field}: ${line.text}`);
+  if (lines.length > 3) {
+    parts.push(`+${lines.length - 3} more`);
+  }
+  return truncateAuditText(parts.join(' · '), 320);
 }
 
 /**
@@ -212,7 +627,7 @@ export function sanitizeAuditDetails(value: unknown): unknown {
   if (value && typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [key, inner] of Object.entries(value as Record<string, unknown>)) {
-      out[key] = /token|password|passwd|secret|api[-_]?key|authorization|credential|private[-_]?key/i.test(key)
+      out[key] = SENSITIVE_AUDIT_KEY.test(key)
         ? '•••'
         : sanitizeAuditDetails(inner);
     }
@@ -226,6 +641,9 @@ export interface AuditLogPageProps {
   role?: Role | string | null;
   /** Profile rows used to resolve audit actors (S3). */
   profiles?: readonly AuditProfile[];
+  /** Current columns/rows used only to label fields and linked records. */
+  columns?: readonly ColumnDefinition[];
+  rows?: readonly SheetRow[];
 }
 
 interface LabelledEntry {
@@ -235,7 +653,13 @@ interface LabelledEntry {
   timeLabel: string;
 }
 
-export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps) {
+export function AuditLogPage({
+  entries,
+  role,
+  profiles = [],
+  columns = [],
+  rows = [],
+}: AuditLogPageProps) {
   const [actionFilter, setActionFilter] = useState('');
   const [actorFilter, setActorFilter] = useState('');
   const [fromDate, setFromDate] = useState('');
@@ -256,6 +680,14 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
     () => (selectedId ? (labelled.find((item) => rowKey(item.entry) === selectedId) ?? null) : null),
     [labelled, selectedId],
   );
+
+  const displayContextFor = (entry: AuditEntry): AuditDisplayContext => ({
+    profiles,
+    columns,
+    rows,
+    entityType: entry.entityType,
+    entityId: entry.entityId,
+  });
 
   const actionOptions = useMemo(
     () => Array.from(new Set(labelled.map((item) => item.actionLabel))).sort(),
@@ -296,7 +728,7 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
   }
 
   const selectedFieldLines = selected
-    ? formatAuditFieldLines(selected.entry.details)
+    ? formatAuditFieldLines(selected.entry.details, displayContextFor(selected.entry))
     : [];
 
   return (
@@ -356,22 +788,17 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
                   >
                     View
                   </button>
-                  <span>{summarizeAuditDetails(entry.details)}</span>
-                  {entry.details && typeof entry.details === 'object' ? (
-                    <details>
-                      <summary>Show raw JSON</summary>
-                      <pre>{formatAuditDetails(entry.details)}</pre>
-                    </details>
-                  ) : null}
+                  <span className="audit-log-summary">
+                    {summarizeAuditDetails(entry.details, displayContextFor(entry))}
+                  </span>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       )}
-      {/* FIXES_UI §8 (AUDIT-04): details side panel on event click. Shows
-          "field: old → new" transitions from the event metadata (never invented
-          names), plus an optional sanitised raw view. */}
+      {/* Details side panel: readable field transitions first, with one
+          collapsed, sanitized technical view for administrators. */}
       {selected ? (
         <aside className="audit-log-details" aria-label="Event details">
           <div className="audit-log-details__header">
@@ -392,8 +819,8 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
             {(selectedFieldLines.length > 0
               ? selectedFieldLines
               : [{ field: 'Details', text: selected.entry.details === null || selected.entry.details === undefined || selected.entry.details === '' ? 'No details recorded.' : String(selected.entry.details) }]
-            ).map((line) => (
-              <li key={line.field}>
+            ).map((line, index) => (
+              <li key={`${line.field}-${index}`}>
                 <span className="audit-log-details__field">{line.field}</span>
                 <span className="audit-log-details__value">{line.text}</span>
               </li>
@@ -401,7 +828,7 @@ export function AuditLogPage({ entries, role, profiles = [] }: AuditLogPageProps
           </ul>
           {selected.entry.details && typeof selected.entry.details === 'object' ? (
             <details className="audit-log-details__raw">
-              <summary>View raw</summary>
+              <summary>Technical details</summary>
               <pre>{JSON.stringify(sanitizeAuditDetails(selected.entry.details), null, 2)}</pre>
             </details>
           ) : null}

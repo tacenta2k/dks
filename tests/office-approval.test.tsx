@@ -87,12 +87,15 @@ function makeFakeApprovalService(seed: {
   requestError?: { message: string };
   myError?: { message: string };
   listError?: { message: string };
+  signOutSummary?: { officeUsers: number; authSessionsDeleted: number; requestsRevoked: number };
+  signOutError?: { message: string };
 }) {
   const calls = {
     requestApproval: 0,
     fetchMyRequest: 0,
     decideRequest: [] as Array<{ id: string; decision: string }>,
     revokeRequest: [] as string[],
+    signOutAllOfficeSessions: 0,
   };
   const service: OfficeApprovalService = {
     requestApproval: vi.fn(async () => {
@@ -136,6 +139,16 @@ function makeFakeApprovalService(seed: {
           ...(row ?? makeRequest({ id: requestId })),
           status: 'revoked' as OfficeSigninRequest['status'],
         },
+        error: null,
+      };
+    }),
+    signOutAllOfficeSessions: vi.fn(async () => {
+      calls.signOutAllOfficeSessions += 1;
+      if (seed.signOutError) {
+        return { data: null, error: { message: seed.signOutError.message } };
+      }
+      return {
+        data: seed.signOutSummary ?? { officeUsers: 1, authSessionsDeleted: 2, requestsRevoked: 2 },
         error: null,
       };
     }),
@@ -286,6 +299,47 @@ describe('office approval service round-trips', () => {
     expect(revoked.data?.status).toBe('revoked');
     expect(client.rpcCalls[1]).toEqual({ name: 'revoke_office_signin', params: { p_request_id: 'req-1' } });
   });
+
+  it('calls the bulk Office sign-out RPC and maps its summary', async () => {
+    const client = makeRpcClient([], (name) => {
+      if (name === 'sign_out_all_office_sessions') {
+        return {
+          data: [{
+            office_users: 1,
+            auth_sessions_deleted: 3,
+            requests_revoked: 2,
+          }],
+          error: null,
+        };
+      }
+      return { data: null, error: null };
+    });
+    const service = createOfficeApprovalService(client)!;
+
+    const result = await service.signOutAllOfficeSessions();
+
+    expect(result).toEqual({
+      data: { officeUsers: 1, authSessionsDeleted: 3, requestsRevoked: 2 },
+      error: null,
+    });
+    expect(client.rpcCalls).toEqual([
+      { name: 'sign_out_all_office_sessions', params: undefined },
+    ]);
+  });
+
+  it('does not fake bulk sign-out success when the RPC returns an error', async () => {
+    const client = makeRpcClient([], () => ({
+      data: null,
+      error: { message: 'Only administrators may sign out Office sessions', code: '42501' } as never,
+    }));
+    const service = createOfficeApprovalService(client)!;
+
+    const result = await service.signOutAllOfficeSessions();
+
+    expect(result.data).toBeNull();
+    expect(result.error?.message).toContain('Only administrators');
+    expect(result.error?.code).toBe('42501');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -304,6 +358,36 @@ describe('store-level approval flow', () => {
     expect(store.getState().sessionApproval).toBe('not-required');
     expect(calls.requestApproval).toBe(0);
     expect(calls.fetchMyRequest).toBe(0);
+  });
+
+  it('allows only an administrator store session to call bulk Office sign-out', async () => {
+    const adminAuthService = new AuthService(makeAuthClient({ id: 'user-admin', role: 'admin' }));
+    const adminFake = makeFakeApprovalService({
+      signOutSummary: { officeUsers: 1, authSessionsDeleted: 4, requestsRevoked: 3 },
+    });
+    const adminStore = createAppStore(adminAuthService, adminFake.service);
+    await adminStore.getState().signIn('admin@example.com', 'password');
+
+    const adminResult = await adminStore.getState().signOutAllOfficeSessions();
+    expect(adminResult).toEqual({
+      data: { officeUsers: 1, authSessionsDeleted: 4, requestsRevoked: 3 },
+      error: null,
+    });
+    expect(adminFake.calls.signOutAllOfficeSessions).toBe(1);
+    // The bulk action does not sign out or otherwise disturb the admin.
+    expect(adminStore.getState().authStatus).toBe('authenticated');
+    expect(adminStore.getState().profile?.role).toBe('admin');
+
+    const officeAuthService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const officeFake = makeFakeApprovalService({ my: makeRequest({ status: 'approved' }) });
+    const officeStore = createAppStore(officeAuthService, officeFake.service);
+    await officeStore.getState().signIn('office@example.com', 'password');
+    await waitFor(() => expect(officeStore.getState().sessionApproval).toBe('approved'));
+
+    const officeResult = await officeStore.getState().signOutAllOfficeSessions();
+    expect(officeResult.data).toBeNull();
+    expect(officeResult.error?.code).toBe('NOT_AUTHORIZED');
+    expect(officeFake.calls.signOutAllOfficeSessions).toBe(0);
   });
 
   it('Office password sign-in submits an approval request and lands pending', async () => {
@@ -418,6 +502,10 @@ describe('session-specific approval (shared Office email)', () => {
       })),
       revokeRequest: vi.fn(async (id: string) => ({
         data: { ...makeRequest({ id }), status: 'revoked' as OfficeSigninRequest['status'] },
+        error: null,
+      })),
+      signOutAllOfficeSessions: vi.fn(async () => ({
+        data: { officeUsers: 1, authSessionsDeleted: 0, requestsRevoked: 0 },
         error: null,
       })),
     };

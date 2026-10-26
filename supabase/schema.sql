@@ -888,6 +888,82 @@ begin
 end;
 $$;
 
+-- Admin: sign out every Office Auth session and revoke every live Office
+-- approval. The acting administrator is not an Office profile and is
+-- therefore untouched. Deleting auth.sessions prevents refresh-token use;
+-- revoking the approval rows also makes any not-yet-expired access token
+-- fail DKS's session-bound RLS immediately.
+create or replace function public.sign_out_all_office_sessions()
+returns table (
+  office_users bigint,
+  auth_sessions_deleted bigint,
+  requests_revoked bigint
+)
+language plpgsql
+security definer
+set search_path = public, auth
+as $$
+declare
+  v_actor uuid := auth.uid();
+  v_office_users bigint := 0;
+  v_refresh_tokens_deleted bigint := 0;
+  v_auth_sessions_deleted bigint := 0;
+  v_requests_revoked bigint := 0;
+begin
+  if v_actor is null or not public.is_admin() then
+    raise exception 'Only administrators may sign out Office sessions'
+      using errcode = '42501';
+  end if;
+
+  select count(*) into v_office_users
+    from public.profiles
+   where role = 'office';
+
+  update public.office_signin_requests r
+     set status = 'revoked',
+         decided_at = now(),
+         decided_by = v_actor,
+         updated_at = now()
+   where r.status in ('pending', 'approved')
+     and exists (
+       select 1
+         from public.profiles p
+        where p.id = r.user_id
+          and p.role = 'office'
+     );
+  get diagnostics v_requests_revoked = row_count;
+
+  delete from auth.refresh_tokens rt
+   using auth.sessions s, public.profiles p
+   where rt.session_id = s.id
+     and s.user_id = p.id
+     and p.role = 'office';
+  get diagnostics v_refresh_tokens_deleted = row_count;
+
+  delete from auth.sessions s
+   using public.profiles p
+   where s.user_id = p.id
+     and p.role = 'office';
+  get diagnostics v_auth_sessions_deleted = row_count;
+
+  insert into public.audit_log (actor, entry_id, action, snapshot, details)
+  values (
+    v_actor,
+    null,
+    'office_sessions_signed_out',
+    '{}'::jsonb,
+    jsonb_build_object(
+      'office_users', v_office_users,
+      'auth_sessions_deleted', v_auth_sessions_deleted,
+      'refresh_tokens_deleted', v_refresh_tokens_deleted,
+      'requests_revoked', v_requests_revoked
+    )
+  );
+
+  return query select v_office_users, v_auth_sessions_deleted, v_requests_revoked;
+end;
+$$;
+
 -- Admin notification on every new pending request (shared Office account —
 -- the message never identifies an individual staff member).
 create or replace function public.office_signin_request_notify_admin()
@@ -1141,6 +1217,7 @@ grant execute on function public.request_office_signin() to authenticated;
 grant execute on function public.my_office_signin() to authenticated;
 grant execute on function public.decide_office_signin(uuid, text) to authenticated;
 grant execute on function public.revoke_office_signin(uuid) to authenticated;
+grant execute on function public.sign_out_all_office_sessions() to authenticated;
 
 -- Profiles are readable by the signed-in user, while only administrators may
 -- create, change, or remove profiles (and therefore roles).

@@ -118,7 +118,7 @@ describe('top-bar update-ready pill', () => {
     fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
 
     expect(
-      await screen.findByText('Update 0.1.1 is ready to install. Your records stay on this device.'),
+      await screen.findByText('Update 0.1.1 is ready to install.'),
     ).toBeInTheDocument();
     expect(onStatus).not.toHaveBeenCalled();
     await waitFor(() => expect(onUpdateStateChange).toHaveBeenCalledWith(ready));

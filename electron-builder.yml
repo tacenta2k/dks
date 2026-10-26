@@ -48,7 +48,10 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
+  # Keep userData (including dks-cache.sqlite); build/installer.nsh removes
+  # only Chromium Local/Session Storage on a real uninstall, never on update.
   deleteAppDataOnUninstall: false
+  include: build/installer.nsh
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: DKS

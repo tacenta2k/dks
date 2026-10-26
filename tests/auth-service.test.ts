@@ -103,9 +103,21 @@ describe('AuthService', () => {
     const result = await service.signIn('admin@example.com', 'password');
 
     expect(fake.signOut).toHaveBeenCalledOnce();
+    expect(fake.signOut).toHaveBeenCalledWith({ scope: 'local' });
     expect(result.data).toBeNull();
     expect(result.error?.message).toBe('Not authorized');
     expect(result.error?.code).toBe('NOT_AUTHORIZED');
+  });
+
+  it('uses Supabase local-scope sign-out for an explicit sign-out on this device', async () => {
+    const fake = makeClient();
+    const service = new AuthService(fake.client);
+
+    const result = await service.signOut();
+
+    expect(result).toEqual({ data: null, error: null });
+    expect(fake.signOut).toHaveBeenCalledTimes(1);
+    expect(fake.signOut).toHaveBeenCalledWith({ scope: 'local' });
   });
 
   it('forwards auth state changes to subscribers and allows unsubscribe', async () => {

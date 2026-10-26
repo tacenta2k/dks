@@ -281,6 +281,7 @@ describe('Office sign-in approval — schema mirror', () => {
       'my_office_signin',
       'decide_office_signin',
       'revoke_office_signin',
+      'sign_out_all_office_sessions',
       'office_signin_request_notify_admin',
     ]) {
       expect(sql).toContain(`function public.${fn}`);
@@ -291,6 +292,57 @@ describe('Office sign-in approval — schema mirror', () => {
     expect(sql).toContain('create policy office_signin_requests_select_own_or_admin');
     expect(sql).toContain('revoke insert, update, delete on public.office_signin_requests from authenticated');
     expect(sql).toContain('grant execute on function public.decide_office_signin(uuid, text) to authenticated');
+  });
+
+  it('bulk Office sign-out is admin-guarded, Office-only, audited, and grant-safe', () => {
+    const sources: Array<[string, string]> = [
+      ['schema.sql', schemaSource()],
+      ['sign-out-all-office-sessions.sql', arenaSql('sign-out-all-office-sessions.sql')],
+    ];
+
+    for (const [, sql] of sources) {
+      const start = sql.indexOf('function public.sign_out_all_office_sessions');
+      expect(start).toBeGreaterThanOrEqual(0);
+      const body = sql.slice(start, sql.indexOf('$$;', start) + 3);
+
+      // Backend authorization is the real boundary: SECURITY DEFINER plus an
+      // in-function administrator check that raises 42501 for anyone else.
+      expect(body).toContain('security definer');
+      expect(body).toContain('set search_path = public, auth');
+      expect(body).toMatch(/v_actor is null or not public\.is_admin\(\)/);
+      expect(body).toContain("using errcode = '42501'");
+
+      // Only Office profiles are touched: live approvals revoked, then their
+      // refresh tokens and Auth sessions deleted. The acting admin (role
+      // 'admin') is never in scope, and business tables are never deleted.
+      expect(body).toMatch(/r\.status in \('pending', 'approved'\)/);
+      expect(body).toMatch(/set status = 'revoked'/);
+      expect(body).toContain('delete from auth.refresh_tokens');
+      expect(body).toContain('delete from auth.sessions');
+      expect(body).toMatch(/p\.role = 'office'/);
+      expect(body).not.toContain('delete from public.entries');
+      expect(body).not.toContain('delete from public.profiles');
+      expect(body).not.toContain('delete from public.app_columns');
+
+      // One audit event records the action and its counts.
+      expect(body).toContain('insert into public.audit_log');
+      expect(body).toContain("'office_sessions_signed_out'");
+      expect(body).toContain("'auth_sessions_deleted'");
+      expect(body).toContain("'requests_revoked'");
+
+      expect(sql).toContain(
+        'grant execute on function public.sign_out_all_office_sessions() to authenticated',
+      );
+    }
+
+    // The existing-deployment migration additionally strips PUBLIC/anon.
+    const migration = arenaSql('sign-out-all-office-sessions.sql');
+    expect(migration).toContain(
+      'revoke all on function public.sign_out_all_office_sessions() from public',
+    );
+    expect(migration).toContain(
+      'revoke all on function public.sign_out_all_office_sessions() from anon',
+    );
   });
 
   it('gates every Office RLS clause and office-callable RPC on the approved session', () => {

@@ -190,6 +190,8 @@ function auditEntry(value: DksLocalAuditRecord): SheetAuditEntry {
   return {
     id: String(source.id ?? ''),
     action: typeof source.action === 'string' ? source.action : 'unknown',
+    entityType: typeof source.entityType === 'string' ? source.entityType : null,
+    entityId: typeof source.entityId === 'string' ? source.entityId : null,
     actorId,
     actor: typeof actor === 'string' ? actor : null,
     ...(timestamp ? { timestamp, createdAt: timestamp } : {}),

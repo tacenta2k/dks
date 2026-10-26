@@ -2,7 +2,14 @@ import { fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { describe, expect, it } from 'vitest';
 
-import { AuditLogPage, entryActor, formatAuditAction, formatAuditTime } from '../src/features/audit/AuditLogPage';
+import {
+  AuditLogPage,
+  entryActor,
+  formatAuditAction,
+  formatAuditFieldLines,
+  formatAuditTime,
+  summarizeAuditDetails,
+} from '../src/features/audit/AuditLogPage';
 import type { AuditEntry } from '../src/features/audit/audit-types';
 
 const entries: AuditEntry[] = [
@@ -61,9 +68,58 @@ describe('audit log page', () => {
     const time = table.getAllByText(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/);
     expect(time.length).toBeGreaterThanOrEqual(3);
     expect(table.queryByText('2026-01-01T12:00:00.000Z')).not.toBeInTheDocument();
-    // Readable details with raw JSON on demand.
+    // Readable details in the table; raw JSON is not part of the normal view.
     expect(table.getAllByText(/rows\.csv/).length).toBeGreaterThan(0);
-    expect(table.getAllByText('Show raw JSON').length).toBeGreaterThanOrEqual(1);
+    expect(table.queryByText('Show raw JSON')).not.toBeInTheDocument();
+    expect(table.queryByText(/"rowId"/)).not.toBeInTheDocument();
+    expect(table.queryByText(/"importedRows"/)).not.toBeInTheDocument();
+    // The import event reads as labelled fields, not a JSON blob.
+    expect(table.getByText(/Imported records: 4/)).toBeInTheDocument();
+    // An unresolved record id falls back to words, never the raw value.
+    expect(table.getAllByText(/Record: Record no longer available/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('shows field-level changes in the details panel with technical details collapsed', () => {
+    const changed: AuditEntry[] = [{
+      id: 'audit-change',
+      action: 'update_entry',
+      actor: 'Admin User',
+      timestamp: '2026-01-05T10:00:00.000Z',
+      entityType: 'entry',
+      entityId: 'row-9',
+      details: {
+        before: { data: { name: 'Old Name', status: 'Pending' }, category: 'Employee', deleted: false },
+        after: { data: { name: 'New Name', status: 'Approved' }, category: 'Employee', deleted: false },
+      },
+    }];
+    render(
+      <AuditLogPage
+        role="admin"
+        entries={changed}
+        columns={[
+          { id: 'name', name: 'Full Name', type: 'text' },
+          { id: 'status', name: 'Status', type: 'text' },
+        ]}
+        rows={[{ id: 'row-9', data: { name: 'New Name' } }]}
+      />,
+    );
+
+    const table = within(screen.getByRole('table'));
+    // Table summary is the readable diff, with the record resolved by name.
+    expect(table.getByText(/Record: New Name/)).toBeInTheDocument();
+    expect(table.getByText(/Status: Pending → Approved/)).toBeInTheDocument();
+    expect(table.queryByText('Show raw JSON')).not.toBeInTheDocument();
+
+    fireEvent.click(table.getByRole('button', { name: 'View' }));
+    const panel = screen.getByLabelText('Event details');
+    expect(within(panel).getByText('Full Name')).toBeInTheDocument();
+    expect(within(panel).getByText('Old Name → New Name')).toBeInTheDocument();
+    expect(within(panel).getByText('Pending → Approved')).toBeInTheDocument();
+    // Unchanged fields are omitted from the diff.
+    expect(within(panel).queryByText('Category')).not.toBeInTheDocument();
+    // Sanitized technical JSON exists only here, collapsed, for admins.
+    const technical = within(panel).getByText('Technical details');
+    expect(technical.closest('details')).not.toHaveAttribute('open');
   });
 
   it('filters by action, actor, and date range (S3)', () => {
@@ -110,6 +166,80 @@ describe('audit log page', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent(/administrator/i);
     expect(screen.queryByRole('heading', { name: 'Audit log' })).not.toBeInTheDocument();
+  });
+
+  it('diffs real before/after snapshots into readable field transitions', () => {
+    const columns = [
+      { id: 'name', name: 'Full Name', type: 'text' as const },
+      { id: 'visa_expiry', name: 'Visa Expiry', type: 'date_expiry' as const },
+      { id: 'notes', name: 'Notes', type: 'notes' as const },
+    ];
+    const lines = formatAuditFieldLines({
+      before: {
+        data: { name: 'Ada Lovelace', visa_expiry: '2026-01-01', notes: 'Old note' },
+        category: 'Employee',
+        deleted: false,
+      },
+      after: {
+        data: { name: 'Ada Lovelace', visa_expiry: '2027-01-01' },
+        category: 'Employee',
+        deleted: true,
+      },
+    }, { columns });
+
+    // Dates display DD/MM/YYYY; a removed field ends at —; the deleted flag
+    // reads as a record state; unchanged name/category are omitted.
+    expect(lines).toEqual([
+      { field: 'Visa Expiry', text: '01/01/2026 → 01/01/2027' },
+      { field: 'Notes', text: 'Old note → —' },
+      { field: 'Record state', text: 'Active → In Recycle Bin' },
+    ]);
+  });
+
+  it('shows added fields from a null before snapshot and resolves column order ids', () => {
+    const created = formatAuditFieldLines({
+      before: null,
+      after: { name: 'Passport No', type: 'text' },
+    });
+    expect(created).toEqual([
+      { field: 'Name', text: '— → Passport No' },
+      { field: 'Type', text: '— → text' },
+    ]);
+
+    const reordered = formatAuditFieldLines({
+      before: { order: ['name', 'visa_expiry'] },
+      after: { order: ['visa_expiry', 'name'] },
+    }, {
+      columns: [
+        { id: 'name', name: 'Full Name', type: 'text' },
+        { id: 'visa_expiry', name: 'Visa Expiry', type: 'date_expiry' },
+      ],
+    });
+    expect(reordered).toEqual([
+      { field: 'Column order', text: 'Full Name, Visa Expiry → Visa Expiry, Full Name' },
+    ]);
+  });
+
+  it('summarizes without JSON, truncates long values, and hides sensitive fields', () => {
+    const summary = summarizeAuditDetails({
+      message: 'x'.repeat(400),
+      accessToken: 'should-never-appear',
+      nested: { inner: { deep: 'value' } },
+    });
+    expect(summary).not.toContain('{');
+    expect(summary).not.toContain('should-never-appear');
+    expect(summary.length).toBeLessThanOrEqual(320);
+    expect(summary).toContain('Hidden');
+
+    const lines = formatAuditFieldLines({ notes: 'y'.repeat(300) });
+    expect(lines[0].text.length).toBeLessThanOrEqual(120);
+    expect(lines[0].text.endsWith('…')).toBe(true);
+
+    expect(summarizeAuditDetails(null)).toBe('No details recorded.');
+    expect(summarizeAuditDetails({
+      before: { data: { a: '1', b: '2', c: '3', d: '4' } },
+      after: { data: { a: '9', b: '8', c: '7', d: '6' } },
+    })).toContain('+1 more');
   });
 
   it('format helpers keep S3 promises', () => {

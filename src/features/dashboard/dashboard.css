@@ -18,6 +18,35 @@
   color: #b42318;
 }
 
+.dashboard-summary-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+}
+
+.dashboard-summary-header__label {
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.dashboard-refresh-button {
+  flex: 0 0 auto;
+}
+
+.dashboard-refresh-status {
+  margin: -8px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+}
+
+.dashboard-refresh-status--error {
+  color: #b42318;
+}
+
 .dashboard-cards {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

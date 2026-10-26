@@ -66,6 +66,76 @@ describe('Visa Sheet layout (R3 batch E)', () => {
     expect(actions?.sortable).toBe(false);
   });
 
+  it('numbers only real displayed records continuously beyond 9', () => {
+    const columns = buildGridColumns([], {
+      onDuplicate: () => undefined,
+      onDelete: () => undefined,
+      onRenew: () => undefined,
+      onAddColumn: () => undefined,
+    });
+    const gutter = columns.find((column) => column.colId === '__rowNumber');
+    const getter = gutter?.valueGetter as ((params: never) => number | '') | undefined;
+    expect(getter).toBeTypeOf('function');
+
+    const realNodes = Array.from({ length: 12 }, (_, index) => ({
+      id: `row-${12 - index}`,
+      rowIndex: index,
+      data: {
+        __rowId: `row-${12 - index}`,
+        __sheetRow: { id: `row-${12 - index}`, data: {} },
+      },
+    }));
+    const groupNode = {
+      id: 'group-1',
+      rowIndex: 2,
+      data: { __rowId: 'group-1', __groupHeader: true },
+    };
+    const draftNode = {
+      id: DRAFT_ROW_ID,
+      rowIndex: 13,
+      data: { __rowId: DRAFT_ROW_ID },
+    };
+    const allNodes = [
+      realNodes[0],
+      realNodes[1],
+      groupNode,
+      ...realNodes.slice(2),
+      draftNode,
+    ];
+    allNodes.forEach((node, index) => {
+      node.rowIndex = index;
+    });
+    const api = {
+      forEachNodeAfterFilterAndSort: (callback: (node: typeof allNodes[number]) => void) => {
+        allNodes.forEach(callback);
+      },
+      getDisplayedRowCount: () => allNodes.length,
+      getDisplayedRowAtIndex: (index: number) => allNodes[index],
+    };
+
+    expect(allNodes.map((node) => getter?.({ data: node.data, node, api } as never))).toEqual([
+      1, 2, '', 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, '',
+    ]);
+
+    // A later page keeps the global filtered/sorted position even when AG
+    // Grid supplies a page-local rowIndex.
+    const pageTwoNode = { ...realNodes[11], rowIndex: 1 };
+    expect(getter?.({ data: pageTwoNode.data, node: pageTwoNode, api } as never)).toBe(12);
+
+    // Without a displayed-row API, a valid rowIndex still continues past 9;
+    // a missing index stays blank instead of being misreported as row 1.
+    expect(getter?.({
+      data: realNodes[9].data,
+      node: { rowIndex: 9 },
+      api: {},
+    } as never)).toBe(10);
+    expect(getter?.({
+      data: realNodes[0].data,
+      node: { rowIndex: null },
+      api: {},
+    } as never)).toBe('');
+  });
+
   it('reserves no Add Row / Add Column / Manage Columns toolbar buttons', () => {
     expect(sheetPageSource).not.toMatch(/Add Row/);
     expect(sheetPageSource).not.toMatch(/Manage Columns/);

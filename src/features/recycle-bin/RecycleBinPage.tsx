@@ -129,12 +129,12 @@ export function RecycleBinPage({
                   <td>
                     {can(role, 'restore') ? (
                       <button type="button" onClick={() => void onRestore?.(row)}>
-                        Restore {label}
+                        Restore
                       </button>
                     ) : null}
                     {can(role, 'permanentDelete') ? (
                       <button type="button" onClick={() => void onPermanentDelete?.(row)}>
-                        Permanently delete {label}
+                        Delete
                       </button>
                     ) : null}
                   </td>
