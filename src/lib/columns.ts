@@ -54,6 +54,27 @@ export const DAYS_LEFT_COLUMN_ID = 'daysLeft';
 export const DAYS_LEFT_COLUMN_NAME = 'Days Left';
 export const DAYS_LEFT_COLUMN_TYPE = 'number' as const;
 
+/**
+ * AG Grid system/utility column ids rendered around the user columns:
+ * the `#` row-number gutter and Actions (pinned left), the `+` add-column
+ * header and Days Left (pinned right). They are UI furniture only — never
+ * persisted as user columns and never part of a saved column order.
+ */
+export const ROW_NUMBER_COLUMN_ID = '__rowNumber';
+export const ACTIONS_COLUMN_ID = '__actions';
+export const ADD_COLUMN_COLUMN_ID = '__addColumn';
+
+export const GRID_SYSTEM_COLUMN_IDS: ReadonlySet<string> = new Set([
+  ROW_NUMBER_COLUMN_ID,
+  ACTIONS_COLUMN_ID,
+  ADD_COLUMN_COLUMN_ID,
+  DAYS_LEFT_COLUMN_ID,
+]);
+
+export function isGridSystemColumnId(value: unknown): boolean {
+  return typeof value === 'string' && GRID_SYSTEM_COLUMN_IDS.has(value);
+}
+
 function normaliseIdentity(value: unknown): string {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
 }
@@ -114,7 +135,14 @@ export function isLivePrimaryExpiryColumn(
 
 /**
  * Enforce the local column invariants without mutating the caller's objects.
- * The first active date_expiry definition is always the single primary.
+ *
+ * Primary-expiry selection mirrors `SqliteStore.repairPrimaryExpiry`: an
+ * existing single LIVE primary (an administrator's explicit "set as primary"
+ * choice) is preserved as-is. First-by-position is only the deterministic
+ * heal for zero or ambiguous marks. Preserving the flagged primary matters
+ * for column reordering: dragging one expiry column past another changes
+ * positions only and must never silently redesignate which date drives
+ * Days Left / alerts.
  */
 export function normalizeColumns(columns: readonly ColumnDefinition[]): ColumnDefinition[] {
   const copied = columns.map((column, index) => ({
@@ -135,10 +163,17 @@ export function normalizeColumns(columns: readonly ColumnDefinition[]): ColumnDe
     return (column.position ?? index) < (first.position ?? firstIndex) ? index : firstIndex;
   }, -1);
 
+  const flaggedPrimaryIndexes = copied.flatMap((column, index) => (
+    isLivePrimaryExpiryColumn(column) ? [index] : []
+  ));
+  const primaryIndex = flaggedPrimaryIndexes.length === 1
+    ? flaggedPrimaryIndexes[0]
+    : firstExpiryIndex;
+
   return copied.map((column, index) => ({
     ...column,
-    isPrimaryExpiry: firstExpiryIndex >= 0 && index === firstExpiryIndex,
-    is_primary_expiry: firstExpiryIndex >= 0 && index === firstExpiryIndex,
+    isPrimaryExpiry: primaryIndex >= 0 && index === primaryIndex,
+    is_primary_expiry: primaryIndex >= 0 && index === primaryIndex,
   }));
 }
 
@@ -155,6 +190,101 @@ export function getPrimaryExpiryColumn(
   ) ?? columns.find(
     (column) => isActive(column) && column.type === 'date_expiry',
   ) ?? null;
+}
+
+/**
+ * Column order is persisted in `app_columns.position` (SQLite is the source
+ * of truth locally; `listColumns` already returns `ORDER BY position, id`).
+ * Rendering must sort by position too — array order alone is not the
+ * contract, and trusting it is what made a dragged column snap back to its
+ * persisted slot on the next rebuild. The sort is stable: equal/missing
+ * positions keep their incoming relative order, so legacy snapshots render
+ * deterministically until a reorder normalizes positions to 0..n-1.
+ */
+export function sortColumnsByPosition(
+  columns: readonly ColumnDefinition[],
+): ColumnDefinition[] {
+  return columns
+    .map((column, index) => ({ column, index }))
+    .sort((left, right) => {
+      const leftPosition = left.column.position ?? left.index;
+      const rightPosition = right.column.position ?? right.index;
+      return leftPosition - rightPosition || left.index - right.index;
+    })
+    .map((entry) => entry.column);
+}
+
+/** The user-visible sheet columns in their persisted display order. */
+export function orderedActiveColumns(
+  columns: readonly ColumnDefinition[],
+): ColumnDefinition[] {
+  return sortColumnsByPosition(columns)
+    .filter((column) => column.deleted !== true && column.visible !== false);
+}
+
+/**
+ * Apply a user-chosen column order, returning a NEW column list whose
+ * active columns carry normalized positions (0..n-1, no gaps/duplicates).
+ *
+ * `orderedIds` lists active user columns in their new display order. Any
+ * active column it omits (e.g. a hidden column the grid never displayed)
+ * keeps its current relative order after the listed ones. Deleted columns
+ * are returned untouched. Unknown, duplicate and system-column ids are
+ * ignored defensively — a grid can report ids (`__actions`, `daysLeft`, …)
+ * that must never be persisted. Only `position` changes: identity, name,
+ * type, options, visibility, passport and primary-expiry flags all survive.
+ */
+export function applyColumnOrder(
+  columns: readonly ColumnDefinition[],
+  orderedIds: readonly string[],
+): ColumnDefinition[] {
+  const current = sortColumnsByPosition(columns);
+  const byId = new Map(current.map((column) => [column.id, column]));
+  const listed: ColumnDefinition[] = [];
+  const seen = new Set<string>();
+  for (const id of orderedIds) {
+    if (typeof id !== 'string' || seen.has(id) || isGridSystemColumnId(id)) {
+      continue;
+    }
+    const column = byId.get(id);
+    if (!column || column.deleted === true) {
+      continue;
+    }
+    seen.add(id);
+    listed.push(column);
+  }
+  const unlistedActive = current.filter(
+    (column) => column.deleted !== true && !seen.has(column.id),
+  );
+  const deleted = current.filter((column) => column.deleted === true);
+  return [
+    ...[...listed, ...unlistedActive].map((column, position) => ({ ...column, position })),
+    ...deleted.map((column) => ({ ...column })),
+  ];
+}
+
+function sameIdSequence(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((id, index) => id === right[index]);
+}
+
+/**
+ * Derive the persistable user-column order from the grid's displayed column
+ * ids (which include the system columns), or null when there is nothing to
+ * save. Returning null for "same order as already persisted" is the guard
+ * that keeps programmatic refreshes (defs rebuilt from a snapshot) from
+ * echoing back as reorder writes — no sync/outbox write loop.
+ */
+export function extractUserColumnOrder(
+  displayedColumnIds: readonly string[],
+  columns: readonly ColumnDefinition[],
+): string[] | null {
+  const currentIds = orderedActiveColumns(columns).map((column) => column.id);
+  const currentSet = new Set(currentIds);
+  const userIds = displayedColumnIds.filter((id) => currentSet.has(id));
+  if (userIds.length !== currentIds.length || new Set(userIds).size !== userIds.length) {
+    return null;
+  }
+  return sameIdSequence(userIds, currentIds) ? null : userIds;
 }
 
 export function validateColumnDefinitions(

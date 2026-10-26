@@ -1172,6 +1172,93 @@ export class SqliteStore {
     return this.upsertColumn(input);
   }
 
+  /**
+   * Persist a user-chosen column order (sheet header drag-reorder).
+   *
+   * `columnIds` are active user columns in their new display order. The
+   * full active set is rewritten to normalized positions (0..n-1) in ONE
+   * transaction: listed columns first, any unlisted active column (e.g. a
+   * hidden one the grid never displayed) keeps its relative order after
+   * them. Only `position` and `updated_at` change, and only on rows whose
+   * position actually moved — each such row also gets a durable
+   * `column`/`update` outbox item so the new order syncs upstream through
+   * the normal updated_at last-write-wins path. Name/type/options/
+   * visibility/passport/primary-expiry flags and every entry value are
+   * untouched (no upsert, no primary repair: a move must never redesignate
+   * the primary expiry). Re-saving the current order is a no-op with no
+   * writes, so refresh echoes cannot feed an outbox write loop.
+   */
+  public reorderColumns(
+    columnIds: readonly string[],
+    role: 'admin' | 'office' | string = 'admin',
+  ): LocalColumn[] {
+    this.ensureOpen();
+    if (role !== 'admin' && role !== 'office') {
+      throw new Error('Only an admin or office user can reorder columns');
+    }
+    if (!Array.isArray(columnIds)) {
+      throw new Error('columnIds must be an array');
+    }
+
+    const seen = new Set<string>();
+    const listed: LocalColumn[] = [];
+    for (const rawId of columnIds) {
+      const id = typeof rawId === 'string' ? rawId.trim() : '';
+      if (!id) {
+        throw new Error('columnIds must contain non-empty column ids');
+      }
+      if (seen.has(id)) {
+        throw new Error(`Duplicate column id in reorder: ${id}`);
+      }
+      seen.add(id);
+      const column = this.getColumn(id);
+      if (!column || column.deleted === true) {
+        throw new Error(`Unknown sheet column: ${id}`);
+      }
+      if (isDaysLeftColumn(column)) {
+        throw new Error('The generated Days Left column cannot be reordered');
+      }
+      listed.push(column);
+    }
+
+    const current = this.listColumns(false);
+    const next = [...listed, ...current.filter((column) => !seen.has(column.id))];
+    const changes = next
+      .map((column, position) => ({ column, position }))
+      .filter(({ column, position }) => Number(column.position ?? 0) !== position);
+    if (changes.length === 0) {
+      return current;
+    }
+
+    const timestamp = this.now();
+    const execute = this.database.transaction(() => {
+      const update = this.database.prepare(
+        'UPDATE columns SET position = ?, updated_at = ? WHERE id = ?',
+      );
+      for (const { column, position } of changes) {
+        update.run(position, timestamp, column.id);
+        this.enqueueOutbox({
+          idempotencyKey: `column:reorder:${column.id}:${timestamp}:${this.idFactory()}`,
+          operation: 'update',
+          entityType: 'column',
+          entityId: column.id,
+          payload: { ...column, position, updated_at: timestamp, updatedAt: timestamp },
+        });
+      }
+    });
+    execute();
+    this.recordAudit({
+      actor: columnActor({ role }),
+      entityType: 'column',
+      entityId: null,
+      action: 'reorder_columns',
+      before: { order: current.map((column) => column.id) },
+      after: { order: next.map((column) => column.id) },
+      createdAt: timestamp,
+    });
+    return this.listColumns(false);
+  }
+
   public canDeleteColumn(
     id: string,
     role: 'admin' | 'office' | string,

@@ -60,6 +60,7 @@ describe('dark theme parity (R3 batch E)', () => {
     for (const [css, selector] of [
       [admin, '.admin-dialog {'],
       [shell, '.confirm-dialog {'],
+      [shell, '.topbar-update {'],
       [shell, '.notification-bell__panel'],
       [sheet, '.sheet-more-filters__menu'],
     ] as const) {

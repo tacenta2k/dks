@@ -42,9 +42,21 @@ export const STATUS_FILTER_OPTIONS: ReadonlyArray<{ value: StatusFilterValue; la
 
 export const DEFAULT_EXPIRING_SOON_THRESHOLD = 90;
 
+/**
+ * An exact inclusive days-left window. It is an INTERNAL filter (dashboard
+ * cards whose window has no quick chip — 1 day, 6 months, 1 year); the
+ * visible chip set is unchanged and clicking any chip/status clears it.
+ */
+export interface DaysLeftRange {
+  min: number;
+  max: number;
+}
+
 export interface SheetFilterOptions {
   search?: string;
   quickFilter?: QuickFilter;
+  /** Exact days-left window (dashboard card navigation); null/undefined = inactive. */
+  daysRange?: DaysLeftRange | null;
   status?: StatusFilterValue | ExpiryStatus | 'No expiry' | '';
   today?: string | Date;
   /**
@@ -117,6 +129,17 @@ export function matchesExpiringSoon(
   return daysLeft !== null && daysLeft >= 0 && daysLeft <= threshold;
 }
 
+/** Exact inclusive window check used by dashboard card navigation. */
+export function matchesDaysRange(
+  daysLeft: number | null,
+  range: DaysLeftRange | null | undefined,
+): boolean {
+  if (!range) {
+    return true;
+  }
+  return daysLeft !== null && daysLeft >= range.min && daysLeft <= range.max;
+}
+
 export function matchesStatusFilter(
   status: StatusFilterValue | ExpiryStatus | 'No expiry' | '',
   daysLeft: number | null,
@@ -172,6 +195,7 @@ export function filterRows(
 
     return (!search || searchableText(row, columns).includes(search))
       && matchesQuickFilter(daysLeft, quickFilter)
+      && matchesDaysRange(daysLeft, options.daysRange ?? null)
       && matchesStatusFilter(options.status ?? '', daysLeft, threshold);
   });
 }

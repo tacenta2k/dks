@@ -108,6 +108,13 @@ export interface DksLocalUpdateColumnInput {
   idempotencyKey?: string;
 }
 
+export interface DksLocalReorderColumnsInput {
+  /** Active user column ids in their new display order. */
+  columnIds: readonly string[];
+  role?: string;
+  idempotencyKey?: string;
+}
+
 export interface DksLocalImportRecord {
   data: Record<string, unknown>;
   category?: string | null;
@@ -203,6 +210,8 @@ export interface DksLocalApi {
   permanentDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
+  /** Atomic position-only reorder; optional like `rekeyColumn` for older bridges. */
+  reorderColumns?: (input: DksLocalReorderColumnsInput) => Promise<DksLocalColumn[]>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
   rekeyColumn?: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {
@@ -232,6 +241,30 @@ export interface DksLocalApi {
   close: () => Promise<DksLocalCloseResult>;
 }
 
+/** Mirror of the main-process updater state (renderer-safe, serializable). */
+export type DksUpdateStatus =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'downloading'
+  | 'downloaded'
+  | 'not-available'
+  | 'error'
+  | 'disabled';
+
+export interface DksUpdateState {
+  status: DksUpdateStatus;
+  version?: string;
+  /** Download completion 0–100 while downloading (when reported). */
+  progress?: number;
+}
+
+export interface DksUpdaterApi {
+  checkForUpdates: () => Promise<DksUpdateState>;
+  restartToUpdate: () => Promise<boolean>;
+  onStatus: (listener: (state: DksUpdateState) => void) => () => void;
+}
+
 export interface DksWindowApi {
   platform: string;
   appVersion: string;
@@ -239,6 +272,7 @@ export interface DksWindowApi {
   minimizeToTray: () => void;
   quit: () => void;
   local?: DksLocalApi;
+  updater?: DksUpdaterApi;
 }
 
 declare global {

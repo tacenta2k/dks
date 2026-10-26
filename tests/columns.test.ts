@@ -40,15 +40,35 @@ describe('protected column rules', () => {
     ]);
   });
 
-  it('makes the first expiry column primary and leaves exactly one primary', () => {
+  it('keeps an administrator-selected primary expiry instead of resetting to the first column', () => {
+    // Mirrors the SqliteStore contract (sqlite-outbox.test.ts): a single
+    // live flagged primary is an explicit selection and survives — this is
+    // also what makes column drag-reorder safe, since moving date_expiry
+    // columns past each other must never redesignate the primary expiry.
     const columns = normalizeColumns([
       column({ id: 'name', name: 'Name' }),
-      column({ id: 'expiry-one', name: 'Expiry one', type: 'date_expiry' }),
-      column({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', isPrimaryExpiry: true }),
+      column({ id: 'expiry-one', name: 'Expiry one', type: 'date_expiry', position: 1 }),
+      column({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', position: 2, isPrimaryExpiry: true }),
     ]);
 
     expect(columns.filter((item) => item.isPrimaryExpiry)).toHaveLength(1);
-    expect(getPrimaryExpiryColumn(columns)?.id).toBe('expiry-one');
+    expect(getPrimaryExpiryColumn(columns)?.id).toBe('expiry-two');
+  });
+
+  it('heals to the first expiry by position when no primary (or several) are marked', () => {
+    const unmarked = normalizeColumns([
+      column({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', position: 2 }),
+      column({ id: 'expiry-one', name: 'Expiry one', type: 'date_expiry', position: 1 }),
+    ]);
+    expect(unmarked.filter((item) => item.isPrimaryExpiry)).toHaveLength(1);
+    expect(getPrimaryExpiryColumn(unmarked)?.id).toBe('expiry-one');
+
+    const ambiguous = normalizeColumns([
+      column({ id: 'expiry-one', name: 'Expiry one', type: 'date_expiry', position: 1, isPrimaryExpiry: true }),
+      column({ id: 'expiry-two', name: 'Expiry two', type: 'date_expiry', position: 2, isPrimaryExpiry: true }),
+    ]);
+    expect(ambiguous.filter((item) => item.isPrimaryExpiry)).toHaveLength(1);
+    expect(getPrimaryExpiryColumn(ambiguous)?.id).toBe('expiry-one');
   });
 
   it('allows an office to delete only an unprotected empty column', () => {

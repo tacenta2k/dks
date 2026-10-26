@@ -52,8 +52,13 @@ function mapOfficeDelete(row: AdminNotificationRow): OfficeDeleteNotificationRec
     return null;
   }
   const entryId = typeof payload.entry_id === 'string' ? payload.entry_id : '';
-  const rowLabel = typeof payload.row_label === 'string' ? payload.row_label : entryId;
-  const message = typeof row.message === 'string' ? row.message : `Office deleted ${rowLabel}`;
+  // A missing/blank server label (or one that is just the entry id) is not a
+  // usable human label — display "Unnamed record", never the raw UUID.
+  const suppliedLabel = typeof payload.row_label === 'string' ? payload.row_label.trim() : '';
+  const rowLabel = suppliedLabel && suppliedLabel !== entryId ? suppliedLabel : 'Unnamed record';
+  const message = typeof row.message === 'string' && row.message.trim()
+    ? row.message
+    : `Office deleted ${rowLabel}`;
   const createdAt = typeof row.created_at === 'string'
     ? row.created_at
     : typeof row.createdAt === 'string' ? row.createdAt : new Date().toISOString();

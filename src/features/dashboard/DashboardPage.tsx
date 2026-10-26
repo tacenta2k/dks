@@ -40,10 +40,10 @@ function emptySummary(): DashboardSummary {
 function cardTestId(id: DashboardFilterId): string {
   const testIds: Record<DashboardFilterId, string> = {
     all: 'total',
-    expiringToday: 'today',
+    expiresToday: 'today',
+    expiresIn1Day: '1-day',
     expiringThisWeek: 'week',
     expiringThisMonth: 'month',
-    within2Months: '2-months',
     within3Months: '3-months',
     within6Months: '6-months',
     within1Year: '1-year',

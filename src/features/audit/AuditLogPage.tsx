@@ -31,6 +31,7 @@ const ACTION_LABELS: Readonly<Record<string, string>> = {
   create_column: 'Added column',
   add_column: 'Added column',
   update_column: 'Updated column',
+  reorder_columns: 'Reordered columns',
   delete_column: 'Deleted column',
   record_conflict: 'Recorded conflict',
   merge_conflict: 'Merged conflict',

@@ -419,6 +419,56 @@ button:focus-visible {
   gap: 10px;
 }
 
+/* A downloaded update is actionable from every signed-in workspace,
+   including approved Office users who cannot open Admin-only Settings. */
+.topbar-update {
+  display: inline-flex;
+  max-width: min(340px, 42vw);
+  align-items: center;
+  gap: 8px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.topbar-update__dot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 0 3px var(--color-success-soft);
+}
+
+.topbar-update__label {
+  overflow: hidden;
+  font-weight: 650;
+  text-overflow: ellipsis;
+}
+
+.topbar-update__button {
+  flex: 0 0 auto;
+  padding: 4px 8px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  cursor: pointer;
+  font-weight: 650;
+  transition:
+    border-color 160ms ease,
+    background 160ms ease;
+}
+
+.topbar-update__button:hover {
+  border-color: var(--color-primary);
+  background: var(--color-primary-soft);
+}
+
 /* FIXES_UI §3.2: global sync status control with a compact popover. */
 .topbar-sync {
   position: relative;
@@ -1242,6 +1292,14 @@ button:focus-visible {
   .top-bar__context,
   .avatar {
     display: none;
+  }
+
+  .topbar-update {
+    max-width: 48vw;
+  }
+
+  .topbar-update__label {
+    max-width: 20vw;
   }
 
   .content {

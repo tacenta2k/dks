@@ -560,7 +560,9 @@ function registerIpcHandlers(): void {
     notificationService?.show(request) ?? { delivered: false, reason: 'unavailable' }
   ));
   ipcMain.handle(UPDATER_CHECK_CHANNEL, async () => (
-    updaterService?.checkForUpdates() ?? Promise.resolve<UpdateState>({ status: 'not-available' })
+    // No service yet (startup edge): checks are unavailable — never claim
+    // "not-available" (up to date) when no check actually ran.
+    updaterService?.checkForUpdates() ?? Promise.resolve<UpdateState>({ status: 'disabled' })
   ));
   ipcMain.handle(UPDATER_RESTART_CHANNEL, async () => (
     updaterService?.restartToUpdate() ?? Promise.resolve(false)

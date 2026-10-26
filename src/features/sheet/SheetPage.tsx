@@ -9,15 +9,17 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import type { CellValueChangedEvent, ColDef, GridApi, PostSortRowsParams } from 'ag-grid-community';
+import type { CellValueChangedEvent, ColDef, ColumnMovedEvent, GridApi, PostSortRowsParams } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
 
 import {
   DAYS_LEFT_COLUMN_ID,
+  applyColumnOrder,
   columnDeleteBlockReason,
   getPrimaryExpiryColumn,
+  sortColumnsByPosition,
   type ColumnDefinition,
 } from '../../lib/columns';
 import { expiryValues } from '../../lib/domain';
@@ -36,9 +38,14 @@ import {
   QUICK_FILTERS,
   STATUS_FILTER_OPTIONS,
   filterRows,
+  type DaysLeftRange,
   type QuickFilter,
   type StatusFilterValue,
 } from './filters';
+import {
+  dashboardSheetFilter,
+  type DashboardFilterId,
+} from '../dashboard/selectors';
 import {
   buildGridColumns,
   buildGridRows,
@@ -48,6 +55,7 @@ import {
 import {
   DRAFT_ROW_ID,
   GRID_KEYBOARD_PROPS,
+  columnOrderFromMovedEvent,
   createTabToNextCell,
   isMeaningfulDraftValue,
   nextTabbableColumnId,
@@ -93,6 +101,12 @@ export interface SheetPageProps {
    * so keyboard-editing e2e coverage needs to opt in explicitly).
    */
   renderGridInTests?: boolean;
+  /**
+   * Dashboard card navigation: open the sheet filtered to exactly the rows
+   * the card counted. Re-applied whenever `dashboardFilterToken` changes.
+   */
+  dashboardFilter?: DashboardFilterId | null;
+  dashboardFilterToken?: number;
 }
 
 function dataValue(row: SheetRow, column: ColumnDefinition | null): unknown {
@@ -159,6 +173,8 @@ export function SheetPage({
   thresholds,
   refreshToken = 0,
   renderGridInTests = false,
+  dashboardFilter = null,
+  dashboardFilterToken = 0,
 }: SheetPageProps) {
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
@@ -171,6 +187,9 @@ export function SheetPage({
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [quickFilter, setQuickFilter] = useState<QuickFilter>('all');
+  // Exact internal window for dashboard cards without a chip (1 day,
+  // 6 months, 1 year). Any chip/status interaction clears it.
+  const [daysRange, setDaysRange] = useState<DaysLeftRange | null>(null);
   const [statusFilter, setStatusFilter] = useState<StatusFilterValue>('');
   const [groupByColumnId, setGroupByColumnId] = useState('');
   const [wizardOpen, setWizardOpen] = useState(false);
@@ -233,8 +252,33 @@ export function SheetPage({
     void refresh({ quiet: true });
   }, [refreshToken, refresh]);
 
+  // Dashboard card navigation: apply the card's EXACT filter (existing chip
+  // or status where equivalent, otherwise the internal days range) and clear
+  // any search text so the sheet shows precisely the rows the card counted.
+  // Null sentinel: the sheet remounts when navigating from the dashboard, so
+  // the first effect run must apply the pending card filter too.
+  const lastDashboardFilterToken = useRef<number | null>(null);
+  useEffect(() => {
+    if (lastDashboardFilterToken.current === dashboardFilterToken) {
+      return;
+    }
+    lastDashboardFilterToken.current = dashboardFilterToken;
+    if (!dashboardFilter) {
+      return;
+    }
+    const target = dashboardSheetFilter(dashboardFilter);
+    setSearch('');
+    setQuickFilter(target.quickFilter);
+    setStatusFilter(target.status);
+    setDaysRange(target.daysRange);
+  }, [dashboardFilter, dashboardFilterToken]);
+
+  // Render the PERSISTED order: `position` is the saved column order
+  // (SQLite/app_columns). Both the real grid and the accessible table read
+  // this one list, so the two surfaces can never disagree about order.
   const activeColumns = useMemo(
-    () => columns.filter((column) => column.deleted !== true && column.visible !== false),
+    () => sortColumnsByPosition(columns)
+      .filter((column) => column.deleted !== true && column.visible !== false),
     [columns],
   );
   const primaryExpiry = useMemo(() => getPrimaryExpiryColumn(activeColumns), [activeColumns]);
@@ -242,11 +286,12 @@ export function SheetPage({
   const matchingRows = useMemo(() => filterRows(rows, activeColumns, {
     search,
     quickFilter,
+    daysRange,
     status: statusFilter,
     today,
     expiringSoonThreshold,
     thresholds,
-  }), [rows, activeColumns, search, quickFilter, statusFilter, today, expiringSoonThreshold, thresholds]);
+  }), [rows, activeColumns, search, quickFilter, daysRange, statusFilter, today, expiringSoonThreshold, thresholds]);
   const matchingIds = useMemo(() => new Set(matchingRows.map((row) => row.id)), [matchingRows]);
   const builtRows = useMemo(() => buildGridRows(rows, activeColumns, { today }), [rows, activeColumns, today]);
   const groupable = useMemo(() => groupableColumns(activeColumns), [activeColumns]);
@@ -356,6 +401,62 @@ export function SheetPage({
       .map((column) => column.id),
     [activeColumns, role],
   );
+
+  // -- Column drag-reorder persistence ------------------------------------
+  // AG Grid dragging is visual only: without this, the next columnDefs
+  // rebuild (cell save, quiet refresh, navigation, restart) restored the
+  // persisted `position` order and the dropped column snapped back. A
+  // finished user drag now (1) updates local state optimistically so the
+  // drop never flickers back, then (2) persists normalized positions
+  // through the repository (SQLite first, durable outbox → Supabase) and
+  // (3) quietly re-reads the canonical order. Drags are serialized so a
+  // slow save can never overwrite a newer drop with a stale order.
+  const activeColumnsRef = useRef(activeColumns);
+  useEffect(() => {
+    activeColumnsRef.current = activeColumns;
+  }, [activeColumns]);
+  const reorderQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  const persistColumnOrder = useCallback((orderedIds: readonly string[]) => {
+    // Capture pre-drag positions BEFORE the optimistic update: the fallback
+    // path diffs against these to touch only columns that actually moved.
+    const before = activeColumnsRef.current;
+    setColumns((current) => applyColumnOrder(current, orderedIds));
+    const task = reorderQueueRef.current.then(async () => {
+      try {
+        if (repository.reorderColumns) {
+          await repository.reorderColumns(orderedIds);
+        } else {
+          // Older adapters/test doubles: same normalized positions through
+          // the existing per-column update path (changed columns only).
+          for (const [index, columnId] of orderedIds.entries()) {
+            const column = before.find((candidate) => candidate.id === columnId);
+            if (column && (column.position ?? index) !== index) {
+              await repository.updateColumn(columnId, { position: index });
+            }
+          }
+        }
+        await refresh({ quiet: true });
+        setStatusMessage('Column order saved.');
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : 'Unable to save the column order.');
+        // Restore the persisted order so the grid and the store agree.
+        await refresh({ quiet: true });
+      }
+    });
+    reorderQueueRef.current = task;
+    return task;
+  }, [repository, refresh]);
+
+  const handleColumnMoved = useCallback((event: ColumnMovedEvent<SheetGridRendererData>) => {
+    // Only a finished USER drag with a genuinely new user-column order
+    // persists; programmatic/refresh-driven moves return null here, so a
+    // background snapshot can never echo into a reorder write loop.
+    const orderedIds = columnOrderFromMovedEvent(event, activeColumnsRef.current);
+    if (orderedIds) {
+      void persistColumnOrder(orderedIds);
+    }
+  }, [persistColumnOrder]);
 
   // Tab/Shift+Tab while editing commits and moves to the next/previous
   // editable column (createTabToNextCell: `true` = commit + stay).
@@ -720,7 +821,10 @@ export function SheetPage({
                 <select
                   aria-label="Filter by status"
                   value={statusFilter}
-                  onChange={(event) => setStatusFilter(selectedValue(event) as StatusFilterValue)}
+                  onChange={(event) => {
+                    setStatusFilter(selectedValue(event) as StatusFilterValue);
+                    setDaysRange(null);
+                  }}
                 >
                   {STATUS_FILTER_OPTIONS.map((option) => (
                     <option value={option.value} key={option.value || 'all'}>{option.label}</option>
@@ -742,7 +846,10 @@ export function SheetPage({
                       type="button"
                       aria-pressed={quickFilter === filter.id}
                       title={filter.label === 'Today' ? 'Days Left = 0' : `Days Left 0–${filter.id}`}
-                      onClick={() => setQuickFilter(quickFilter === filter.id ? 'all' : filter.id)}
+                      onClick={() => {
+                        setQuickFilter(quickFilter === filter.id ? 'all' : filter.id);
+                        setDaysRange(null);
+                      }}
                     >
                       {filter.label}
                     </button>
@@ -771,6 +878,7 @@ export function SheetPage({
                               aria-checked={quickFilter === filter.id}
                               onClick={() => {
                                 setQuickFilter(quickFilter === filter.id ? 'all' : filter.id);
+                                setDaysRange(null);
                                 setMoreFiltersOpen(false);
                               }}
                             >
@@ -888,6 +996,9 @@ export function SheetPage({
                     gridApiRef.current = event.api;
                   }}
                   onCellValueChanged={(event) => void handleCellValueChanged(event)}
+                  // Header drag-reorder: persists the finished user drag as
+                  // normalized `position` values (see persistColumnOrder).
+                  onColumnMoved={handleColumnMoved}
                   // SHEET-12: Tab commits + edits the next editable column;
                   // Shift+Tab the previous one; system columns are skipped.
                   tabToNextCell={handleTabToNextCell}

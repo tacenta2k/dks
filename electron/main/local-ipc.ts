@@ -28,6 +28,7 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   permanentDeleteRow: 'dks:local:permanent-delete-row',
   addColumn: 'dks:local:add-column',
   updateColumn: 'dks:local:update-column',
+  reorderColumns: 'dks:local:reorder-columns',
   deleteColumn: 'dks:local:delete-column',
   rekeyColumn: 'dks:local:rekey-column',
   importRecords: 'dks:local:import-records',
@@ -110,6 +111,7 @@ export interface LocalIpcStore {
   upsertColumn: (input: ColumnInput & { role?: string }) => unknown;
   createColumn?: (input: ColumnInput & { role?: string }) => unknown;
   updateColumn?: (input: ColumnInput & { role?: string }) => unknown;
+  reorderColumns?: (columnIds: readonly string[], role: string) => readonly unknown[];
   deleteColumn: (id: string, role: string, idempotencyKey?: string) => unknown | null;
   rekeyColumn?: (oldId: string, newId: string) => boolean;
   getSyncStatus: () => SyncState;
@@ -164,6 +166,8 @@ export type LocalIpcHandlers = Readonly<Record<LocalIpcChannel, LocalIpcHandler>
 const SYNC_STATUSES: readonly SyncStatus[] = ['offline', 'syncing', 'healthy', 'error'];
 const DEFAULT_AUDIT_LIMIT = 500;
 const MAX_AUDIT_LIMIT = 5_000;
+/** Bound one reorder payload; real sheets hold far fewer columns than this. */
+const MAX_REORDER_COLUMNS = 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -616,6 +620,34 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         idempotencyKey: optionalString(input.idempotencyKey, 'idempotencyKey'),
       } as ColumnInput & { role: string };
       return columnFromUnknown(updateColumn(store, merged), 'updated column');
+    },
+
+    [LOCAL_IPC_CHANNELS.reorderColumns]: (payload) => {
+      const input = asRecord(payload, 'reorder columns input');
+      const role = roleFrom(input.role);
+      if (!Array.isArray(input.columnIds)) {
+        throw new Error('columnIds must be an array');
+      }
+      if (input.columnIds.length === 0) {
+        throw new Error('columnIds must not be empty');
+      }
+      if (input.columnIds.length > MAX_REORDER_COLUMNS) {
+        throw new Error(`columnIds must contain at most ${MAX_REORDER_COLUMNS} columns`);
+      }
+      const columnIds = input.columnIds.map((value, index) => requiredString(value, `columnIds[${index}]`));
+      if (new Set(columnIds).size !== columnIds.length) {
+        throw new Error('columnIds must not contain duplicates');
+      }
+      if (!store.reorderColumns) {
+        throw new Error('Column reorder is unavailable in this local store');
+      }
+      // Admin and approved Office sessions may reorder, consistent with
+      // their other column-maintenance rights. Position-only: the store
+      // rejects system/unknown/deleted ids and never touches primary
+      // expiry, so an office reorder cannot smuggle a primary change.
+      return store.reorderColumns(columnIds, role)
+        .map((column) => columnFromUnknown(column, 'reordered column'))
+        .filter((column): column is Record<string, unknown> => column !== null);
     },
 
     [LOCAL_IPC_CHANNELS.deleteColumn]: (payload) => {

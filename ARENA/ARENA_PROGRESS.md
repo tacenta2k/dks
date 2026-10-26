@@ -2123,3 +2123,166 @@ of admin rows failing at push time. Out of scope here; tracked as RLS-09.
   in this sandbox (header download blocked); on Windows the documented
   `npm rebuild better-sqlite3` remains the right command.
 - Windows/live verification stays USER-ONLY.
+
+---
+
+## 29. NIL duplicates, notification labels, dashboard cards, Civil ID verify (2026-10-26)
+
+Branch `arena/9376f77d-dks`, stacked on the column-reorder fix `5717c33`
+(unmerged in `main`; verified by ancestry + code). WIP checkpoint `15ce962`
+pushed before test work; this section describes the completed state.
+
+### 29.1 A — NIL placeholder duplicate exemption (SHEET-23)
+
+- `src/lib/validation.ts`: new shared `isNilPlaceholder()` — whole trimmed
+  value equal to `NIL` case-insensitively. Both `findDuplicatePassportValues`
+  and `findDuplicateCivilIdValues` skip NIL rows; `validateCell` suppresses
+  the duplicate warning for a NIL cell even against a stale set/flag.
+  Banners (SheetPage / grid-columns) already consume the same finders.
+- Partials (`NIL123`, `ANIL`) still warn; real duplicates still warn next to
+  NIL rows; stored text (incl. leading zeroes) untouched. Root cause: the
+  scanners counted normalized NIL like any real identifier.
+
+### 29.2 B — Notification human labels (NOTIF-02)
+
+- Root cause: `App.tsx` passed `rowLabel: (row) => data?.name ?? row.id` —
+  a literal `name` key lookup that fell back to the entry UUID, which was
+  baked into persisted bodies, the bell (primary + meta lines) and OS text.
+- Fix: App now supplies shared `rowDisplayLabel` (customer columns by id AND
+  name); `alert-service` validates any supplied label (never the row id,
+  never a date) and resolves via `expiryRowLabel()` → "Unnamed record".
+  `refreshExpiryNotificationLabels()` rebuilds machine-generated legacy
+  bodies on load from the row's current label and App repairs the stored
+  payload once via `updateNotification({payload:{body}})`; id, dedupe key,
+  expiry value, milestone, snooze, read/dismissed preserved; non-generated
+  bodies left verbatim. Bell meta-line fallback is "Unnamed record" (suffix
+  anchored to the exact generated sentence); office-delete remote mapping no
+  longer falls back to the entry id. Email digest keeps its own redacted
+  server-side label (`digest_row_label`) — untouched.
+
+### 29.3 C — Dashboard 8 cumulative cards (DASH-02 override)
+
+- Exact set/order: Total entries; Expires in 1 day (0–1); This week (0–7);
+  This month (0–30); 3 months (0–90); 6 months (0–180); 1 year (0–365);
+  Expired (<0). `withinDays` is now `0 <= days <= max` (was `days > 0`);
+  Expired strictly `< 0`; null/invalid expiry only in Total.
+- Card clicks previously did nothing in production (App never passed
+  `onDashboardFilter`). Now App → AppShell → SheetPage apply
+  `dashboardSheetFilter()`: ≤7d/≤30d/≤90d chips + Expired status reused;
+  internal exact `daysRange` (new in `filters.ts`) for 1-day/6m/1y; any
+  chip/status interaction clears it. Visible chips, status dropdown, print
+  presets, visual design and both charts unchanged.
+
+### 29.4 D — Civil ID sync (verified; no code change)
+
+- `supabase/schema.sql` + `ARENA/sql/civil-id-type.sql` permit `civil_id`;
+  client payload sends the literal type (`toRemoteColumn`); failed outbox
+  items stay `failed`, are re-selected every sync with no attempts cap, and
+  payloads rebuild from the current snapshot — so the queued item succeeds
+  after the migration (matches owner's "Saved to cloud", 0 pending).
+  Regression test proves reject → reject → widen → healthy with the remote
+  row carrying `type: 'civil_id'`. No new SQL.
+
+### 29.5 Gate (sandbox, Node 22 — pinned 20.19.0 unavailable here)
+
+- `npm run typecheck`: PASS. `npm test`: 70 files, 554 passed | 3 skipped
+  (+29 tests: validation NIL matrix, Civil ID NIL banner, notification
+  labels + legacy repair, dashboard boundaries/nesting/filter equivalence,
+  dashboard→sheet flow, Civil ID sync retry, office-delete fallback).
+  `npm run build`: PASS.
+- Pop!_OS / Windows / live-Supabase / Office-approval verification remains
+  USER-ONLY. Owner earlier confirmed: civil-id-type.sql applied live; sync
+  "Saved to cloud", 0 pending.
+
+---
+
+## 30. "Expires today" dashboard card + in-app update readiness (2026-10-26)
+
+Branch `arena/9376f77d-dks` stacked on the owner-tested `ee1e5b6` (new
+commits only; the tested history is not rewritten). Owner confirmed the
+§29 behaviors manually before this round.
+
+### 30.1 Dashboard ninth card
+
+- `Expires today` (daysLeft === 0) inserted as card #2 of nine; all other
+  counts/charts unchanged. Clicking it opens the Visa Sheet on the existing
+  "Today" chip (exactly day 0) via `dashboardSheetFilter()`. Boundary tests
+  cover −1/0/1/2, the intentional overlap with the 1-day card, nine-card
+  order, sheet-flow and chip-pressed state. DASH-02 updated.
+
+### 30.2 Updater audit (PKG-14) — what already worked
+
+- Main-process state machine around electron-updater with validated IPC
+  (`dks:updater:*`), hourly + launch checks in packaged builds only,
+  `autoDownload=false`/`autoInstallOnAppQuit=false`, NSIS packaging with
+  `deleteAppDataOnUninstall: false` (SQLite in userData survives updates),
+  `npm run dist` (`--publish never`) / `npm run release` (`--publish always`).
+- Repository `tacenta2k/dks` is PUBLIC (verified via GitHub API), so the
+  GitHub provider works for installed clients with no embedded credential.
+
+### 30.3 Verified gaps fixed
+
+1. **Renderer never called the updater.** Settings "Check for updates"
+   showed "Update check requested." and did nothing; no status and no
+   install action existed, so background downloads could never install.
+   Settings → About now drives the real bridge: truthful state line
+   (checking / available / downloading +% / ready / up to date / failed /
+   dev-disabled) and an explicit "Restart to install" button in the
+   downloaded state only.
+2. **`isUpdateAvailable` ignored.** electron-updater 6.8.9 returns the
+   latest version even when current; the service treated any version as an
+   update (same-version download loop). Now `isUpdateAvailable === false`
+   → `not-available`, with download-progress forwarded to the UI.
+3. **Dev builds lied.** Disabled checks reported `not-available`
+   ("up to date") without contacting any feed. New `disabled` status end to
+   end (service → preload whitelist → renderer copy).
+4. **Implicit release provider.** `publish` named no owner/repo and
+   package.json had no `repository`. Now explicit `github tacenta2k/dks`
+   with `releaseType: draft` + package.json `repository`; README release
+   procedure updated (version bump → draft upload of installer +
+   `latest.yml` + `.blockmap` → owner presses "Publish release").
+
+### 30.4 Gate (sandbox Node 22 / ABI 127; better-sqlite3 Node build)
+
+- `verify:native` (Electron ABI 132) deliberately NOT run before tests.
+- typecheck PASS; `npm test` 70 files, 567 passed | 3 skipped (+13:
+  updater disabled/isUpdateAvailable/progress/no-early-restart/config,
+  Settings mocked-bridge states + restart approval, dashboard today card);
+  build PASS. Locked `@supabase/*@2.118.0` declares `node >=22` (EBADENGINE
+  warning expected under the owner's pinned Node 20.19.0) — unrelated to the
+  updater; no dependency or Node change made.
+- Still USER-ONLY: real Windows installed-old → newer update, SmartScreen,
+  packaged `npm run dist`/`release`, live GitHub release publish.
+
+### 30.5 Downloaded updates installable by approved Office users
+
+- The §30.3 install action initially lived only in Admin-only Settings →
+  About. The packaged launch/hourly scheduler already calls the same service
+  check with `downloadInBackground` defaulting to true, so a background check
+  reaches `downloaded` without a separate Download action; with
+  `autoInstallOnAppQuit=false`, however, an Office PC previously had no
+  reachable install action.
+- `App` now owns the single renderer subscription to the existing validated
+  `window.dks.updater.onStatus` bridge (backed by `dks:updater:status`) and
+  passes that one `DksUpdateState` to both the shell and Settings → About. No
+  polling and no new IPC channel were added. Settings keeps its full Admin
+  check/progress/error/restart panel and only uses a local subscription when
+  rendered standalone without the controlled App state.
+- `AppShell` shows a compact, theme-token top-bar pill beside sync only for
+  `downloaded`: "Update <version> ready" + "Restart to install". It does not
+  use `can()` or any Settings/admin capability, so Admin and approved Office
+  see it in the signed-in workspace; idle/checking/available/downloading/
+  not-available/disabled/error show no top-bar pill.
+- The pill opens the existing `ConfirmDialog`; Cancel invokes nothing, while
+  "Restart now" invokes the existing `window.dks.updater.restartToUpdate()`
+  (`dks:updater:restart`) exactly once. Office permissions, the approval
+  gate, check cadence, `autoInstallOnAppQuit`, publish config, dashboard,
+  sheet and sync are unchanged.
+- Offline mocked-bridge coverage includes all non-ready pill states, Admin
+  and Office ready states, approved-Office end-to-end install approval
+  through `App`, shared Settings status with no second subscription, and
+  dark-theme token parity for `.topbar-update`. Gate: typecheck PASS; full
+  `npm test` 71 files, 578 passed | 3 skipped; build PASS (sandbox Node
+  22.22.3 / Node ABI 127; `verify:native` was not run immediately before
+  tests). Seeing/installing a real update on a Windows Office PC remains
+  USER-ONLY.

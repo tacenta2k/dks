@@ -56,4 +56,15 @@ nsis:
   uninstallerIcon: build/icon.ico
   installerHeaderIcon: build/icon.ico
 publish:
+  # Explicit release target: the packaged app's app-update.yml is generated
+  # from this block, and electron-updater reads releases for tacenta2k/dks
+  # from it. Never rely on git-remote inference at build time, and never put
+  # a token here — GH_TOKEN is used only by the release command on the
+  # owner's machine, never embedded in the app. The repository is public,
+  # so installed clients can read release metadata without any credential.
   provider: github
+  owner: tacenta2k
+  repo: dks
+  # electron-builder uploads releases as drafts; electron-updater only sees
+  # a release after the owner publishes the draft on GitHub.
+  releaseType: draft

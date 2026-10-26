@@ -691,6 +691,98 @@ describe('outbox queue drains after successful sync (B3)', () => {
     }
   });
 
+  it('retries a Civil ID column rejected by the old type CHECK until the constraint is widened', async () => {
+    const { store, local } = createSqliteLocal();
+    try {
+      store.createColumn({
+        id: '11111111-aaaa-4bbb-8ccc-000000000020',
+        name: 'Civil ID',
+        type: 'civil_id',
+        position: 0,
+      });
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+
+      // The remote models the pre-migration database: app_columns_type_check
+      // rejects 'civil_id' until ARENA/sql/civil-id-type.sql is applied.
+      const gate = { widened: false };
+      const tables: Record<string, Record<string, unknown>[]> = { entries: [], app_columns: [] };
+      const checkViolation = {
+        message: 'new row for relation "app_columns" violates check constraint "app_columns_type_check"',
+      };
+      const applyValues = (table: string, values: readonly Record<string, unknown>[]) => {
+        const rows = tables[table] ?? (tables[table] = []);
+        for (const value of values) {
+          const key = typeof value.id === 'string' ? 'id' : 'key';
+          const index = rows.findIndex((row) => row[key] === value[key]);
+          if (index >= 0) {
+            rows[index] = { ...rows[index], ...value };
+          } else {
+            rows.push({ ...value });
+          }
+        }
+      };
+      const rejectsCivilId = (table: string, values: readonly Record<string, unknown>[]) => (
+        !gate.widened && table === 'app_columns' && values.some((value) => value.type === 'civil_id')
+      );
+      const client: SupabaseDataClient = {
+        from: (table) => ({
+          select: async () => ({ data: tables[table] ?? [], error: null }),
+          insert: async (values) => {
+            if (rejectsCivilId(table, values)) {
+              return { data: null, error: checkViolation };
+            }
+            applyValues(table, values);
+            return { data: [...values], error: null };
+          },
+          update: (values) => ({
+            eq: async (_column: string, id: string) => {
+              if (rejectsCivilId(table, [values])) {
+                return { data: null, error: checkViolation };
+              }
+              applyValues(table, [{ ...values, id }]);
+              return { data: null, error: null };
+            },
+          }),
+          upsert: async (values) => {
+            if (table !== 'settings') {
+              return { data: null, error: { message: `unexpected upsert for ${table}` } };
+            }
+            applyValues(table, values);
+            return { data: [...values], error: null };
+          },
+        }),
+        rpc: async () => ({ data: null, error: null }),
+      };
+
+      // Rejected by the old constraint: the error surfaces and the outbox
+      // item is retained — never deleted, never marked synced.
+      const rejected = await runSupabaseSync({ client, local });
+      expect(rejected.status).toBe('error');
+      expect(rejected.errors.join(' ')).toMatch(/app_columns_type_check/);
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+      expect(tables.app_columns).toHaveLength(0);
+
+      // Several attempts against the still-old constraint keep failing and
+      // the item still survives for the next retry.
+      const rejectedAgain = await runSupabaseSync({ client, local });
+      expect(rejectedAgain.status).toBe('error');
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+      expect(tables.app_columns).toHaveLength(0);
+
+      // The owner applies ARENA/sql/civil-id-type.sql; the very same queued
+      // item now pushes the canonical literal type and drains to zero.
+      gate.widened = true;
+      const healed = await runSupabaseSync({ client, local });
+      expect(healed.status).toBe('healthy');
+      expect(store.getPendingOutboxCount()).toBe(0);
+      expect(tables.app_columns).toEqual(expect.arrayContaining([
+        expect.objectContaining({ name: 'Civil ID', type: 'civil_id' }),
+      ]));
+    } finally {
+      store.close();
+    }
+  });
+
   it('retries queued settings through the sync loop and clears them', async () => {
     const { store, local } = createSqliteLocal();
     try {

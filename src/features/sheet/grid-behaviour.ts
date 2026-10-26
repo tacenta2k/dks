@@ -7,7 +7,9 @@
  * draft-row helper defines exactly what counts as the "first meaningful value"
  * (focus or keystrokes alone must never create a record).
  */
-import type { CellPosition, Column, TabToNextCellParams } from 'ag-grid-community';
+import type { CellPosition, Column, ColumnMovedEvent, GridApi, TabToNextCellParams } from 'ag-grid-community';
+
+import { extractUserColumnOrder, type ColumnDefinition } from '../../lib/columns';
 
 export const DRAFT_ROW_ID = '__draft';
 
@@ -125,4 +127,60 @@ export function createTabToNextCell<TData>(
       column,
     };
   };
+}
+
+/* --------------------------------------------------------------------------
+ * Column drag-reorder persistence.
+ *
+ * AG Grid Community header dragging moves columns visually and reports the
+ * gesture through ColumnMovedEvent (`finished: true` only at drop). The
+ * grid keeps NO durable state: SheetPage rebuilds `columnDefs` from the
+ * persisted `position` order on every refresh, so an unpersisted drag
+ * snapped back. The helpers below turn a finished USER drag into the
+ * persistable user-column order; SheetPage saves it through the repository
+ * (SQLite `app_columns.position` → durable outbox → Supabase).
+ *
+ * Only genuine UI drags count. Moves reported with an `api` (or any other
+ * programmatic) source, and unfinished intermediate drag steps, never
+ * persist — together with the "order actually changed" check inside
+ * `extractUserColumnOrder`, that keeps quiet background refreshes and
+ * remote-snapshot rebuilds from echoing into reorder writes.
+ * ------------------------------------------------------------------------ */
+
+/** Structural subset of GridApi used to read the visual column order. */
+export interface DisplayedColumnApi {
+  getDisplayedLeftColumns: () => readonly Pick<Column, 'getColId'>[];
+  getDisplayedCenterColumns: () => readonly Pick<Column, 'getColId'>[];
+  getDisplayedRightColumns: () => readonly Pick<Column, 'getColId'>[];
+}
+
+/** Visual left→right displayed column ids: pinned-left + centre + pinned-right. */
+export function displayedColumnIds(api: DisplayedColumnApi): string[] {
+  return [
+    ...api.getDisplayedLeftColumns(),
+    ...api.getDisplayedCenterColumns(),
+    ...api.getDisplayedRightColumns(),
+  ].map((column) => String(column.getColId()));
+}
+
+/**
+ * The new user-column order for a finished user drag, or null when the
+ * event must not persist anything (unfinished, programmatic, system-only,
+ * or the order is unchanged). `activeColumns` is the currently persisted
+ * display order (already position-sorted by the caller).
+ */
+export function columnOrderFromMovedEvent<TData>(
+  event: Pick<ColumnMovedEvent<TData>, 'finished' | 'source'> & { api?: GridApi<TData> | null },
+  activeColumns: readonly ColumnDefinition[],
+): string[] | null {
+  if (!event || event.finished !== true) {
+    return null;
+  }
+  if (event.source !== 'uiColumnDragged' && event.source !== 'uiColumnMoved') {
+    return null;
+  }
+  if (!event.api) {
+    return null;
+  }
+  return extractUserColumnOrder(displayedColumnIds(event.api), activeColumns);
 }

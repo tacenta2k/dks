@@ -18,7 +18,7 @@ import {
 } from '../../lib/app-info';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
 import type { EmailPrefsClient } from './email-preferences';
-import type { ThemePreference } from '../../lib/types';
+import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
 import type { Role } from '../auth/auth-types';
@@ -85,12 +85,53 @@ export interface SettingsPageProps {
   version?: string;
   onCheckForUpdates?: () => void | Promise<void>;
   onUpdate?: () => void | Promise<void>;
+  /**
+   * The desktop updater bridge. Defaults to `window.dks.updater` (the
+   * validated preload API); injected in tests. `null` forces "no bridge".
+   */
+  updater?: DksUpdaterApi | null;
+  /**
+   * Controlled updater state from the app-level subscription. When supplied,
+   * Settings renders this same status source as the top-bar update pill and
+   * does not create a second bridge subscription.
+   */
+  updateState?: DksUpdateState;
+  onUpdateStateChange?: (state: DksUpdateState) => void;
   resendNote?: string;
   settingsError?: string | null;
   onClose?: () => void;
 }
 
 export const DEFAULT_NOTIFICATION_DAYS = Object.freeze([90, 60, 30, 15, 7, 1, 0]);
+
+/**
+ * Truthful one-line copy for every updater state. 'not-available' is the
+ * only state allowed to say "up to date" — it means the release feed was
+ * actually checked. 'disabled' (development/unpackaged, or no desktop
+ * bridge) says so plainly instead of claiming success.
+ */
+export function updateStatusMessage(state: DksUpdateState): string {
+  const version = state.version ? ` ${state.version}` : '';
+  switch (state.status) {
+    case 'checking':
+      return 'Checking for updates…';
+    case 'available':
+      return `Update${version} is available. Downloading…`;
+    case 'downloading':
+      return `Downloading update${version}…${typeof state.progress === 'number' ? ` ${state.progress}%` : ''}`;
+    case 'downloaded':
+      return `Update${version} is ready to install. Your records stay on this device.`;
+    case 'not-available':
+      return 'DKS is up to date.';
+    case 'error':
+      return 'Update check failed. Check your internet connection and try again.';
+    case 'disabled':
+      return 'Update checks run in the installed app — they are not available in this development build.';
+    case 'idle':
+    default:
+      return 'Updates are checked automatically. You can also check now.';
+  }
+}
 
 export const DEFAULT_SETTINGS: DksSettings = {
   thresholds: {
@@ -236,6 +277,9 @@ export function SettingsPage({
   version,
   onCheckForUpdates,
   onUpdate,
+  updater: providedUpdater,
+  updateState: providedUpdateState,
+  onUpdateStateChange,
   resendNote = 'Resend is optional for hosted email notifications; local alerts continue to work without a Resend API key.',
   settingsError = null,
   onClose,
@@ -246,7 +290,45 @@ export function SettingsPage({
   ));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('expiry');
+  const [localUpdateState, setLocalUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+  const updateState = providedUpdateState ?? localUpdateState;
+  const setUpdateState = (state: DksUpdateState) => {
+    setLocalUpdateState(state);
+    onUpdateStateChange?.(state);
+  };
   const mountedRef = useRef(false);
+  const aboutCheckRef = useRef(false);
+
+  const updaterBridge: DksUpdaterApi | null = providedUpdater !== undefined
+    ? providedUpdater
+    : ((typeof window !== 'undefined' ? window.dks?.updater : undefined) ?? null);
+
+  // Live updater state (manual checks AND the packaged app's background
+  // checks) flows through the validated preload bridge. In the full app this
+  // state is controlled by App's single subscription; the local subscription
+  // below is only the standalone-component fallback.
+  useEffect(() => {
+    if (!updaterBridge || providedUpdateState !== undefined) {
+      return undefined;
+    }
+    return updaterBridge.onStatus(setUpdateState);
+    // `setUpdateState` also mirrors the latest controlled-state callback;
+    // this fallback subscription itself depends on the bridge identity.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [providedUpdateState, updaterBridge]);
+
+  // Opening About surfaces the current updater truth once — including an
+  // update the background check already downloaded. In a development build
+  // this resolves to 'disabled' and says so plainly.
+  useEffect(() => {
+    if (activeSection !== 'about' || !updaterBridge || aboutCheckRef.current) {
+      return;
+    }
+    aboutCheckRef.current = true;
+    void updaterBridge.checkForUpdates()
+      .then(setUpdateState)
+      .catch(() => setUpdateState({ status: 'error' }));
+  }, [activeSection, updaterBridge]);
 
   useEffect(() => {
     if (providedColumns) {
@@ -342,6 +424,37 @@ export function SettingsPage({
         currentIndex === index && Number.isFinite(parsed) ? parsed : day
       )),
     }));
+  };
+
+  const handleCheckForUpdates = () => {
+    // Legacy host hook (kept for embedders/tests) fires alongside the real
+    // bridge check; the bridge result drives the visible status line.
+    if (updateHandler) {
+      void Promise.resolve(updateHandler()).catch(() => undefined);
+    }
+    if (updaterBridge) {
+      void updaterBridge.checkForUpdates()
+        .then(setUpdateState)
+        .catch(() => setUpdateState({ status: 'error' }));
+      return;
+    }
+    if (!updateHandler) {
+      // No desktop bridge (browser/dev): never claim a check happened.
+      setUpdateState({ status: 'disabled' });
+    }
+  };
+
+  const handleRestartToUpdate = () => {
+    if (!updaterBridge) {
+      return;
+    }
+    void updaterBridge.restartToUpdate()
+      .then((started) => {
+        if (!started) {
+          setUpdateState({ status: 'error' });
+        }
+      })
+      .catch(() => setUpdateState({ status: 'error' }));
   };
 
   const invokeAction = (action: (() => void | Promise<void>) | undefined, success: string, failure: string) => {
@@ -633,7 +746,13 @@ export function SettingsPage({
                     </p>
                     <p className="settings-muted">Updates are checked without changing local records.</p>
                   </div>
-                  <button className="button" type="button" onClick={() => invokeAction(updateHandler, 'Update check requested.', 'Update check could not be started.')}>Check for updates</button>
+                  <button className="button" type="button" onClick={handleCheckForUpdates}>Check for updates</button>
+                  <p className="settings-muted" role="status">{updateStatusMessage(updateState)}</p>
+                  {updateState.status === 'downloaded' ? (
+                    <button className="button" type="button" onClick={handleRestartToUpdate}>
+                      Restart to install
+                    </button>
+                  ) : null}
                 </div>
               </div>
               <p className="settings-resend-note"><strong>Resend:</strong> {resendNote}</p>

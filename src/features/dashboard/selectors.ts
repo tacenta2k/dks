@@ -12,13 +12,14 @@ import {
   type StatusThresholds,
 } from '../../lib/date';
 import type { SheetRow } from '../sheet/types';
+import type { DaysLeftRange, QuickFilter, StatusFilterValue } from '../sheet/filters';
 
 export type DashboardFilterId =
   | 'all'
-  | 'expiringToday'
+  | 'expiresToday'
+  | 'expiresIn1Day'
   | 'expiringThisWeek'
   | 'expiringThisMonth'
-  | 'within2Months'
   | 'within3Months'
   | 'within6Months'
   | 'within1Year'
@@ -55,19 +56,78 @@ export interface DashboardSelectorOptions {
   colors?: Partial<StatusColors> | Record<string, string>;
 }
 
+/**
+ * The exact nine summary cards, in display order. Windows are CUMULATIVE
+ * and start at day 0: an entry expiring today is inside the 1-day, week,
+ * month, 3-month, 6-month and 1-year cards (it is never "Expired" — that
+ * card is strictly daysLeft < 0), and additionally has its own
+ * "Expires today" card (daysLeft === 0; the overlap with the 1-day card is
+ * intentional). Entries with no usable expiry count only toward
+ * "Total entries".
+ */
 export const DASHBOARD_CARD_DEFINITIONS: ReadonlyArray<
   Pick<DashboardCard, 'id' | 'label'>
 > = Object.freeze([
   { id: 'all', label: 'Total entries' },
-  { id: 'expiringToday', label: 'Expiring today' },
-  { id: 'expiringThisWeek', label: 'Expiring this week' },
-  { id: 'expiringThisMonth', label: 'Expiring this month' },
-  { id: 'within2Months', label: 'Within 2 months' },
-  { id: 'within3Months', label: 'Within 3 months' },
-  { id: 'within6Months', label: 'Within 6 months' },
-  { id: 'within1Year', label: 'Within 1 year' },
+  { id: 'expiresToday', label: 'Expires today' },
+  { id: 'expiresIn1Day', label: 'Expires in 1 day' },
+  { id: 'expiringThisWeek', label: 'This week' },
+  { id: 'expiringThisMonth', label: 'This month' },
+  { id: 'within3Months', label: '3 months' },
+  { id: 'within6Months', label: '6 months' },
+  { id: 'within1Year', label: '1 year' },
   { id: 'expired', label: 'Expired' },
 ]);
+
+/** Inclusive upper bound (days left) for each cumulative upcoming window. */
+export const DASHBOARD_WINDOW_MAX_DAYS: Partial<Record<DashboardFilterId, number>> = Object.freeze({
+  expiresIn1Day: 1,
+  expiringThisWeek: 7,
+  expiringThisMonth: 30,
+  within3Months: 90,
+  within6Months: 180,
+  within1Year: 365,
+});
+
+export interface DashboardSheetFilter {
+  quickFilter: QuickFilter;
+  status: StatusFilterValue;
+  daysRange: DaysLeftRange | null;
+}
+
+/**
+ * The exact Visa Sheet filter for a dashboard card: the filtered sheet shows
+ * precisely the rows the card counted. Existing sheet filters are reused
+ * where they are already equivalent (≤7d/≤30d/≤90d chips are 0-based
+ * cumulative ranges; "Expired" is the status dropdown). The 1-day, 6-month
+ * and 1-year cards have no chip, so they use the sheet's internal exact
+ * days-range filter instead — the visible chip set is unchanged.
+ */
+export function dashboardSheetFilter(filter: DashboardFilterId): DashboardSheetFilter {
+  switch (filter) {
+    case 'all':
+      return { quickFilter: 'all', status: '', daysRange: null };
+    case 'expiresToday':
+      // The existing "Today" chip is exactly daysLeft === 0.
+      return { quickFilter: 'today', status: '', daysRange: null };
+    case 'expiresIn1Day':
+      return { quickFilter: 'all', status: '', daysRange: { min: 0, max: 1 } };
+    case 'expiringThisWeek':
+      return { quickFilter: '7', status: '', daysRange: null };
+    case 'expiringThisMonth':
+      return { quickFilter: '30', status: '', daysRange: null };
+    case 'within3Months':
+      return { quickFilter: '90', status: '', daysRange: null };
+    case 'within6Months':
+      return { quickFilter: 'all', status: '', daysRange: { min: 0, max: 180 } };
+    case 'within1Year':
+      return { quickFilter: 'all', status: '', daysRange: { min: 0, max: 365 } };
+    case 'expired':
+      return { quickFilter: 'all', status: 'Expired', daysRange: null };
+    default:
+      return { quickFilter: 'all', status: '', daysRange: null };
+  }
+}
 
 const STATUS_ORDER: readonly ExpiryStatus[] = [
   'Valid',
@@ -125,9 +185,9 @@ function monthOffset(year: number, month: number, startYear: number, startMonth:
 }
 
 function withinDays(days: number | null, maximum: number): boolean {
-  // Keep the window cards aligned with the sheet's quick filters: today has
-  // its own card, while a future window starts tomorrow.
-  return days !== null && days > 0 && days <= maximum;
+  // Cumulative windows include day 0: an entry expiring TODAY is inside
+  // every upcoming card (1-day through 1-year) and is never Expired.
+  return days !== null && days >= 0 && days <= maximum;
 }
 
 /**
@@ -154,18 +214,18 @@ export function getDashboardSummary(
   });
 
   const countWithin = (maximum: number) => daysByRow.filter(({ days }) => withinDays(days, maximum)).length;
-  // "Expires today" (days = 0) is a distinct status; Expired counts only
-  // dates that have already passed.
-  const expiredCount = daysByRow.filter(({ status }) => status === 'Expired').length;
+  // Expired is strictly past dates (daysLeft < 0); day 0 belongs to every
+  // upcoming cumulative window instead.
+  const expiredCount = daysByRow.filter(({ days }) => days !== null && days < 0).length;
   const cardCounts: Record<DashboardFilterId, number> = {
     all: activeRows.length,
-    expiringToday: daysByRow.filter(({ days }) => days === 0).length,
-    expiringThisWeek: countWithin(7),
-    expiringThisMonth: countWithin(30),
-    within2Months: countWithin(60),
-    within3Months: countWithin(90),
-    within6Months: countWithin(180),
-    within1Year: countWithin(365),
+    expiresToday: daysByRow.filter(({ days }) => days === 0).length,
+    expiresIn1Day: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiresIn1Day!),
+    expiringThisWeek: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiringThisWeek!),
+    expiringThisMonth: countWithin(DASHBOARD_WINDOW_MAX_DAYS.expiringThisMonth!),
+    within3Months: countWithin(DASHBOARD_WINDOW_MAX_DAYS.within3Months!),
+    within6Months: countWithin(DASHBOARD_WINDOW_MAX_DAYS.within6Months!),
+    within1Year: countWithin(DASHBOARD_WINDOW_MAX_DAYS.within1Year!),
     expired: expiredCount,
   };
 

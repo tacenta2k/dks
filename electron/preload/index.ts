@@ -103,6 +103,13 @@ export interface DksLocalUpdateColumnInput {
   idempotencyKey?: string;
 }
 
+export interface DksLocalReorderColumnsInput {
+  /** Active user column ids in their new display order. */
+  columnIds: readonly string[];
+  role: string;
+  idempotencyKey?: string;
+}
+
 export interface DksLocalImportRecord {
   data: Record<string, unknown>;
   category?: string | null;
@@ -200,6 +207,7 @@ export interface DksLocalApi {
   permanentDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
+  reorderColumns: (input: DksLocalReorderColumnsInput) => Promise<DksLocalColumn[]>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
   rekeyColumn: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {
@@ -268,6 +276,7 @@ const LOCAL_CHANNELS = {
   permanentDeleteRow: 'dks:local:permanent-delete-row',
   addColumn: 'dks:local:add-column',
   updateColumn: 'dks:local:update-column',
+  reorderColumns: 'dks:local:reorder-columns',
   deleteColumn: 'dks:local:delete-column',
   rekeyColumn: 'dks:local:rekey-column',
   importRecords: 'dks:local:import-records',
@@ -362,6 +371,26 @@ function validateUpdateColumn(value: unknown): void {
   const input = requireRecord(value, 'update column input');
   requireId(input.id ?? input.columnId, 'column id');
   requireRecord(input.patch, 'column patch');
+  requireRole(input.role);
+}
+
+function validateReorderColumns(value: unknown): void {
+  const input = requireRecord(value, 'reorder columns input');
+  if (!Array.isArray(input.columnIds) || input.columnIds.length === 0) {
+    throw new TypeError('columnIds must be a non-empty array');
+  }
+  if (input.columnIds.length > 1_000) {
+    throw new TypeError('columnIds must contain at most 1000 columns');
+  }
+  const seen = new Set<string>();
+  input.columnIds.forEach((columnId, index) => {
+    requireId(columnId, `columnIds[${index}]`);
+    const id = (columnId as string).trim();
+    if (seen.has(id)) {
+      throw new TypeError('columnIds must not contain duplicates');
+    }
+    seen.add(id);
+  });
   requireRole(input.role);
 }
 
@@ -565,6 +594,7 @@ const localApi: DksLocalApi = Object.freeze({
   permanentDeleteRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.permanentDeleteRow, input, validateAdminRowCommand),
   addColumn: (input: DksLocalColumnInput) => invokeLocal<DksLocalColumn>(LOCAL_CHANNELS.addColumn, input, validateAddColumn),
   updateColumn: (input: DksLocalUpdateColumnInput) => invokeLocal<DksLocalColumn | null>(LOCAL_CHANNELS.updateColumn, input, validateUpdateColumn),
+  reorderColumns: (input: DksLocalReorderColumnsInput) => invokeLocal<DksLocalColumn[]>(LOCAL_CHANNELS.reorderColumns, input, validateReorderColumns),
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => invokeLocal<DksLocalColumn | null>(LOCAL_CHANNELS.deleteColumn, input, validateDeleteColumn),
   rekeyColumn: (input: { oldId: string; newId: string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.rekeyColumn, input, (payload) => {
     const record = payload as Record<string, unknown>;
@@ -625,7 +655,7 @@ function normaliseUpdateState(value: unknown): UpdateState {
     return { status: 'error' };
   }
 
-  const record = value as { status?: unknown; version?: unknown };
+  const record = value as { status?: unknown; version?: unknown; progress?: unknown };
   const statuses: UpdateState['status'][] = [
     'idle',
     'checking',
@@ -634,15 +664,21 @@ function normaliseUpdateState(value: unknown): UpdateState {
     'downloaded',
     'not-available',
     'error',
+    'disabled',
   ];
 
   if (typeof record.status !== 'string' || !statuses.includes(record.status as UpdateState['status'])) {
     return { status: 'error' };
   }
 
-  return typeof record.version === 'string' && record.version.trim()
-    ? { status: record.status as UpdateState['status'], version: record.version }
-    : { status: record.status as UpdateState['status'] };
+  const state: UpdateState = { status: record.status as UpdateState['status'] };
+  if (typeof record.version === 'string' && record.version.trim()) {
+    state.version = record.version;
+  }
+  if (typeof record.progress === 'number' && Number.isFinite(record.progress)) {
+    state.progress = Math.max(0, Math.min(100, Math.round(record.progress)));
+  }
+  return state;
 }
 
 function normaliseNotificationResult(value: unknown): DksNotificationResult {

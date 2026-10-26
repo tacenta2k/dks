@@ -74,6 +74,18 @@ export function normalizeCivilIdValue(value: unknown): string {
 
 export const normalizeCivilId = normalizeCivilIdValue;
 
+/**
+ * The exact whole-value placeholder "NIL" means "no passport / no Civil ID"
+ * and is legitimately shared by many people, so it never participates in
+ * passport/Civil ID duplicate detection (no cell warning, no sheet banner).
+ * Only the whole trimmed text counts — "NIL123" or "ANIL" are real values
+ * and still warn when duplicated. Stored text is never rewritten; this only
+ * affects duplicate comparison.
+ */
+export function isNilPlaceholder(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toUpperCase() === 'NIL';
+}
+
 function isFiniteNumber(value: unknown): boolean {
   if (typeof value === 'number') {
     return Number.isFinite(value);
@@ -153,11 +165,15 @@ export function validateCell(
 
   if (passportColumn) {
     // Plain text: never a format error. The only advisory diagnostic is a
-    // non-blocking duplicate warning.
+    // non-blocking duplicate warning — and the exact placeholder "NIL" is
+    // exempt from it even if a stale caller-supplied set still contains it.
     const duplicates = options.duplicatePassportValues ?? options.duplicateValues;
     if (
-      options.duplicatePassport === true
-      || duplicateSet(duplicates).has(normalizePassportValue(value))
+      !isNilPlaceholder(value)
+      && (
+        options.duplicatePassport === true
+        || duplicateSet(duplicates).has(normalizePassportValue(value))
+      )
     ) {
       return warning('Duplicate passport value', 'duplicate-passport');
     }
@@ -170,7 +186,10 @@ export function validateCell(
     // preserved); the only advisory diagnostic is a NON-BLOCKING duplicate
     // warning — independent from the passport check.
     const duplicates = options.duplicateCivilIdValues;
-    if (duplicateSetCivilId(duplicates).has(normalizeCivilIdValue(value))) {
+    if (
+      !isNilPlaceholder(value)
+      && duplicateSetCivilId(duplicates).has(normalizeCivilIdValue(value))
+    ) {
       return warning('Duplicate Civil ID value', 'duplicate-civil-id');
     }
     return ok();
@@ -250,7 +269,7 @@ export function findDuplicatePassportValues(
 
     const data = rowData(row);
     const raw = columnNames.map((name) => data[name]).find((value) => !isEmpty(value));
-    if (isEmpty(raw)) {
+    if (isEmpty(raw) || isNilPlaceholder(raw)) {
       continue;
     }
 
@@ -288,7 +307,7 @@ export function findDuplicateCivilIdValues(
 
     const data = rowData(row);
     const raw = columnNames.map((name) => data[name]).find((value) => !isEmpty(value));
-    if (isEmpty(raw)) {
+    if (isEmpty(raw) || isNilPlaceholder(raw)) {
       continue;
     }
 

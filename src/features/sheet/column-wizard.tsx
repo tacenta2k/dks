@@ -71,7 +71,8 @@ export function columnInputToDefinition(
     position: existingColumns.length,
   };
 
-  // normalizeColumns makes the first active date_expiry column the primary,
+  // normalizeColumns keeps exactly one live primary expiry (an existing
+  // selection is preserved; the first date_expiry wins when none is marked),
   // while keeping subsequent expiry columns available for display.
   return normalizeColumns([...existingColumns, column]).find((candidate) => candidate.id === column.id) ?? column;
 }

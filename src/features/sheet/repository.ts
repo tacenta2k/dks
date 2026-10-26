@@ -1,6 +1,9 @@
 import {
+  applyColumnOrder,
   canDeleteColumn,
+  isGridSystemColumnId,
   normalizeColumns,
+  sortColumnsByPosition,
   isDaysLeftColumn,
   type ColumnDefinition,
 } from '../../lib/columns';
@@ -21,6 +24,14 @@ export interface SheetRepository {
   getRows(): Promise<SheetRow[]>;
   addColumn(input: ColumnInput): Promise<ColumnDefinition>;
   updateColumn(columnId: string, patch: Partial<ColumnDefinition>): Promise<ColumnDefinition>;
+  /**
+   * Persist a user-chosen column order (drag-reorder). `columnIds` are the
+   * active user columns in their new display order; implementations store
+   * normalized `position` values (0..n-1) and return the full ordered list.
+   * Optional so older adapters/test doubles stay assignable — SheetPage
+   * falls back to per-column position updates when it is absent.
+   */
+  reorderColumns?(columnIds: readonly string[]): Promise<ColumnDefinition[]>;
   softDeleteColumn(columnId: string, role?: string): Promise<ColumnDefinition | null>;
   createRow(data?: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
@@ -115,7 +126,9 @@ export class InMemorySheetRepository implements SheetRepository {
   }
 
   async getColumns(): Promise<ColumnDefinition[]> {
-    return clone(this.columns);
+    // `position` is the persisted order contract (SQLite returns
+    // ORDER BY position); never trust incidental array order.
+    return clone(sortColumnsByPosition(this.columns));
   }
 
   async getRows(): Promise<SheetRow[]> {
@@ -154,6 +167,35 @@ export class InMemorySheetRepository implements SheetRepository {
       currentIndex === index ? next : column
     )));
     return clone(this.columns[index]);
+  }
+
+  async reorderColumns(columnIds: readonly string[]): Promise<ColumnDefinition[]> {
+    const seen = new Set<string>();
+    for (const columnId of columnIds) {
+      if (typeof columnId !== 'string' || !columnId.trim() || isGridSystemColumnId(columnId)) {
+        throw new Error(`Unknown sheet column: ${String(columnId)}`);
+      }
+      if (seen.has(columnId)) {
+        throw new Error(`Duplicate column id in reorder: ${columnId}`);
+      }
+      seen.add(columnId);
+      const column = this.columns.find((candidate) => candidate.id === columnId);
+      if (!column || column.deleted === true) {
+        throw new Error(`Unknown sheet column: ${columnId}`);
+      }
+    }
+
+    const previousPositions = new Map(this.columns.map((column) => [column.id, column.position]));
+    const timestamp = now();
+    // Only `position` (and the LWW timestamp of columns it actually moved)
+    // changes — identity/type/options/passport/primary flags are untouched,
+    // and normalizeColumns keeps it that way for the primary expiry.
+    this.columns = normalizeColumns(applyColumnOrder(this.columns, columnIds).map((column) => (
+      previousPositions.get(column.id) !== column.position
+        ? { ...column, updatedAt: timestamp, updated_at: timestamp }
+        : column
+    )));
+    return this.getColumns();
   }
 
   async softDeleteColumn(columnId: string, role = 'admin'): Promise<ColumnDefinition | null> {

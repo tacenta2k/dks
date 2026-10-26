@@ -12,9 +12,17 @@ import {
   resolveTheme,
   saveThemePreference,
 } from '../lib/theme';
-import type { AppView, DksLocalSyncState, ThemePreference } from '../lib/types';
+import type {
+  AppView,
+  DksLocalSyncState,
+  DksUpdateState,
+  DksUpdaterApi,
+  ThemePreference,
+} from '../lib/types';
 import { localStoreErrorMessage } from '../lib/local-store-error';
 import { sanitizeSyncError } from '../lib/sync-error';
+import { rowDisplayLabel } from '../lib/labels';
+import type { DashboardFilterId } from '../features/dashboard/selectors';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell, type SyncPendingItem } from './components/AppShell';
@@ -37,6 +45,7 @@ import {
   evaluateSummaryNotifications,
   isNotificationSnoozed,
   notificationStableKey,
+  refreshExpiryNotificationLabels,
   snoozeUntil,
   type AlertSnooze,
   type NotificationRecord,
@@ -70,6 +79,11 @@ export interface AppProps {
   approvalService?: OfficeApprovalService | null;
   demoMode?: boolean;
   sheetRepository?: SheetRepository;
+  /**
+   * Desktop updater bridge (default: the frozen `window.dks.updater` preload
+   * API). Tests inject a fake here; `null` forces the no-bridge state.
+   */
+  updater?: DksUpdaterApi | null;
 }
 
 function getSystemDarkPreference(): boolean {
@@ -92,6 +106,7 @@ export function App({
   approvalService: providedApprovalService,
   demoMode,
   sheetRepository: providedSheetRepository,
+  updater: providedUpdater,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [appStore] = useState(() => createAppStore(authService, providedApprovalService));
@@ -118,6 +133,31 @@ export function App({
     createSyncingRepositoryProxy(baseSheetRepository, requestSync),
   );
   const [activeView, setActiveView] = useState<AppView>(initialView);
+  // Dashboard card navigation: the clicked card's exact filter, applied by
+  // the Visa Sheet (token increments so re-clicking a card re-applies it).
+  const [dashboardSheetFilter, setDashboardSheetFilter] = useState<
+    { filter: DashboardFilterId; token: number } | null
+  >(null);
+  const handleDashboardFilter = useCallback((filter: DashboardFilterId) => {
+    setDashboardSheetFilter((current) => ({ filter, token: (current?.token ?? 0) + 1 }));
+    setActiveView('sheet');
+  }, []);
+  const [updaterBridge] = useState<DksUpdaterApi | null>(() => (
+    providedUpdater !== undefined
+      ? providedUpdater
+      : (typeof window !== 'undefined' ? window.dks?.updater ?? null : null)
+  ));
+  const [updateState, setUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+
+  // Single renderer subscription to the main-process updater status event.
+  // The shell's update-ready pill and the Admin Settings panel both render
+  // from this one state value; neither polls or opens another IPC channel.
+  useEffect(() => {
+    if (!updaterBridge) {
+      return undefined;
+    }
+    return updaterBridge.onStatus(setUpdateState);
+  }, [updaterBridge]);
   const [themePreference, setThemePreference] = useState<ThemePreference>(
     initialThemePreference ?? loadThemePreference(),
   );
@@ -403,28 +443,54 @@ export function App({
           sheetRepository.getRows(),
           sheetRepository.getColumns(),
         ]);
+        const alertRows = rows.map((row) => ({
+          id: row.id,
+          data: row.data,
+          category: row.category,
+          deleted: row.deleted,
+        }));
+        // Legacy persisted expiry notifications may carry a body baked in
+        // with the raw entry UUID. Re-resolve their display text from the
+        // row's current human label (identity/dedupe/snooze/read state are
+        // untouched) and repair the stored payload once — after the repair
+        // the body matches, so later loads write nothing.
+        const refreshedExisting = refreshExpiryNotificationLabels(existing, alertRows, columns);
+        if (local && typeof local.updateNotification === 'function') {
+          for (const [index, record] of refreshedExisting.entries()) {
+            const original = existing[index];
+            if (record.kind === 'expiry' && original && record.body !== original.body) {
+              try {
+                await local.updateNotification({ id: record.id, payload: { body: record.body } });
+              } catch {
+                // Display is already corrected in memory; a failed repair is
+                // retried on the next load.
+              }
+            }
+          }
+        }
         const generatedExpiry = evaluateAlerts({
-          rows: rows.map((row) => ({
-            id: row.id,
-            data: row.data,
-            category: row.category,
-            deleted: row.deleted,
-          })),
+          rows: alertRows,
           columns,
           now: new Date(),
           snoozes,
-          existingNotifications: existing,
-          rowLabel: (row) => typeof row.data?.name === 'string' ? row.data.name : row.id,
+          existingNotifications: refreshedExisting,
+          // Shared human label (customer-visible columns by id AND name);
+          // the evaluator still rejects an unusable label and falls back to
+          // "Unnamed record" — a raw entry UUID never reaches a body.
+          rowLabel: (row) => rowDisplayLabel(
+            { id: row.id, data: row.data ?? {} },
+            columns,
+          ),
         });
         const generated = [
           ...generatedExpiry,
           ...evaluateSummaryNotifications({
             alerts: [
-              ...existing.filter((record): record is Extract<NotificationRecord, { kind: 'expiry' }> => record.kind === 'expiry'),
+              ...refreshedExisting.filter((record): record is Extract<NotificationRecord, { kind: 'expiry' }> => record.kind === 'expiry'),
               ...generatedExpiry,
             ],
             now: new Date(),
-            existingNotifications: existing,
+            existingNotifications: refreshedExisting,
           }),
         ];
 
@@ -452,7 +518,7 @@ export function App({
 
         if (!cancelled) {
           const merged = new Map<string, NotificationRecord>();
-          [...existing, ...remoteAdmin, ...generated].forEach((record) => merged.set(record.id, record));
+          [...refreshedExisting, ...remoteAdmin, ...generated].forEach((record) => merged.set(record.id, record));
           setNotifications(Array.from(merged.values()));
         }
       } catch {
@@ -837,6 +903,9 @@ export function App({
       userEmail={session?.user.email ?? null}
       health={health}
       syncStatus={syncStatus}
+      updateState={updateState}
+      updater={updaterBridge}
+      onUpdateStateChange={setUpdateState}
       pendingOutbox={pendingOutbox}
       localStoreError={localStoreError}
       isDemoMode={authStatus === 'demo'}
@@ -850,6 +919,8 @@ export function App({
       auditProfiles={auditProfiles}
       auditRemoteClient={authService.authClient as unknown as { rpc?: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> } | null}
       repositoryRevision={repositoryRevision}
+      onDashboardFilter={handleDashboardFilter}
+      sheetDashboardFilter={dashboardSheetFilter}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}
       onNotificationDismiss={handleNotificationDismiss}

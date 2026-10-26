@@ -56,7 +56,10 @@ const SNOOZE_LABELS: Record<Exclude<SnoozeDuration, 'custom'>, string> = {
 
 function expiryLabel(record: ExpiryNotificationRecord): string {
   // body = "<record label> expires in N days." / "<record label> expires today."
-  return record.body.replace(/\s+expires\b.*$/i, '').trim() || record.rowId;
+  // Strip only that exact generated suffix so a label that itself contains
+  // the word "expires" is not truncated. Never fall back to the raw row id.
+  const label = record.body.replace(/\s+expires (?:today|in \d+ days?)\.$/i, '').trim();
+  return label && label !== record.rowId ? label : 'Unnamed record';
 }
 
 function isSnoozed(record: NotificationRecord): boolean {
