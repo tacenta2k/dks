@@ -46,10 +46,16 @@ import {
   createSnooze,
   evaluateAlerts,
   evaluateSummaryNotifications,
+  expiryRowLabel,
   getSummaryKinds,
+  refreshExpiryNotificationLabel,
+  refreshExpiryNotificationLabels,
   type AlertColumn,
   type AlertRow,
+  type ExpiryNotificationRecord,
 } from '../src/features/notifications/alert-service';
+import { fromLocalNotification } from '../src/features/notifications/local-notifications';
+import type { DksLocalNotificationRecord } from '../src/lib/types';
 import {
   createNotificationService,
 } from '../electron/main/notifications';
@@ -300,6 +306,178 @@ describe('notification alert evaluator', () => {
     expect(screen.getByRole('button', { name: 'Snooze 1 week' })).toBeTruthy();
     expect(screen.queryByRole('button', { name: 'Snooze custom' })).toBeNull();
     expect(document.querySelector('input[type="datetime-local"]')).toBeNull();
+  });
+});
+
+describe('expiry notification human labels', () => {
+  const labelColumns: AlertColumn[] = [
+    { id: 'customer_name', name: 'Customer Name', type: 'text' },
+    { id: 'visa_expiry', name: 'Visa expiry', type: 'date_expiry', isPrimaryExpiry: true },
+  ];
+  const realUuid = '8c1f2a44-3b6d-4c2e-9f01-0123456789ab';
+
+  it('uses the customer column value (by column id or name), never the entry UUID', () => {
+    const byId = evaluateAlerts({
+      rows: [{ id: realUuid, data: { customer_name: 'Amina Ali', visa_expiry: '2026-01-01' } }],
+      columns: labelColumns,
+      now: '2026-01-01',
+      alertDays: [0],
+    });
+    expect(byId).toHaveLength(1);
+    expect(byId[0].title).toBe('Expiry due today');
+    expect(byId[0].body).toBe('Amina Ali expires today.');
+    expect(byId[0].body).not.toContain(realUuid);
+
+    // Legacy/imported rows may key data by the column NAME instead of its id.
+    const byName = evaluateAlerts({
+      rows: [{ id: realUuid, data: { 'Customer Name': 'Ravi Kumar', 'Visa expiry': '2026-01-08' } }],
+      columns: labelColumns,
+      now: '2026-01-01',
+      alertDays: [7],
+    });
+    expect(byName[0].body).toBe('Ravi Kumar expires in 7 days.');
+  });
+
+  it('falls back to exactly "Unnamed record" when the row has no usable label', () => {
+    const alerts = evaluateAlerts({
+      rows: [{ id: realUuid, data: { visa_expiry: '2026-01-01' } }],
+      columns: labelColumns,
+      now: '2026-01-01',
+      alertDays: [0],
+    });
+    expect(alerts[0].body).toBe('Unnamed record expires today.');
+    expect(alerts[0].body).not.toContain(realUuid);
+    // A bare date value is never mistaken for a name either.
+    expect(expiryRowLabel(
+      { id: realUuid, data: { visa_expiry: '2026-01-01', other_date: '2025-12-01' } },
+      labelColumns,
+    )).toBe('Unnamed record');
+  });
+
+  it('rejects a caller label callback that returns the raw row id', () => {
+    const alerts = evaluateAlerts({
+      rows: [{ id: realUuid, data: { customer_name: 'Meera Joshi', visa_expiry: '2026-01-02' } }],
+      columns: labelColumns,
+      now: '2026-01-01',
+      alertDays: [1],
+      // The old buggy caller contract: `data?.name ?? row.id`.
+      rowLabel: (r) => (typeof r.data?.name === 'string' ? r.data.name : r.id),
+    });
+    expect(alerts[0].body).toBe('Meera Joshi expires in 1 day.');
+    expect(alerts[0].body).not.toContain(realUuid);
+  });
+
+  function legacyRecord(overrides: Partial<ExpiryNotificationRecord> = {}): ExpiryNotificationRecord {
+    return {
+      id: `expiry:${realUuid}:2026-10-26:0`,
+      kind: 'expiry',
+      rowId: realUuid,
+      expiryColumnId: 'visa_expiry',
+      expiryValue: '2026-10-26',
+      daysLeft: 0,
+      alertDay: 0,
+      dedupeKey: `expiry:${realUuid}:2026-10-26:0`,
+      title: 'Expiry due today',
+      body: `${realUuid} expires today.`,
+      createdAt: '2026-10-26T05:00:00.000Z',
+      read: false,
+      dismissed: false,
+      ...overrides,
+    };
+  }
+
+  it('repairs a persisted UUID body on load, preserving identity and user state', () => {
+    const legacy = legacyRecord({ read: true, snoozedUntil: '2026-10-27T05:00:00.000Z' });
+    const refreshed = refreshExpiryNotificationLabel(
+      legacy,
+      { id: realUuid, data: { customer_name: 'Amina Ali', visa_expiry: '2026-10-26' } },
+      labelColumns,
+    );
+
+    expect(refreshed.body).toBe('Amina Ali expires today.');
+    expect(refreshed.body).not.toContain(realUuid);
+    // Everything that identifies or state-tracks the alert is untouched.
+    expect(refreshed.id).toBe(legacy.id);
+    expect(refreshed.dedupeKey).toBe(legacy.dedupeKey);
+    expect(refreshed.rowId).toBe(realUuid);
+    expect(refreshed.expiryValue).toBe('2026-10-26');
+    expect(refreshed.daysLeft).toBe(0);
+    expect(refreshed.alertDay).toBe(0);
+    expect(refreshed.createdAt).toBe(legacy.createdAt);
+    expect(refreshed.read).toBe(true);
+    expect(refreshed.dismissed).toBe(false);
+    expect(refreshed.snoozedUntil).toBe('2026-10-27T05:00:00.000Z');
+
+    // Dismissed legacy records stay dismissed through the repair.
+    const dismissed = refreshExpiryNotificationLabel(legacyRecord({ dismissed: true }), null, labelColumns);
+    expect(dismissed.dismissed).toBe(true);
+    // The row is gone: safe fallback, still no UUID.
+    expect(dismissed.body).toBe('Unnamed record expires today.');
+  });
+
+  it('does not duplicate the alert when evaluation runs against repaired history', () => {
+    const repaired = refreshExpiryNotificationLabels(
+      [legacyRecord()],
+      [{ id: realUuid, data: { customer_name: 'Amina Ali', visa_expiry: '2026-10-26' } }],
+      labelColumns,
+    );
+    const generated = evaluateAlerts({
+      rows: [{ id: realUuid, data: { customer_name: 'Amina Ali', visa_expiry: '2026-10-26' } }],
+      columns: labelColumns,
+      now: '2026-10-26',
+      alertDays: [0],
+      existingNotifications: repaired,
+    });
+    expect(generated).toEqual([]);
+  });
+
+  it('leaves non-generated bodies and already-correct bodies byte-identical', () => {
+    const custom = legacyRecord({ body: 'Custom operator note for this record' });
+    expect(refreshExpiryNotificationLabel(custom, { id: realUuid, data: { customer_name: 'Amina Ali' } }, labelColumns))
+      .toBe(custom);
+
+    const correct = legacyRecord({ body: 'Amina Ali expires today.' });
+    expect(refreshExpiryNotificationLabel(correct, { id: realUuid, data: { customer_name: 'Amina Ali' } }, labelColumns))
+      .toBe(correct);
+  });
+
+  it('repairs records reloaded from the local notification store payload', () => {
+    const stored: DksLocalNotificationRecord = {
+      id: 42,
+      type: 'expiry',
+      message: `${realUuid} expires today.`,
+      payload: { ...legacyRecord() },
+      read: false,
+      dismissed: false,
+      createdAt: '2026-10-26T05:00:00.000Z',
+      updatedAt: '2026-10-26T05:00:00.000Z',
+    };
+    const loaded = fromLocalNotification(stored);
+    expect(loaded?.kind).toBe('expiry');
+
+    const [refreshed] = refreshExpiryNotificationLabels(
+      [loaded!],
+      [{ id: realUuid, data: { customer_name: 'Amina Ali', visa_expiry: '2026-10-26' } }],
+      labelColumns,
+    );
+    expect(refreshed).toMatchObject({ kind: 'expiry', body: 'Amina Ali expires today.' });
+
+    // The bell renders the repaired body and secondary line without any UUID.
+    render(createElement(NotificationBell, { notifications: [refreshed] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1 unread)' }));
+    expect(screen.getByText('Amina Ali expires today.')).toBeTruthy();
+    expect(screen.getByText('Amina Ali · 26/10/2026')).toBeTruthy();
+    expect(screen.queryByText(new RegExp(realUuid))).toBeNull();
+  });
+
+  it('derives the bell secondary line without leaking the row id from a legacy body', () => {
+    // Even if a record somehow reaches the bell unrepaired, the meta line
+    // must not echo the row UUID (the App-level refresh fixes the primary
+    // line on load; this is the display-time safety net for the meta line).
+    render(createElement(NotificationBell, { notifications: [legacyRecord()] }));
+    fireEvent.click(screen.getByRole('button', { name: 'Notifications (1 unread)' }));
+    expect(screen.getByText('Unnamed record · 26/10/2026')).toBeTruthy();
+    expect(screen.queryByText(new RegExp(`${realUuid} ·`))).toBeNull();
   });
 });
 

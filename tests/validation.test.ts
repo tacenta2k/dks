@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 
 import { type ColumnDefinition } from '../src/lib/columns';
 import {
+  findDuplicateCivilIdValues,
   findDuplicatePassportValues,
+  isNilPlaceholder,
   normalizePassportValue,
   validateCell,
 } from '../src/lib/validation';
@@ -107,5 +109,103 @@ describe('cell diagnostics', () => {
       { id: 'two', data: { Passport: 'A-1' } },
     ];
     expect(findDuplicatePassportValues(rows, 'Passport').size).toBe(0);
+  });
+});
+
+describe('NIL placeholder duplicate exemption', () => {
+  const nilSpellings = ['NIL', 'nil', 'Nil', 'nIl', '  NIL  ', '\tnil\n'];
+
+  it('recognises only the whole trimmed value as the placeholder', () => {
+    for (const value of nilSpellings) {
+      expect(isNilPlaceholder(value)).toBe(true);
+    }
+    for (const value of ['NIL123', 'ANIL', 'NIL-1', 'NIL NIL', '', '   ', null, undefined, 0]) {
+      expect(isNilPlaceholder(value)).toBe(false);
+    }
+  });
+
+  it('never flags shared NIL passports, in any casing or padding', () => {
+    const rows = nilSpellings.map((value, index) => ({
+      id: `row-${index}`,
+      data: { Passport: value },
+    }));
+    expect(findDuplicatePassportValues(rows, 'Passport').size).toBe(0);
+  });
+
+  it('never flags shared NIL Civil IDs, in any casing or padding', () => {
+    const civilColumn = column({ id: 'civil', name: 'Civil ID', type: 'civil_id' });
+    const rows = nilSpellings.map((value, index) => ({
+      id: `row-${index}`,
+      data: { civil: value },
+    }));
+    expect(findDuplicateCivilIdValues(rows, civilColumn).size).toBe(0);
+  });
+
+  it('still flags partial NIL values and real duplicates alongside NIL rows', () => {
+    const passportRows = [
+      { id: 'n1', data: { Passport: 'NIL' } },
+      { id: 'n2', data: { Passport: 'nil' } },
+      { id: 'p1', data: { Passport: 'NIL123' } },
+      { id: 'p2', data: { Passport: 'nil123' } },
+      { id: 'a1', data: { Passport: 'ANIL' } },
+      { id: 'a2', data: { Passport: 'anil' } },
+      { id: 'r1', data: { Passport: 'X98765' } },
+      { id: 'r2', data: { Passport: 'x98765' } },
+    ];
+    const duplicates = findDuplicatePassportValues(passportRows, 'Passport');
+    expect(duplicates.has('NIL')).toBe(false);
+    expect(duplicates.has('NIL123')).toBe(true);
+    expect(duplicates.has('ANIL')).toBe(true);
+    expect(duplicates.has('X98765')).toBe(true);
+
+    const civilColumn = column({ id: 'civil', name: 'Civil ID', type: 'civil_id' });
+    const civilRows = [
+      { id: 'n1', data: { civil: '  NIL  ' } },
+      { id: 'n2', data: { civil: 'Nil' } },
+      { id: 'p1', data: { civil: 'NIL123' } },
+      { id: 'p2', data: { civil: 'NIL123' } },
+      { id: 'r1', data: { civil: '00123' } },
+      { id: 'r2', data: { civil: '00123' } },
+    ];
+    const civilDuplicates = findDuplicateCivilIdValues(civilRows, civilColumn);
+    expect(civilDuplicates.has('NIL')).toBe(false);
+    expect(civilDuplicates.has('NIL123')).toBe(true);
+    // Leading zeroes stay significant: 00123 is its own value, never 123.
+    expect(civilDuplicates.has('00123')).toBe(true);
+    expect(civilDuplicates.has('123')).toBe(false);
+  });
+
+  it('raises no cell warning for NIL, even with a stale duplicate set or flag', () => {
+    const passportColumn = column({ name: 'Passport', isPassport: true });
+    for (const value of nilSpellings) {
+      expect(validateCell(value, passportColumn, {
+        duplicatePassportValues: new Set(['NIL']),
+      }).severity).toBe('none');
+      expect(validateCell(value, passportColumn, {
+        duplicatePassport: true,
+      }).severity).toBe('none');
+    }
+
+    const civilColumn = column({ id: 'civil', name: 'Civil ID', type: 'civil_id' });
+    for (const value of nilSpellings) {
+      expect(validateCell(value, civilColumn, {
+        duplicateCivilIdValues: new Set(['NIL']),
+      }).severity).toBe('none');
+    }
+  });
+
+  it('keeps real duplicate cell warnings non-blocking next to NIL values', () => {
+    const passportColumn = column({ name: 'Passport', isPassport: true });
+    const rows = [
+      { id: 'n1', data: { Passport: 'NIL' } },
+      { id: 'r1', data: { Passport: 'P-77' } },
+      { id: 'r2', data: { Passport: 'P-77' } },
+    ];
+    const duplicates = findDuplicatePassportValues(rows, 'Passport');
+    const diagnostic = validateCell('P-77', passportColumn, { duplicatePassportValues: duplicates });
+    expect(diagnostic.valid).toBe(true);
+    expect(diagnostic.severity).toBe('warning');
+    expect(diagnostic.message).toMatch(/duplicate/i);
+    expect(validateCell('nil', passportColumn, { duplicatePassportValues: duplicates }).severity).toBe('none');
   });
 });

@@ -24,10 +24,36 @@ describe('dashboard page', () => {
     render(<DashboardPage repository={repository} today="2026-01-01" />);
 
     expect(await screen.findByTestId('dashboard-card-total')).toHaveTextContent('9');
-    expect(screen.getByTestId('dashboard-card-today')).toHaveTextContent('1');
-    expect(screen.getByTestId('dashboard-card-week')).toHaveTextContent('1');
-    // "Expires today" is distinct from "Expired": only the past date counts.
+    // Cumulative 0-based windows: the entry expiring today (day 0) is inside
+    // every upcoming card, and only the past date counts as Expired.
+    expect(screen.getByTestId('dashboard-card-1-day')).toHaveTextContent('1');
+    expect(screen.getByTestId('dashboard-card-week')).toHaveTextContent('2');
+    expect(screen.getByTestId('dashboard-card-month')).toHaveTextContent('3');
+    expect(screen.getByTestId('dashboard-card-3-months')).toHaveTextContent('5');
+    expect(screen.getByTestId('dashboard-card-6-months')).toHaveTextContent('6');
+    expect(screen.getByTestId('dashboard-card-1-year')).toHaveTextContent('7');
     expect(screen.getByTestId('dashboard-card-expired')).toHaveTextContent('1');
+    // The removed cards must not come back.
+    expect(screen.queryByTestId('dashboard-card-today')).toBeNull();
+    expect(screen.queryByTestId('dashboard-card-2-months')).toBeNull();
+    expect(screen.queryByText('Expiring today')).toBeNull();
+    expect(screen.queryByText('Within 2 months')).toBeNull();
+    // Exact card set and order.
+    const cardIds = Array.from(document.querySelectorAll('[data-testid^="dashboard-card-"]'))
+      .map((node) => node.getAttribute('data-testid'));
+    expect(cardIds).toEqual([
+      'dashboard-card-total',
+      'dashboard-card-1-day',
+      'dashboard-card-week',
+      'dashboard-card-month',
+      'dashboard-card-3-months',
+      'dashboard-card-6-months',
+      'dashboard-card-1-year',
+      'dashboard-card-expired',
+    ]);
+    for (const label of ['Total entries', 'Expires in 1 day', 'This week', 'This month', '3 months', '6 months', '1 year']) {
+      expect(screen.getByText(label)).toBeInTheDocument();
+    }
     expect(screen.getByRole('img', { name: 'Status breakdown' })).toBeInTheDocument();
     expect(screen.getByRole('img', { name: 'Expiries over the next 12 months' })).toBeInTheDocument();
     expect(screen.getByText('Valid')).toBeInTheDocument();
@@ -49,7 +75,7 @@ describe('dashboard page', () => {
       />,
     );
 
-    fireEvent.click(await screen.findByRole('button', { name: /Expiring this week/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /This week/i }));
 
     expect(onFilter).toHaveBeenCalledWith('expiringThisWeek');
   });

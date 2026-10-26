@@ -2123,3 +2123,73 @@ of admin rows failing at push time. Out of scope here; tracked as RLS-09.
   in this sandbox (header download blocked); on Windows the documented
   `npm rebuild better-sqlite3` remains the right command.
 - Windows/live verification stays USER-ONLY.
+
+---
+
+## 29. NIL duplicates, notification labels, dashboard cards, Civil ID verify (2026-10-26)
+
+Branch `arena/9376f77d-dks`, stacked on the column-reorder fix `5717c33`
+(unmerged in `main`; verified by ancestry + code). WIP checkpoint `15ce962`
+pushed before test work; this section describes the completed state.
+
+### 29.1 A — NIL placeholder duplicate exemption (SHEET-23)
+
+- `src/lib/validation.ts`: new shared `isNilPlaceholder()` — whole trimmed
+  value equal to `NIL` case-insensitively. Both `findDuplicatePassportValues`
+  and `findDuplicateCivilIdValues` skip NIL rows; `validateCell` suppresses
+  the duplicate warning for a NIL cell even against a stale set/flag.
+  Banners (SheetPage / grid-columns) already consume the same finders.
+- Partials (`NIL123`, `ANIL`) still warn; real duplicates still warn next to
+  NIL rows; stored text (incl. leading zeroes) untouched. Root cause: the
+  scanners counted normalized NIL like any real identifier.
+
+### 29.2 B — Notification human labels (NOTIF-02)
+
+- Root cause: `App.tsx` passed `rowLabel: (row) => data?.name ?? row.id` —
+  a literal `name` key lookup that fell back to the entry UUID, which was
+  baked into persisted bodies, the bell (primary + meta lines) and OS text.
+- Fix: App now supplies shared `rowDisplayLabel` (customer columns by id AND
+  name); `alert-service` validates any supplied label (never the row id,
+  never a date) and resolves via `expiryRowLabel()` → "Unnamed record".
+  `refreshExpiryNotificationLabels()` rebuilds machine-generated legacy
+  bodies on load from the row's current label and App repairs the stored
+  payload once via `updateNotification({payload:{body}})`; id, dedupe key,
+  expiry value, milestone, snooze, read/dismissed preserved; non-generated
+  bodies left verbatim. Bell meta-line fallback is "Unnamed record" (suffix
+  anchored to the exact generated sentence); office-delete remote mapping no
+  longer falls back to the entry id. Email digest keeps its own redacted
+  server-side label (`digest_row_label`) — untouched.
+
+### 29.3 C — Dashboard 8 cumulative cards (DASH-02 override)
+
+- Exact set/order: Total entries; Expires in 1 day (0–1); This week (0–7);
+  This month (0–30); 3 months (0–90); 6 months (0–180); 1 year (0–365);
+  Expired (<0). `withinDays` is now `0 <= days <= max` (was `days > 0`);
+  Expired strictly `< 0`; null/invalid expiry only in Total.
+- Card clicks previously did nothing in production (App never passed
+  `onDashboardFilter`). Now App → AppShell → SheetPage apply
+  `dashboardSheetFilter()`: ≤7d/≤30d/≤90d chips + Expired status reused;
+  internal exact `daysRange` (new in `filters.ts`) for 1-day/6m/1y; any
+  chip/status interaction clears it. Visible chips, status dropdown, print
+  presets, visual design and both charts unchanged.
+
+### 29.4 D — Civil ID sync (verified; no code change)
+
+- `supabase/schema.sql` + `ARENA/sql/civil-id-type.sql` permit `civil_id`;
+  client payload sends the literal type (`toRemoteColumn`); failed outbox
+  items stay `failed`, are re-selected every sync with no attempts cap, and
+  payloads rebuild from the current snapshot — so the queued item succeeds
+  after the migration (matches owner's "Saved to cloud", 0 pending).
+  Regression test proves reject → reject → widen → healthy with the remote
+  row carrying `type: 'civil_id'`. No new SQL.
+
+### 29.5 Gate (sandbox, Node 22 — pinned 20.19.0 unavailable here)
+
+- `npm run typecheck`: PASS. `npm test`: 70 files, 554 passed | 3 skipped
+  (+29 tests: validation NIL matrix, Civil ID NIL banner, notification
+  labels + legacy repair, dashboard boundaries/nesting/filter equivalence,
+  dashboard→sheet flow, Civil ID sync retry, office-delete fallback).
+  `npm run build`: PASS.
+- Pop!_OS / Windows / live-Supabase / Office-approval verification remains
+  USER-ONLY. Owner earlier confirmed: civil-id-type.sql applied live; sync
+  "Saved to cloud", 0 pending.

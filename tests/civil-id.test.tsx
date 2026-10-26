@@ -184,4 +184,26 @@ describe('Civil ID end-to-end in the grid (rendered) and repository', () => {
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     });
   });
+
+  it('shows no duplicate banner for shared NIL Civil IDs but still banners real duplicates', async () => {
+    await repository.createRow({ full_name: 'No Id One', 'Civil ID': 'NIL' });
+    await repository.createRow({ full_name: 'No Id Two', 'Civil ID': 'nil' });
+    await repository.createRow({ full_name: 'No Id Three', 'Civil ID': '  NIL  ' });
+
+    const { rerender } = render(<SheetPage repository={repository} role="office" refreshToken={0} renderGridInTests={false} />);
+    // The page settles with all three NIL rows visible and no advisory banner.
+    expect(await screen.findByText('No Id Three')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+
+    // A real duplicated Civil ID alongside the NIL rows still warns, and the
+    // banner never lists NIL as an offender.
+    await repository.createRow({ full_name: 'Real One', 'Civil ID': '00555' });
+    await repository.createRow({ full_name: 'Real Two', 'Civil ID': '00555' });
+    rerender(<SheetPage repository={repository} role="office" refreshToken={1} renderGridInTests={false} />);
+
+    const banner = await screen.findByRole('alert');
+    expect(banner).toHaveTextContent(/duplicate civil id/i);
+    expect(banner).toHaveTextContent('00555');
+    expect(banner).not.toHaveTextContent(/NIL/i);
+  });
 });
