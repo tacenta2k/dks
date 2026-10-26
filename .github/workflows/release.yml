@@ -1,0 +1,211 @@
+name: Release DKS
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: Version bump
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+
+concurrency:
+  group: release-dks
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and publish Windows release
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Require main branch
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            Write-Error "Release DKS must be run from the main branch (current ref: $env:GITHUB_REF)."
+            exit 1
+          }
+
+          git switch main
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          node -e "require('better-sqlite3')"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "better-sqlite3 is not loadable by Node after npm ci; rebuilding it for Node before tests."
+            npm rebuild better-sqlite3
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+            node -e "require('better-sqlite3')"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test -- --testTimeout=60000
+
+      - name: Bump version and create tag
+        id: version
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          npm version ${{ inputs.bump }} -m "chore(release): v%s"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $version = (node -p "require('./package.json').version").Trim()
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            Write-Error "Could not read the bumped version from package.json."
+            exit 1
+          }
+
+          $tag = "v$version"
+          $installer = "DKS-$version-win-x64.exe"
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "Created version commit and tag $tag."
+
+      - name: Write Vite build environment
+        shell: pwsh
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          $missing = @()
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_URL)) {
+            $missing += "VITE_SUPABASE_URL"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_PUBLISHABLE_KEY)) {
+            $missing += "VITE_SUPABASE_PUBLISHABLE_KEY"
+          }
+          if ($missing.Count -gt 0) {
+            Write-Error "Missing required repository secret(s): $($missing -join ', '). Add them under Settings > Secrets and variables > Actions."
+            exit 1
+          }
+
+          $envPath = Join-Path $env:GITHUB_WORKSPACE ".env"
+          $lines = @(
+            "VITE_SUPABASE_URL=$env:VITE_SUPABASE_URL"
+            "VITE_SUPABASE_PUBLISHABLE_KEY=$env:VITE_SUPABASE_PUBLISHABLE_KEY"
+          )
+          [System.IO.File]::WriteAllLines(
+            $envPath,
+            $lines,
+            [System.Text.UTF8Encoding]::new($false)
+          )
+
+      - name: Push version commit and tag
+        run: git push origin main --follow-tags
+
+      - name: Build Windows installer and upload draft release
+        run: npm run release
+
+      - name: Verify draft release assets
+        id: verify
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          INSTALLER_NAME: ${{ steps.version.outputs.installer }}
+        run: |
+          $releaseJson = gh release view $env:RELEASE_TAG --json tagName,isDraft,isPrerelease,assets,url
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $release = $releaseJson | ConvertFrom-Json
+          if ($release.tagName -ne $env:RELEASE_TAG) {
+            throw "Release tag mismatch: expected $env:RELEASE_TAG, got $($release.tagName)."
+          }
+          if (-not $release.isDraft) {
+            throw "Release $env:RELEASE_TAG must still be a draft during asset verification."
+          }
+          if ($release.isPrerelease) {
+            throw "Release $env:RELEASE_TAG must not be marked as a prerelease."
+          }
+
+          $expectedAssets = @(
+            $env:INSTALLER_NAME
+            "$($env:INSTALLER_NAME).blockmap"
+            "latest.yml"
+          ) | Sort-Object
+          $actualAssets = @($release.assets | ForEach-Object { $_.name }) | Sort-Object
+
+          if (($actualAssets -join ",") -ne ($expectedAssets -join ",")) {
+            throw "Unexpected release assets for $env:RELEASE_TAG. Expected: $($expectedAssets -join ', '). Actual: $($actualAssets -join ', ')."
+          }
+
+          $checkDir = Join-Path $env:RUNNER_TEMP "dks-release-check"
+          New-Item -ItemType Directory -Force -Path $checkDir | Out-Null
+          gh release download $env:RELEASE_TAG --pattern "latest.yml" --dir $checkDir --clobber
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $latestYml = Get-Content -Raw (Join-Path $checkDir "latest.yml")
+          $escapedVersion = [regex]::Escape($env:RELEASE_VERSION)
+          if ($latestYml -notmatch "(?m)^version:\s*$escapedVersion\s*$") {
+            throw "latest.yml for $env:RELEASE_TAG does not declare version $env:RELEASE_VERSION."
+          }
+          if ($latestYml -notmatch [regex]::Escape($env:INSTALLER_NAME)) {
+            throw "latest.yml for $env:RELEASE_TAG does not reference $env:INSTALLER_NAME."
+          }
+
+          Write-Host "Verified draft release $env:RELEASE_TAG and its updater assets."
+
+      - name: Publish verified release
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh release edit $env:RELEASE_TAG --draft=false --latest
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKS-${{ steps.version.outputs.version }}-win-x64-installer
+          path: release/${{ steps.version.outputs.installer }}
+          if-no-files-found: error
+
+      - name: Write job summary
+        shell: pwsh
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
+          INSTALLER_NAME: ${{ steps.version.outputs.installer }}
+        run: |
+          @(
+            "# DKS release published"
+            ""
+            "- **Version:** $env:RELEASE_VERSION"
+            "- **Release:** $env:RELEASE_URL"
+            "- **Installer:** $env:INSTALLER_NAME"
+          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
