@@ -1,6 +1,8 @@
 import { isValidIsoDate } from '../../lib/date';
 import {
+  applyColumnOrder,
   normalizeColumns,
+  sortColumnsByPosition,
   type ColumnDefinition,
 } from '../../lib/columns';
 import type {
@@ -281,11 +283,13 @@ export class ElectronSheetRepository implements SheetRepository {
   async getColumns(): Promise<ColumnDefinition[]> {
     const snapshot = await this.snapshot();
     // normalizeColumns heals the primary-expiry invariant in memory as well
-    // (first live date_expiry is the single primary; stale flags are dropped)
-    // so persisted junk can never leak into guards driven by these columns.
-    return normalizeColumns(clone(snapshot.columns
+    // (stale flags are dropped) so persisted junk can never leak into guards
+    // driven by these columns. Sorting by `position` makes the persisted
+    // column order the rendered order for every bridge, not just SQLite's
+    // ORDER BY — a user-saved drag order must survive every reload.
+    return sortColumnsByPosition(normalizeColumns(clone(snapshot.columns
       .map((column) => localColumn(column, 'column'))
-      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true)));
+      .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true))));
   }
 
   async getRows(): Promise<SheetRow[]> {
@@ -318,6 +322,49 @@ export class ElectronSheetRepository implements SheetRepository {
       }), 'updated column'),
       () => this.fallback.updateColumn(columnId, patch),
     );
+  }
+
+  /**
+   * Persist a drag-reorder. Preferred path is the bridge's atomic
+   * position-only reorder (one SQLite transaction + one outbox item per
+   * moved column). A bridge without it (older preload) still persists the
+   * same normalized positions through sequential position updates against
+   * the SAME authority — never silently against the empty fallback.
+   */
+  async reorderColumns(columnIds: readonly string[]): Promise<ColumnDefinition[]> {
+    const local = this.local();
+    if (local && typeof local.reorderColumns === 'function') {
+      const result = await local.reorderColumns({
+        columnIds: [...columnIds],
+        role: this.role,
+      });
+      return sortColumnsByPosition(normalizeColumns(result
+        .map((column) => localColumn(column, 'column'))
+        .filter((column): column is ColumnDefinition => column !== null && column.deleted !== true)));
+    }
+
+    const sequential = async (target: {
+      getColumns: () => Promise<ColumnDefinition[]>;
+      updateColumn: (id: string, patch: Partial<ColumnDefinition>) => Promise<ColumnDefinition>;
+    }): Promise<ColumnDefinition[]> => {
+      const current = await target.getColumns();
+      const reordered = applyColumnOrder(current, columnIds);
+      for (const column of reordered) {
+        const previous = current.find((candidate) => candidate.id === column.id);
+        if (previous && previous.position !== column.position) {
+          await target.updateColumn(column.id, { position: column.position });
+        }
+      }
+      return target.getColumns();
+    };
+
+    if (local && typeof local.updateColumn === 'function') {
+      return sequential(this);
+    }
+    if (this.fallback.reorderColumns) {
+      return this.fallback.reorderColumns(columnIds);
+    }
+    return sequential(this.fallback);
   }
 
   async softDeleteColumn(columnId: string, role = this.role): Promise<ColumnDefinition | null> {

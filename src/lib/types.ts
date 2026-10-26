@@ -108,6 +108,13 @@ export interface DksLocalUpdateColumnInput {
   idempotencyKey?: string;
 }
 
+export interface DksLocalReorderColumnsInput {
+  /** Active user column ids in their new display order. */
+  columnIds: readonly string[];
+  role?: string;
+  idempotencyKey?: string;
+}
+
 export interface DksLocalImportRecord {
   data: Record<string, unknown>;
   category?: string | null;
@@ -203,6 +210,8 @@ export interface DksLocalApi {
   permanentDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
   updateColumn: (input: DksLocalUpdateColumnInput) => Promise<DksLocalColumn | null>;
+  /** Atomic position-only reorder; optional like `rekeyColumn` for older bridges. */
+  reorderColumns?: (input: DksLocalReorderColumnsInput) => Promise<DksLocalColumn[]>;
   deleteColumn: (input: DksLocalRowCommand & { role: string }) => Promise<DksLocalColumn | null>;
   rekeyColumn?: (input: { oldId: string; newId: string }) => Promise<{ ok: boolean }>;
   importRecords: (input: {

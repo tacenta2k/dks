@@ -5,8 +5,11 @@ import type {
 } from 'ag-grid-community';
 
 import {
+  ACTIONS_COLUMN_ID,
+  ADD_COLUMN_COLUMN_ID,
   DAYS_LEFT_COLUMN_ID,
   DAYS_LEFT_COLUMN_NAME,
+  ROW_NUMBER_COLUMN_ID,
   dropdownValues,
   getPrimaryExpiryColumn,
   type ColumnDefinition,
@@ -146,6 +149,13 @@ export function buildGridColumns(
         sortable: true,
         filter: true,
         resizable: true,
+        // Ordinary user columns are drag-reorderable (AG Grid Community
+        // header drag). lockPinned stays off so a column can be dragged
+        // into/out of the frozen first-column slot; the finished move is
+        // persisted via `position` and these defs then re-derive exactly
+        // one pinned-left first column from the saved order.
+        suppressMovable: false,
+        lockPinned: false,
         minWidth: 130,
         cellClassRules: {
           'sheet-cell--warning': (params) => diagnosticClass(params, column.id, 'warning'),
@@ -188,18 +198,23 @@ export function buildGridColumns(
     });
 
   // FIXES_UI §5.3 (SHEET-06): freeze the first data column so it stays visible
-  // while scrolling horizontally across many columns.
-  if (userColumns.length > 0) {
-    userColumns[0] = { ...userColumns[0], pinned: 'left' };
-  }
+  // while scrolling horizontally across many columns. `pinned` is set
+  // EXPLICITLY on every user column ('left' for the current first, null for
+  // the rest): AG Grid reuses Column objects when defs are re-applied and
+  // only re-syncs pinning when the new def defines `pinned`, so leaving it
+  // undefined would keep a demoted first column frozen after a reorder.
+  userColumns.forEach((definition, index) => {
+    userColumns[index] = { ...definition, pinned: index === 0 ? 'left' : null };
+  });
 
   // FIXES_UI §5.3 (SHEET-06): row-number gutter pinned left. AG Grid v32 has no
   // `rowNumbers` colDef property, so the number is derived from the node index.
   const rowNumberColumn: ColDef<SheetGridRendererData> = {
-    colId: '__rowNumber',
+    colId: ROW_NUMBER_COLUMN_ID,
     headerName: '',
     pinned: 'left',
     lockPosition: true,
+    lockPinned: true,
     suppressMovable: true,
     valueGetter: (params: ValueGetterParams<SheetGridRendererData>) => (params.node?.rowIndex ?? 0) + 1,
     sortable: false,
@@ -212,10 +227,11 @@ export function buildGridColumns(
   };
 
   const actionsColumn: ColDef<SheetGridRendererData> = {
-    colId: '__actions',
+    colId: ACTIONS_COLUMN_ID,
     headerName: 'Actions',
     pinned: 'left',
     lockPosition: true,
+    lockPinned: true,
     suppressMovable: true,
     sortable: false,
     filter: false,
@@ -232,12 +248,13 @@ export function buildGridColumns(
   // FIXES_UI §5.5 (SHEET-10): the `+` add-column header, pinned before Days
   // Left. Opens Column Setup; blank body; no sort/filter/drag/menu.
   const addColumnColumn: ColDef<SheetGridRendererData> = {
-    colId: '__addColumn',
+    colId: ADD_COLUMN_COLUMN_ID,
     headerName: '',
     headerComponent: AddColumnHeader,
     headerComponentParams: { onAddColumn: callbacks.onAddColumn },
     pinned: 'right',
     lockPosition: 'right',
+    lockPinned: true,
     suppressMovable: true,
     suppressHeaderMenuButton: true,
     sortable: false,
@@ -254,6 +271,7 @@ export function buildGridColumns(
     field: 'daysLeft',
     pinned: 'right',
     lockPosition: 'right',
+    lockPinned: true,
     suppressMovable: true,
     suppressHeaderMenuButton: true,
     editable: false,
