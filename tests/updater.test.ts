@@ -207,6 +207,24 @@ describe('release provider configuration', () => {
     expect(packageJson.scripts?.dist).toContain('--publish never');
   });
 
+  it('clears only Chromium session storage on a real uninstall, never on update', () => {
+    expect(builderYml).toMatch(/include:\s*build\/installer\.nsh/);
+    const installer = readTextFileNormalised(resolve(root, 'build/installer.nsh'));
+
+    // Real uninstall only: an in-place update also runs the old uninstaller
+    // and must not sign the user out.
+    expect(installer).toContain('!macro customUnInstall');
+    expect(installer).toContain('${ifNot} ${isUpdated}');
+    // Supabase's persisted session lives in Chromium Local Storage; removing
+    // these two directories stops a reinstall silently restoring the login.
+    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Local Storage"');
+    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Session Storage"');
+    // The SQLite business cache at the userData root is never targeted.
+    expect(installer).not.toMatch(/RMDir[^\n]*\$APPDATA\\DKS"/);
+    expect(installer).not.toContain('dks-cache.sqlite"');
+    expect(installer).not.toMatch(/Delete[^\n]*\.sqlite/);
+  });
+
   it('embeds no release credential anywhere in the client configuration', () => {
     // Prose mentions in comments are fine; a token VALUE/key is not.
     expect(builderYml).not.toMatch(/^\s*token:\s*\S/m);

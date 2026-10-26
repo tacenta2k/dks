@@ -899,6 +899,8 @@ export function AdminAuditLogPanel({
     [providedRepository],
   );
   const [entries, setEntries] = useState<SheetAuditEntry[]>([]);
+  const [auditColumns, setAuditColumns] = useState<ColumnDefinition[]>([]);
+  const [auditRows, setAuditRows] = useState<SheetRow[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<string | null>(null);
   const [confirmingClear, setConfirmingClear] = useState(false);
@@ -912,16 +914,29 @@ export function AdminAuditLogPanel({
         setEntries([]);
         return;
       }
-      try {
-        const history = await repository.getAuditHistory();
-        if (mounted) {
-          setEntries(history);
-          setError(null);
-        }
-      } catch (caught) {
-        if (mounted) {
-          setError(caught instanceof Error ? caught.message : 'Unable to load the audit log.');
-        }
+      const [historyResult, columnsResult, rowsResult] = await Promise.allSettled([
+        repository.getAuditHistory(),
+        repository.getColumns(),
+        repository.getRows(),
+      ]);
+      if (!mounted) {
+        return;
+      }
+      if (columnsResult.status === 'fulfilled') {
+        setAuditColumns(columnsResult.value);
+      }
+      if (rowsResult.status === 'fulfilled') {
+        setAuditRows(rowsResult.value);
+      }
+      if (historyResult.status === 'fulfilled') {
+        setEntries(historyResult.value);
+        setError(null);
+      } else {
+        setError(
+          historyResult.reason instanceof Error
+            ? historyResult.reason.message
+            : 'Unable to load the audit log.',
+        );
       }
     };
     void load();
@@ -995,7 +1010,13 @@ export function AdminAuditLogPanel({
           Clear audit log
         </button>
       </div>
-      <AuditLogPage role={role} entries={entries} profiles={profiles} />
+      <AuditLogPage
+        role={role}
+        entries={entries}
+        profiles={profiles}
+        columns={auditColumns}
+        rows={auditRows}
+      />
       {confirmingClear ? (
         <div
           className="admin-dialog-backdrop"

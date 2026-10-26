@@ -80,6 +80,7 @@ export interface AppShellProps {
   dashboardThresholds?: Parameters<typeof DashboardPage>[0]['thresholds'];
   dashboardColors?: Parameters<typeof DashboardPage>[0]['colors'];
   onDashboardFilter?: (filter: DashboardFilterId) => void;
+  onDashboardRefresh?: ComponentProps<typeof DashboardPage>['onRefresh'];
   /** Pending dashboard-card filter for the Visa Sheet (token re-applies it). */
   sheetDashboardFilter?: { filter: DashboardFilterId; token: number } | null;
   settings?: PartialSettings;
@@ -90,7 +91,7 @@ export interface AppShellProps {
   emailPrefsClient?: ComponentProps<typeof SettingsPage>['emailPrefsClient'];
   appVersion?: string;
   onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
-  resendNote?: string;
+  onSignOutAllOfficeSessions?: ComponentProps<typeof SettingsPage>['onSignOutAllOfficeSessions'];
   settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
   auditProfiles?: readonly AuditProfile[];
   /** Supabase client for the admin-only clear-audit RPC (R2-10). */
@@ -326,6 +327,7 @@ export function AppShell({
   dashboardThresholds,
   dashboardColors,
   onDashboardFilter,
+  onDashboardRefresh,
   sheetDashboardFilter = null,
   settings,
   initialSettings,
@@ -334,7 +336,7 @@ export function AppShell({
   emailPrefsClient = null,
   appVersion,
   onCheckForUpdates,
-  resendNote,
+  onSignOutAllOfficeSessions,
   settingsError,
   auditProfiles = [],
   auditRemoteClient = null,
@@ -720,6 +722,7 @@ export function AppShell({
                thresholds={dashboardThresholds}
                 colors={dashboardColors}
                 onFilter={onDashboardFilter}
+                onRefresh={onDashboardRefresh}
                 refreshToken={pageRefreshToken}
               />
            ) : effectiveView === 'sheet' ? (
@@ -777,7 +780,7 @@ export function AppShell({
                updateState={updateState}
                onUpdateStateChange={onUpdateStateChange}
                 onCheckForUpdates={onCheckForUpdates}
-                resendNote={resendNote}
+                onSignOutAllOfficeSessions={onSignOutAllOfficeSessions}
                 settingsError={settingsError}
                onClose={() => {
                  setIsSettingsOpen(false);

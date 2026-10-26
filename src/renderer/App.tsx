@@ -65,6 +65,7 @@ import {
   runSupabaseSync,
   type SupabaseDataClient,
   type SupabaseSyncLocal,
+  type SupabaseSyncResult,
 } from '../features/sync/supabase-sync';
 
 export interface AppProps {
@@ -116,6 +117,7 @@ export function App({
   // Local-mutation -> sync flush (Blocker 3): every successful local write
   // schedules an immediate sync instead of waiting for the 60s timer.
   const requestSyncRef = useRef<(() => void) | null>(null);
+  const syncNowRef = useRef<(() => Promise<void>) | null>(null);
   const syncFlushTimerRef = useRef<number | null>(null);
   const requestSync = useCallback(() => {
     if (typeof window === 'undefined') {
@@ -141,6 +143,12 @@ export function App({
   const handleDashboardFilter = useCallback((filter: DashboardFilterId) => {
     setDashboardSheetFilter((current) => ({ filter, token: (current?.token ?? 0) + 1 }));
     setActiveView('sheet');
+  }, []);
+  const handleDashboardRefresh = useCallback(async () => {
+    if (!syncNowRef.current) {
+      throw new Error('Cloud sync is not available on this device.');
+    }
+    await syncNowRef.current();
   }, []);
   const [updaterBridge] = useState<DksUpdaterApi | null>(() => (
     providedUpdater !== undefined
@@ -185,6 +193,16 @@ export function App({
   const session = useStore(appStore, (state) => state.session);
   const profile = useStore(appStore, (state) => state.profile);
   const health = useStore(appStore, (state) => state.health);
+  const handleSignOutAllOfficeSessions = useCallback(async () => {
+    if (authStatus !== 'authenticated' || profile?.role !== 'admin') {
+      throw new Error('Only an administrator can sign out Office sessions.');
+    }
+    const result = await appStore.getState().signOutAllOfficeSessions();
+    if (result.error || !result.data) {
+      throw new Error(result.error?.message ?? 'Office sessions could not be signed out.');
+    }
+    return result.data;
+  }, [appStore, authStatus, profile?.role]);
   const isDevelopment = import.meta.env.DEV || import.meta.env.MODE === 'test';
   const demoAvailable =
     !isSupabaseConfigured() && !authService.isConfigured && isDevelopment && (demoMode ?? true);
@@ -594,13 +612,17 @@ export function App({
     };
     const syncClient = client as unknown as SupabaseDataClient;
 
-    const run = async () => {
-      if (stopped || running) {
-        return;
+    let activeRun: Promise<SupabaseSyncResult | null> | null = null;
+    const run = (): Promise<SupabaseSyncResult | null> => {
+      if (stopped) {
+        return Promise.resolve(null);
+      }
+      if (activeRun) {
+        return activeRun;
       }
       running = true;
       runStartedAt = Date.now();
-      try {
+      const thisRun = (async (): Promise<SupabaseSyncResult> => {
         const result = await runSupabaseSync({
           client: syncClient,
           local: syncLocal,
@@ -609,26 +631,45 @@ export function App({
         if (!stopped && result.status === 'healthy') {
           setRepositoryRevision((revision) => revision + 1);
         }
-      } finally {
-        running = false;
-      }
+        return result;
+      })().finally(() => {
+        if (activeRun === thisRun) {
+          activeRun = null;
+          running = false;
+        }
+      });
+      activeRun = thisRun;
+      return thisRun;
+    };
+    const runInBackground = () => {
+      void run().catch(() => undefined);
     };
 
     // Proxy-triggered flushes (local mutations) land here.
-    requestSyncRef.current = () => void run();
-    void run();
+    requestSyncRef.current = runInBackground;
+    syncNowRef.current = async () => {
+      const result = await run();
+      if (!result) {
+        throw new Error('Cloud sync is not available on this device.');
+      }
+      if (result.status !== 'healthy') {
+        throw new Error(result.error ?? result.errors[0] ?? 'Some changes have not synchronised yet.');
+      }
+    };
+    runInBackground();
     const interval = window.setInterval(() => {
       // Hang guard: a sync stuck for more than 5 minutes (e.g. a network
       // socket that never resolves) releases the lock and surfaces the
       // timeout. The outbox is never cleared — the next tick retries.
       if (running && Date.now() - runStartedAt > 5 * 60_000) {
         running = false;
+        activeRun = null;
         void syncLocal.setSyncStatus({
           status: 'error',
           lastError: 'Sync timed out after 5 minutes; retrying.',
         }).catch(() => undefined);
       }
-      void run();
+      runInBackground();
     }, 60_000);
 
     type RealtimeChannelLike = {
@@ -647,14 +688,15 @@ export function App({
     const channel = realtime.channel?.('dks-data-sync');
     if (channel) {
       channel
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, () => void run())
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'app_columns' }, () => void run())
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, runInBackground)
+        .on('postgres_changes', { event: '*', schema: 'public', table: 'app_columns' }, runInBackground)
         .subscribe();
     }
 
     return () => {
       stopped = true;
       requestSyncRef.current = null;
+      syncNowRef.current = null;
       window.clearInterval(interval);
       if (channel) {
         void realtime.removeChannel?.(channel);
@@ -916,10 +958,14 @@ export function App({
         ? (authService.authClient as unknown as import('../features/settings/email-preferences').EmailPrefsClient | null)
         : null}
       settingsError={settingsLoadError}
+      onSignOutAllOfficeSessions={authStatus === 'authenticated' && profile?.role === 'admin'
+        ? handleSignOutAllOfficeSessions
+        : undefined}
       auditProfiles={auditProfiles}
       auditRemoteClient={authService.authClient as unknown as { rpc?: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: { message?: string } | null }> } | null}
       repositoryRevision={repositoryRevision}
       onDashboardFilter={handleDashboardFilter}
+      onDashboardRefresh={handleDashboardRefresh}
       sheetDashboardFilter={dashboardSheetFilter}
       notifications={notifications}
       onNotificationMarkRead={handleNotificationMarkRead}

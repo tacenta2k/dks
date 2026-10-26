@@ -51,6 +51,7 @@ describe('dashboard cumulative card set', () => {
   it('defines exactly the nine cards in the specified order', () => {
     expect(DASHBOARD_CARD_DEFINITIONS).toEqual([
       { id: 'all', label: 'Total entries' },
+      { id: 'expired', label: 'Expired' },
       { id: 'expiresToday', label: 'Expires today' },
       { id: 'expiresIn1Day', label: 'Expires in 1 day' },
       { id: 'expiringThisWeek', label: 'This week' },
@@ -58,7 +59,6 @@ describe('dashboard cumulative card set', () => {
       { id: 'within3Months', label: '3 months' },
       { id: 'within6Months', label: '6 months' },
       { id: 'within1Year', label: '1 year' },
-      { id: 'expired', label: 'Expired' },
     ]);
     const labels = DASHBOARD_CARD_DEFINITIONS.map((card) => card.label);
     expect(labels).not.toContain('Within 2 months');

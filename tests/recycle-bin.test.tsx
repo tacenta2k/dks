@@ -33,8 +33,9 @@ describe('recycle bin page', () => {
     // panel no longer renders its own heading — assert on the deleted rows.
     expect(screen.getAllByText('Deleted record').length).toBeGreaterThan(0);
     expect(screen.queryByText('Active record')).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Restore Deleted record' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Permanently delete Deleted record' }));
+    // Buttons say only Restore / Delete — no record name or ID appended.
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
     expect(onRestore).toHaveBeenCalledWith(rows[0]);
     expect(onPermanentDelete).toHaveBeenCalledWith(rows[0]);
   });

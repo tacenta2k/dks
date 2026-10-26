@@ -11,11 +11,9 @@ import {
 } from '../../lib/date';
 import { getPrimaryExpiryColumn, type ColumnDefinition } from '../../lib/columns';
 import { can } from '../../lib/permissions';
-import {
-  TACENTA_GITHUB_URL,
-  openExternalUrl,
-  resolveAppVersion,
-} from '../../lib/app-info';
+import { resolveAppVersion } from '../../lib/app-info';
+import { ConfirmDialog } from '../ui/ConfirmDialog';
+import type { OfficeSessionSignOutSummary } from '../auth/office-approval-service';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
 import type { EmailPrefsClient } from './email-preferences';
 import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
@@ -75,11 +73,7 @@ export interface SettingsPageProps {
   repository?: SheetRepository;
   onSettingsChange?: (settings: DksSettings) => void | Promise<void>;
   onChange?: (settings: DksSettings) => void | Promise<void>;
-  /**
-   * Admin-only: the Supabase settings client used by the "Email
-   * notifications" section (recipients/toggles for the server-side email
-   * worker). The Resend key is never available here.
-   */
+  /** Admin-only client for email notification preferences. */
   emailPrefsClient?: EmailPrefsClient | null;
   appVersion?: string;
   version?: string;
@@ -97,7 +91,8 @@ export interface SettingsPageProps {
    */
   updateState?: DksUpdateState;
   onUpdateStateChange?: (state: DksUpdateState) => void;
-  resendNote?: string;
+  /** Admin-only server action supplied by the app shell. */
+  onSignOutAllOfficeSessions?: () => Promise<OfficeSessionSignOutSummary>;
   settingsError?: string | null;
   onClose?: () => void;
 }
@@ -107,8 +102,7 @@ export const DEFAULT_NOTIFICATION_DAYS = Object.freeze([90, 60, 30, 15, 7, 1, 0]
 /**
  * Truthful one-line copy for every updater state. 'not-available' is the
  * only state allowed to say "up to date" — it means the release feed was
- * actually checked. 'disabled' (development/unpackaged, or no desktop
- * bridge) says so plainly instead of claiming success.
+ * actually checked.
  */
 export function updateStatusMessage(state: DksUpdateState): string {
   const version = state.version ? ` ${state.version}` : '';
@@ -120,13 +114,13 @@ export function updateStatusMessage(state: DksUpdateState): string {
     case 'downloading':
       return `Downloading update${version}…${typeof state.progress === 'number' ? ` ${state.progress}%` : ''}`;
     case 'downloaded':
-      return `Update${version} is ready to install. Your records stay on this device.`;
+      return `Update${version} is ready to install.`;
     case 'not-available':
       return 'DKS is up to date.';
     case 'error':
       return 'Update check failed. Check your internet connection and try again.';
     case 'disabled':
-      return 'Update checks run in the installed app — they are not available in this development build.';
+      return 'Update checks are unavailable right now.';
     case 'idle':
     default:
       return 'Updates are checked automatically. You can also check now.';
@@ -280,7 +274,7 @@ export function SettingsPage({
   updater: providedUpdater,
   updateState: providedUpdateState,
   onUpdateStateChange,
-  resendNote = 'Resend is optional for hosted email notifications; local alerts continue to work without a Resend API key.',
+  onSignOutAllOfficeSessions,
   settingsError = null,
   onClose,
 }: SettingsPageProps) {
@@ -289,6 +283,9 @@ export function SettingsPage({
     resolveSettings(providedSettings ?? initialSettings, providedColumns ?? [])
   ));
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [officeSessionsConfirmOpen, setOfficeSessionsConfirmOpen] = useState(false);
+  const [officeSessionsFeedback, setOfficeSessionsFeedback] = useState<string | null>(null);
+  const [officeSessionsError, setOfficeSessionsError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('expiry');
   const [localUpdateState, setLocalUpdateState] = useState<DksUpdateState>({ status: 'idle' });
   const updateState = providedUpdateState ?? localUpdateState;
@@ -426,6 +423,24 @@ export function SettingsPage({
     }));
   };
 
+  const handleSignOutAllOfficeSessions = async () => {
+    setOfficeSessionsError(null);
+    try {
+      if (!onSignOutAllOfficeSessions) {
+        throw new Error('Office session sign-out is unavailable right now.');
+      }
+      const summary = await onSignOutAllOfficeSessions();
+      setOfficeSessionsFeedback(
+        `All Office sessions are signed out. ${summary.authSessionsDeleted} session${summary.authSessionsDeleted === 1 ? '' : 's'} ended.`,
+      );
+      setOfficeSessionsConfirmOpen(false);
+    } catch (caught) {
+      setOfficeSessionsError(
+        caught instanceof Error ? caught.message : 'Office sessions could not be signed out.',
+      );
+    }
+  };
+
   const handleCheckForUpdates = () => {
     // Legacy host hook (kept for embedders/tests) fires alongside the real
     // bridge check; the bridge result drives the visible status line.
@@ -551,9 +566,13 @@ export function SettingsPage({
                   <div className="settings-notification-list">
                     {settings.notificationDays.map((day, index) => (
                       <div className="settings-notification-row" key={`${index}-${day}`}>
-                        <label className="settings-field settings-field--inline">
+                        <label
+                          className="settings-field settings-field--inline"
+                          htmlFor={`settings-notification-day-${index}`}
+                        >
                           <span className="visually-hidden">Notification day {index + 1}</span>
                           <input
+                            id={`settings-notification-day-${index}`}
                             aria-label={`Notification day ${index + 1}`}
                             type="number"
                             min="0"
@@ -588,8 +607,9 @@ export function SettingsPage({
                   </button>
                 </fieldset>
                 <div className="settings-summary-options" role="group" aria-label="Summary schedules">
-                  <label className="settings-toggle">
+                  <label className="settings-toggle" htmlFor="settings-daily-summary-enabled">
                     <input
+                      id="settings-daily-summary-enabled"
                       aria-label="Daily summary"
                       type="checkbox"
                       checked={settings.dailySummaryEnabled}
@@ -597,11 +617,12 @@ export function SettingsPage({
                     />
                     <span>
                       <strong>Daily summary</strong>
-                      <small>Send a daily digest when summary delivery is configured.</small>
+                      <small>Receive a summary each day.</small>
                     </span>
                   </label>
-                  <label className="settings-toggle">
+                  <label className="settings-toggle" htmlFor="settings-weekly-summary-enabled">
                     <input
+                      id="settings-weekly-summary-enabled"
                       aria-label="Weekly summary"
                       type="checkbox"
                       checked={settings.weeklySummaryEnabled}
@@ -609,13 +630,24 @@ export function SettingsPage({
                     />
                     <span>
                       <strong>Weekly summary</strong>
-                      <small>Send one digest a week on the chosen day.</small>
+                      <small>Receive a summary each week.</small>
                     </span>
                   </label>
                   <div className="settings-field-grid settings-field-grid--three settings-field-grid--spaced">
-                    <label className="settings-field">
+                    <label className="settings-field" htmlFor="settings-daily-summary-time">
+                      <span>Daily summary time</span>
+                      <input
+                        id="settings-daily-summary-time"
+                        aria-label="Daily summary time"
+                        type="time"
+                        value={settings.dailySummaryTime}
+                        onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryTime: event.target.value || DEFAULT_SETTINGS.dailySummaryTime }))}
+                      />
+                    </label>
+                    <label className="settings-field" htmlFor="settings-weekly-summary-day">
                       <span>Weekly summary day</span>
                       <select
+                        id="settings-weekly-summary-day"
                         aria-label="Weekly summary day"
                         value={settings.weeklySummaryDay}
                         onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryDay: Number(event.target.value) }))}
@@ -625,31 +657,22 @@ export function SettingsPage({
                         ))}
                       </select>
                     </label>
-                    <label className="settings-field">
+                    <label className="settings-field" htmlFor="settings-weekly-summary-time">
                       <span>Weekly summary time</span>
                       <input
+                        id="settings-weekly-summary-time"
                         aria-label="Weekly summary time"
                         type="time"
                         value={settings.weeklySummaryTime}
                         onChange={(event) => updateSettings((current) => ({ ...current, weeklySummaryTime: event.target.value || DEFAULT_SETTINGS.weeklySummaryTime }))}
                       />
                     </label>
-                    <label className="settings-field">
-                      <span>Daily summary time</span>
-                      <input
-                        aria-label="Daily summary time"
-                        type="time"
-                        value={settings.dailySummaryTime}
-                        onChange={(event) => updateSettings((current) => ({ ...current, dailySummaryTime: event.target.value || DEFAULT_SETTINGS.dailySummaryTime }))}
-                      />
-                    </label>
                   </div>
-                  <p className="settings-muted">Day and time use this device&apos;s local time zone.</p>
+                  <p className="settings-muted">Times use this device&apos;s local time zone.</p>
                 </div>
               </div>
 
-              {/* Admin-only server email config (recipients/toggles); the
-                  Resend key never appears — it is a Supabase Function secret. */}
+              {/* Admin-only email notification preferences. */}
               {role === 'admin' ? (
                 <EmailNotificationsSection client={emailPrefsClient ?? null} />
               ) : null}
@@ -693,6 +716,50 @@ export function SettingsPage({
                   {activeExpiryColumns.map((column) => <option value={column.id} key={column.id}>{column.name}</option>)}
                 </select>
               </label>
+
+              <div className="settings-office-sessions">
+                <div className="settings-office-sessions__copy">
+                  <h3>Office sessions</h3>
+                  <p className="settings-muted">
+                    Sign out every Office user on every device. They will need to sign in and
+                    request approval again. You stay signed in, and business records are not changed.
+                  </p>
+                  {!onSignOutAllOfficeSessions ? (
+                    <p className="settings-muted">Office session sign-out is unavailable right now.</p>
+                  ) : null}
+                  {officeSessionsFeedback ? (
+                    <p className="settings-office-sessions__feedback" role="status">
+                      {officeSessionsFeedback}
+                    </p>
+                  ) : null}
+                </div>
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={!onSignOutAllOfficeSessions}
+                  onClick={() => {
+                    setOfficeSessionsFeedback(null);
+                    setOfficeSessionsError(null);
+                    setOfficeSessionsConfirmOpen(true);
+                  }}
+                >
+                  Sign out all office sessions
+                </button>
+              </div>
+              <ConfirmDialog
+                open={officeSessionsConfirmOpen}
+                title="Sign out all office sessions?"
+                confirmLabel="Sign out all office sessions"
+                destructive
+                error={officeSessionsError}
+                onCancel={() => setOfficeSessionsConfirmOpen(false)}
+                onConfirm={handleSignOutAllOfficeSessions}
+              >
+                <p>
+                  This signs out every Office user on every device. They will need to sign in and
+                  request approval again. You stay signed in, and business records are not changed.
+                </p>
+              </ConfirmDialog>
             </section>
           ) : null}
 
@@ -731,20 +798,10 @@ export function SettingsPage({
                     </p>
                     <p className="settings-muted settings-about__author">
                       Made by Tacenta
-                      <a
-                        className="settings-about__link"
-                        href={TACENTA_GITHUB_URL}
-                        aria-label="Tacenta on GitHub"
-                        title="Tacenta on GitHub"
-                        onClick={(event) => {
-                          event.preventDefault();
-                          void openExternalUrl(TACENTA_GITHUB_URL);
-                        }}
-                      >
+                      <span className="settings-about__github" aria-hidden="true">
                         <Github aria-hidden="true" size={16} />
-                      </a>
+                      </span>
                     </p>
-                    <p className="settings-muted">Updates are checked without changing local records.</p>
                   </div>
                   <button className="button" type="button" onClick={handleCheckForUpdates}>Check for updates</button>
                   <p className="settings-muted" role="status">{updateStatusMessage(updateState)}</p>
@@ -755,7 +812,6 @@ export function SettingsPage({
                   ) : null}
                 </div>
               </div>
-              <p className="settings-resend-note"><strong>Resend:</strong> {resendNote}</p>
             </section>
           ) : null}
         </div>

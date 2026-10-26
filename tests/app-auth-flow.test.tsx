@@ -60,6 +60,10 @@ function approvedApprovalService() {
     listRequests: vi.fn(async () => ({ data: [row], error: null })),
     decideRequest: vi.fn(async (id: string, decision: 'approved' | 'denied') => ({ data: { ...row, id, status: decision }, error: null })),
     revokeRequest: vi.fn(async (id: string) => ({ data: { ...row, id, status: 'revoked' as const }, error: null })),
+    signOutAllOfficeSessions: vi.fn(async () => ({
+      data: { officeUsers: 1, authSessionsDeleted: 0, requestsRevoked: 0 },
+      error: null,
+    })),
   };
 }
 
@@ -124,6 +128,9 @@ describe('configured authentication flow', () => {
 
     expect(await screen.findByRole('heading', { name: 'Sign in to DKS' })).toBeInTheDocument();
     expect(client.auth.signOut).toHaveBeenCalledOnce();
+    // Explicit logout clears THIS device only (local scope), never every
+    // device sharing the account.
+    expect(client.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
   });
 
   it('displays Not authorized and does not open the shell when the profile is unauthorized', async () => {
@@ -135,5 +142,6 @@ describe('configured authentication flow', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Not authorized');
     expect(screen.queryByRole('banner', { name: 'DKS top bar' })).not.toBeInTheDocument();
     expect(client.auth.signOut).toHaveBeenCalledOnce();
+    expect(client.auth.signOut).toHaveBeenCalledWith({ scope: 'local' });
   });
 });

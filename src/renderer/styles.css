@@ -773,6 +773,11 @@ button:focus-visible {
   background: var(--color-primary-soft);
 }
 
+.audit-log-summary {
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 /* FIXES_UI §8 (AUDIT-04): details side panel. */
 .audit-log-details {
   position: fixed;

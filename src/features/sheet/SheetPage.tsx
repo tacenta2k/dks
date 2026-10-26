@@ -475,6 +475,7 @@ export function SheetPage({
    * record; Enter keeps the continuous-entry focus on the fresh draft row.
    */
   const draftCommitIntentRef = useRef<'tab' | 'enter' | null>(null);
+  const draftCreateInFlightRef = useRef(false);
   const rememberGridKeyIntent = useCallback((event: ReactKeyboardEvent) => {
     if (event.key === 'Tab') {
       draftCommitIntentRef.current = 'tab';
@@ -489,6 +490,16 @@ export function SheetPage({
     if (!field || field === DAYS_LEFT_COLUMN_ID || field === '__actions' || !isMeaningfulDraftValue(value)) {
       return;
     }
+    // One physical Enter/Tab can be followed by AG Grid's focus-loss commit
+    // or a key repeat while the first create is still awaiting the local
+    // repository. Until that request settles, the synthetic draft is already
+    // being turned into a record; a second call must not create another one.
+    // This is an in-flight guard only — identical names remain legitimate
+    // once the first record has been saved.
+    if (draftCreateInFlightRef.current) {
+      return;
+    }
+    draftCreateInFlightRef.current = true;
     try {
       const created = await repository.createRow({ [field]: value });
       await refresh({ quiet: true });
@@ -532,6 +543,8 @@ export function SheetPage({
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
+    } finally {
+      draftCreateInFlightRef.current = false;
     }
   }, [repository, refresh, editableColumnIds]);
 

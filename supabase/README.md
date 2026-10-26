@@ -47,6 +47,10 @@ newer surfaces from the reviewed migration scripts, IN THIS ORDER:
    If an earlier revision failed with `invalid input syntax for type json`
    near `email_worker_url`, the whole file rolled back then — simply run the
    current revision end to end; every object in it is idempotent.
+5. `ARENA/sql/sign-out-all-office-sessions.sql` — admin-only RPC behind
+   Settings → Workspace → “Sign out all office sessions”. It revokes live
+   Office approvals and deletes only Office Auth sessions/refresh tokens;
+   the acting administrator and all business records are untouched.
 
 Each script starts with a commented §0 preflight (SELECT-only) and ends with
 verification queries. Run exactly one script at a time, as one batch, in the

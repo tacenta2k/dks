@@ -7,10 +7,12 @@ import { AuthService } from '../features/auth/auth-service';
 import {
   createOfficeApprovalService,
   type OfficeApprovalService,
+  type OfficeSessionSignOutSummary,
   type OfficeSigninRequest,
 } from '../features/auth/office-approval-service';
 import type {
   AuthError,
+  AuthResult,
   AuthStatus,
   Profile,
   SupabaseHealth,
@@ -64,6 +66,8 @@ export interface AppStore {
    */
   submitOfficeApprovalRequest: () => Promise<void>;
   refreshSessionApproval: () => Promise<void>;
+  /** Admin-only server action: terminate every Office Auth session. */
+  signOutAllOfficeSessions: () => Promise<AuthResult<OfficeSessionSignOutSummary>>;
 }
 
 const EMPTY_HEALTH: SupabaseHealth = {
@@ -360,6 +364,28 @@ export function createAppStore(
         return;
       }
       applyApprovalStatus(set, result.data, null);
+    },
+
+    signOutAllOfficeSessions: async () => {
+      if (get().profile?.role !== 'admin') {
+        return {
+          data: null,
+          error: {
+            message: 'Only an administrator can sign out Office sessions.',
+            code: 'NOT_AUTHORIZED',
+          },
+        };
+      }
+      if (!approvalService) {
+        return {
+          data: null,
+          error: {
+            message: 'Supabase is not configured, so Office sessions cannot be signed out.',
+            code: 'APPROVAL_NOT_CONFIGURED',
+          },
+        };
+      }
+      return approvalService.signOutAllOfficeSessions();
     },
   }));
 

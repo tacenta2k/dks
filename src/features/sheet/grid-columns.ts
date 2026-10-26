@@ -216,7 +216,54 @@ export function buildGridColumns(
     lockPosition: true,
     lockPinned: true,
     suppressMovable: true,
-    valueGetter: (params: ValueGetterParams<SheetGridRendererData>) => (params.node?.rowIndex ?? 0) + 1,
+    // Display numbers come from AG Grid's current displayed-row model, not
+    // source-array position or the record id. Count only real records so
+    // sorting/filtering keeps one continuous 1, 2, …, 9, 10 sequence, while
+    // the synthetic draft/group-header rows stay unnumbered. When AG Grid
+    // cannot supply that model (for example in a unit harness), a valid
+    // node.rowIndex is the only fallback; never invent row 1.
+    valueGetter: (params: ValueGetterParams<SheetGridRendererData>): number | '' => {
+      if (!params.data?.__sheetRow) {
+        return '';
+      }
+      const api = params.api;
+      const rowIndex = params.node?.rowIndex;
+      if (api && params.node && typeof api.forEachNodeAfterFilterAndSort === 'function') {
+        let displayNumber = 0;
+        let found = false;
+        api.forEachNodeAfterFilterAndSort((candidate) => {
+          if (found || !candidate.data?.__sheetRow) {
+            return;
+          }
+          displayNumber += 1;
+          if (candidate === params.node || (candidate.id != null && candidate.id === params.node?.id)) {
+            found = true;
+          }
+        });
+        if (found) {
+          return displayNumber;
+        }
+      }
+      if (
+        api
+        && typeof rowIndex === 'number'
+        && rowIndex >= 0
+        && typeof api.getDisplayedRowCount === 'function'
+        && typeof api.getDisplayedRowAtIndex === 'function'
+      ) {
+        const displayedCount = Math.min(api.getDisplayedRowCount(), rowIndex + 1);
+        let displayNumber = 0;
+        for (let index = 0; index < displayedCount; index += 1) {
+          if (api.getDisplayedRowAtIndex(index)?.data?.__sheetRow) {
+            displayNumber += 1;
+          }
+        }
+        if (displayNumber > 0) {
+          return displayNumber;
+        }
+      }
+      return typeof rowIndex === 'number' && rowIndex >= 0 ? rowIndex + 1 : '';
+    },
     sortable: false,
     filter: false,
     editable: false,

@@ -31,7 +31,7 @@ export interface AuthClientLike {
       data: { session: Session | null };
       error: AuthClientError | null;
     }>;
-    signOut: () => Promise<{ error: AuthClientError | null }>;
+    signOut: (options?: { scope?: 'global' | 'local' | 'others' }) => Promise<{ error: AuthClientError | null }>;
     onAuthStateChange: (
       callback: (event: AuthChangeEvent, session: Session | null) => void,
     ) => {
@@ -184,7 +184,10 @@ export class AuthService {
     }
 
     try {
-      const result = await this.client.auth.signOut();
+      // Explicit sign-out is for this device. Supabase's default global scope
+      // would also revoke every other device using a shared account; the
+      // separate admin-only Office action is the intentional global path.
+      const result = await this.client.auth.signOut({ scope: 'local' });
       return result.error
         ? { data: null, error: toAuthError(result.error, 'Unable to sign out.') }
         : { data: null, error: null };

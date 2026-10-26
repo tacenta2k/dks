@@ -28,9 +28,20 @@ export interface DashboardPageProps {
   thresholds?: StatusThresholds;
   colors?: Partial<StatusColors> | Record<string, string>;
   onFilter?: (filter: DashboardFilterId) => void;
+  /**
+   * Optional host sync action run before the dashboard reloads its local
+   * repository. The full app supplies its existing Supabase sync here; without
+   * it, Refresh honestly reloads the current local data source only.
+   */
+  onRefresh?: () => Promise<void>;
   /** Bumped after local mutations / successful syncs; the page re-fetches in
    *  place so remounts cannot steal focus from user inputs. */
   refreshToken?: number;
+}
+
+interface DashboardRefreshFeedback {
+  kind: 'success' | 'error';
+  message: string;
 }
 
 function emptySummary(): DashboardSummary {
@@ -58,6 +69,7 @@ export function DashboardPage({
   thresholds,
   colors,
   onFilter,
+  onRefresh,
   refreshToken = 0,
 }: DashboardPageProps) {
   const repository = useMemo(
@@ -67,8 +79,11 @@ export function DashboardPage({
   const [summary, setSummary] = useState<DashboardSummary>(emptySummary);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshFeedback, setRefreshFeedback] = useState<DashboardRefreshFeedback | null>(null);
+  const manualRefreshInFlight = useRef(false);
 
-  const refresh = useCallback(async (options?: { quiet?: boolean }) => {
+  const loadSummary = useCallback(async (options?: { quiet?: boolean }): Promise<boolean> => {
     if (!options?.quiet) {
       setLoading(true);
     }
@@ -76,8 +91,10 @@ export function DashboardPage({
       const [columns, rows] = await Promise.all([repository.getColumns(), repository.getRows()]);
       setSummary(getDashboardSummary(rows, columns, { today, thresholds, colors }));
       setError(null);
+      return true;
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to load the dashboard.');
+      return false;
     } finally {
       if (!options?.quiet) {
         setLoading(false);
@@ -86,8 +103,8 @@ export function DashboardPage({
   }, [colors, repository, thresholds, today]);
 
   useEffect(() => {
-    void refresh();
-  }, [refresh]);
+    void loadSummary();
+  }, [loadSummary]);
 
   const lastRefreshToken = useRef(refreshToken);
   useEffect(() => {
@@ -95,8 +112,47 @@ export function DashboardPage({
       return;
     }
     lastRefreshToken.current = refreshToken;
-    void refresh({ quiet: true });
-  }, [refreshToken, refresh]);
+    void loadSummary({ quiet: true });
+  }, [refreshToken, loadSummary]);
+
+  const handleRefresh = useCallback(async () => {
+    // A ref guard closes the tiny window before React re-renders the button
+    // as disabled, so an enthusiastic double-click can never overlap syncs.
+    if (manualRefreshInFlight.current) {
+      return;
+    }
+    manualRefreshInFlight.current = true;
+    setRefreshing(true);
+    setRefreshFeedback(null);
+
+    let syncError: string | null = null;
+    if (onRefresh) {
+      try {
+        await onRefresh();
+      } catch (caught) {
+        syncError = caught instanceof Error ? caught.message : 'Sync did not complete.';
+      }
+    }
+
+    // Always reload from the local repository afterwards. A failed sync must
+    // not discard the device's current data or unsaved outbox work.
+    const loaded = await loadSummary({ quiet: true });
+    if (loaded) {
+      setRefreshFeedback(
+        syncError
+          ? {
+            kind: 'error',
+            message: `Sync did not complete (${syncError}). Showing the latest local data.`,
+          }
+          : {
+            kind: 'success',
+            message: onRefresh ? 'Sync complete. Dashboard refreshed.' : 'Dashboard refreshed.',
+          },
+      );
+    }
+    manualRefreshInFlight.current = false;
+    setRefreshing(false);
+  }, [loadSummary, onRefresh]);
 
   if (loading) {
     return <div className="dashboard-page dashboard-page--loading" aria-live="polite">Loading dashboard…</div>;
@@ -105,6 +161,27 @@ export function DashboardPage({
   return (
     <div className="dashboard-page">
       {error ? <div className="dashboard-alert" role="alert">{error}</div> : null}
+
+      <div className="dashboard-summary-header">
+        <span className="dashboard-summary-header__label">Expiry summary</span>
+        <button
+          className="button button--secondary dashboard-refresh-button"
+          type="button"
+          aria-busy={refreshing}
+          disabled={refreshing}
+          onClick={() => void handleRefresh()}
+        >
+          {refreshing ? 'Refreshing…' : 'Refresh'}
+        </button>
+      </div>
+      {refreshFeedback ? (
+        <p
+          className={`dashboard-refresh-status dashboard-refresh-status--${refreshFeedback.kind}`}
+          role={refreshFeedback.kind === 'error' ? 'alert' : 'status'}
+        >
+          {refreshFeedback.message}
+        </p>
+      ) : null}
 
       <section className="dashboard-cards" aria-label="Expiry summary">
         {summary.cards.map((card) => (
