@@ -361,6 +361,9 @@ export function AppShell({
   const [avatarOpen, setAvatarOpen] = useState(false);
   const [restartPromptVersion, setRestartPromptVersion] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
+  // Deliberately in memory only: Later lasts for this renderer/app session,
+  // never persists to localStorage, and the ready pill returns next launch.
+  const [updatePromptDismissed, setUpdatePromptDismissed] = useState(false);
   const syncRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
 
@@ -567,7 +570,7 @@ export function AppShell({
             <h1 className="top-bar__title">{copy.title}</h1>
           </div>
           <div className="top-bar__actions">
-            {updateState?.status === 'downloaded' ? (
+            {updateState?.status === 'downloaded' && !updatePromptDismissed ? (
               <div className="topbar-update" role="status">
                 <span className="topbar-update__dot" aria-hidden="true" />
                 <span className="topbar-update__label">
@@ -575,6 +578,13 @@ export function AppShell({
                 </span>
                 <button
                   className="topbar-update__button"
+                  type="button"
+                  onClick={() => setUpdatePromptDismissed(true)}
+                >
+                  Later
+                </button>
+                <button
+                  className="topbar-update__button topbar-update__button--primary"
                   type="button"
                   onClick={openRestartPrompt}
                 >

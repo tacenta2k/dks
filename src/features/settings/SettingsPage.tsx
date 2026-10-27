@@ -118,7 +118,9 @@ export function updateStatusMessage(state: DksUpdateState): string {
     case 'not-available':
       return 'DKS is up to date.';
     case 'error':
-      return 'Update check failed. Check your internet connection and try again.';
+      return state.errorKind === 'download'
+        ? `Update${version} download failed. Check your internet connection and try again.`
+        : 'Could not check for updates. Check your internet connection and try again.';
     case 'disabled':
       return 'Update checks are unavailable right now.';
     case 'idle':
@@ -288,6 +290,7 @@ export function SettingsPage({
   const [officeSessionsError, setOfficeSessionsError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('expiry');
   const [localUpdateState, setLocalUpdateState] = useState<DksUpdateState>({ status: 'idle' });
+  const [updateRestartError, setUpdateRestartError] = useState<string | null>(null);
   const updateState = providedUpdateState ?? localUpdateState;
   const setUpdateState = (state: DksUpdateState) => {
     setLocalUpdateState(state);
@@ -324,7 +327,7 @@ export function SettingsPage({
     aboutCheckRef.current = true;
     void updaterBridge.checkForUpdates()
       .then(setUpdateState)
-      .catch(() => setUpdateState({ status: 'error' }));
+      .catch(() => setUpdateState({ status: 'error', errorKind: 'check' }));
   }, [activeSection, updaterBridge]);
 
   useEffect(() => {
@@ -442,6 +445,7 @@ export function SettingsPage({
   };
 
   const handleCheckForUpdates = () => {
+    setUpdateRestartError(null);
     // Legacy host hook (kept for embedders/tests) fires alongside the real
     // bridge check; the bridge result drives the visible status line.
     if (updateHandler) {
@@ -450,7 +454,7 @@ export function SettingsPage({
     if (updaterBridge) {
       void updaterBridge.checkForUpdates()
         .then(setUpdateState)
-        .catch(() => setUpdateState({ status: 'error' }));
+        .catch(() => setUpdateState({ status: 'error', errorKind: 'check' }));
       return;
     }
     if (!updateHandler) {
@@ -463,13 +467,17 @@ export function SettingsPage({
     if (!updaterBridge) {
       return;
     }
+    setUpdateRestartError(null);
     void updaterBridge.restartToUpdate()
       .then((started) => {
         if (!started) {
-          setUpdateState({ status: 'error' });
+          // The installer is still downloaded; never replace its ready state.
+          setUpdateRestartError('DKS could not restart to install the update. Please try again.');
         }
       })
-      .catch(() => setUpdateState({ status: 'error' }));
+      .catch(() => {
+        setUpdateRestartError('DKS could not restart to install the update. Please try again.');
+      });
   };
 
   const invokeAction = (action: (() => void | Promise<void>) | undefined, success: string, failure: string) => {
@@ -812,6 +820,9 @@ export function SettingsPage({
                       Check for updates
                     </button>
                     <p className="settings-muted settings-about__status" role="status">{updateStatusMessage(updateState)}</p>
+                    {updateRestartError ? (
+                      <p className="settings-muted settings-about__status" role="alert">{updateRestartError}</p>
+                    ) : null}
                     {updateState.status === 'downloaded' ? (
                       <button className="button button--secondary" type="button" onClick={handleRestartToUpdate}>
                         Restart to install

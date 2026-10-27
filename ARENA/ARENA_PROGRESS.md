@@ -2674,3 +2674,134 @@ No installer was produced by `npm run build`.
   (3 moderate, 17 high, 4 critical), not addressed in this task.
 - Implementation commits: `22946de`, `6011d7f`, `de4616b`, `4ae418b`,
   `302dac1`, `15af228`; the checklist/progress update follows these commits.
+
+---
+
+## 35. Sticky downloaded updates and session-only Later prompt (2026-10-27)
+
+Status: **IMPLEMENTED_AWAITING_CONFIRMATION**. Arena session branch
+`arena/4b7ae274-dks` started at `origin/main` `57ecb55`. Implementation commit
+`221d2c2`; this tracking update follows it. Compare:
+https://github.com/tacenta2k/dks/compare/main...arena/4b7ae274-dks
+Nothing was pushed or merged to `main`. No Windows/packaged-app test was
+performed here.
+
+### 35.1 Root cause found in the updater flow
+
+The reported 100% progress followed by the generic check-failure message had
+three contributing state-management defects:
+
+1. `downloaded` was an ordinary replaceable state. The launch/hourly scheduler,
+   the automatic check when Settings → About opens, or a manual repeated check
+   could replace it with `checking`, `not-available`, or `error`, hiding both
+   install actions and losing the completed version.
+2. The service ignored electron-updater's `update-downloaded` event and waited
+   only for `downloadUpdate()` to resolve. That event is the authoritative
+   installer-completion signal and can precede final cache cleanup; 100%
+   transfer progress is not itself completion. A later rejection could therefore
+   replace an already-completed update with `error`.
+3. Every error used the same “Update check failed” renderer copy, so a final
+   installer-download failure was mislabeled as an inability to check the feed.
+
+Installed electron-updater 6.8.9 was inspected directly. Its normal NSIS
+differential-download catch logs the blockmap problem and falls back to a full
+download; that recoverable branch is not a final failure. The adapter now also
+observes error/update-downloaded events explicitly, but error events never set
+UI failure state. Only rejection of the applicable check/download promise is a
+final failure, and a completion event remains sticky even if later cleanup
+rejects. Version availability still uses electron-updater's
+`isUpdateAvailable`; no custom version comparison was added.
+
+### 35.2 Product behavior and diagnostics
+
+- Once `downloaded`, the service returns the same completed version for every
+  later launch/hourly/Settings/manual check without starting another network
+  operation. `setState` is the central guard, so errors, not-available results,
+  late progress and restart failures cannot downgrade it before process exit.
+- `update-downloaded` maps immediately to `downloaded`. A transient error event
+  followed by completion never emits `error`; a final download rejection without
+  completion produces `errorKind: 'download'`, while a check rejection produces
+  `errorKind: 'check'`. The optional field is preserved through the validated
+  preload normalizer and renderer types.
+- Settings → About retains checking, downloading NN%, up-to-date and ready
+  states. It now distinguishes **Could not check for updates** from **Update X
+  download failed**, keeps Check for updates available for retry, and leaves a
+  downloaded update ready if a restart attempt fails.
+- The role-independent top-bar ready pill has **Later** and **Restart to
+  install**. Later is React in-memory state only: it hides the pill through
+  navigation/rerenders for the current app session, writes no storage, and a
+  fresh renderer/app launch shows it again. Admin Settings → About continues to
+  offer Restart after Later. Restart still opens the existing ConfirmDialog and
+  calls only the existing `dks:updater:restart` bridge after confirmation.
+  Admin and approved Office share this behavior; no `can()` gate was added.
+- Main-process status changes call `log.info('[dks] updater transition', …)` on
+  the existing electron-log `main.log`. Only from/to status plus bounded,
+  control-character-stripped version/progress metadata is logged; updater Error
+  objects, release URLs and local paths are not included.
+- Frozen bridge-only renderer access, the single App status subscription,
+  packaged-only launch/hourly checks, hourly cadence,
+  `autoInstallOnAppQuit=false`, GitHub/draft publish configuration, Release DKS
+  workflow, permissions and Office approval behavior are unchanged. No native
+  confirm/alert was introduced.
+
+Changed implementation files: `electron/main/updater.ts`,
+`electron/main/index.ts`, `electron/preload/index.ts`, `src/lib/types.ts`,
+`src/features/settings/SettingsPage.tsx`,
+`src/renderer/components/AppShell.tsx`, and `src/renderer/styles.css`.
+Regression coverage changed in `tests/updater.test.ts`,
+`tests/update-pill.test.tsx`, and `tests/settings.test.tsx`; the existing
+Office-shell and App-shell suites also ran unchanged.
+
+### 35.3 Local gate (not Windows verification)
+
+Sandbox runtime was Node 22.22.3, not the repository's pinned Node 20.19.0.
+Dependencies came from the lockfile; better-sqlite3 was rebuilt against the
+local Node headers only to execute this Linux suite. Existing dependency audit
+and engine warnings were not hidden or changed.
+
+- Focused updater/Settings/pill/Office-shell/App-shell run: **5 files, 56/56
+  passed**.
+- `npm test`: **78 files passed; 710 passed / 3 skipped / 0 failed (713
+  total)** in 247.75 s. The three skips are the pre-existing real-Electron
+  packaging probes that require an Electron binary.
+- `npm run typecheck`: **PASS** (renderer/tests and Electron TypeScript configs).
+- `npm run build`: **PASS** (2,859 renderer modules plus Electron build).
+  Existing Vite CJS/chunk-size and AG Grid warnings remain.
+
+### 35.4 Owner's real Windows update test (two releases are required)
+
+**The fix only works in installations that contain it.** DKS 0.1.1 and the
+already-published 0.1.2 do not contain this repair, so a 0.1.1 → new-release
+test alone still exercises the old updater and is not a verification of this
+fix. Do not interpret an old install's failure as a regression in this branch.
+
+1. Through the unchanged release process, build and publish a release containing
+   this branch (for example 0.1.3), then manually install that fixed build on
+   the Windows test PC. This first installation establishes the fixed updater.
+2. Publish a **newer** release (for example 0.1.4) through the existing Release
+   DKS workflow and publish the draft as latest, including its installer,
+   blockmap and `latest.yml` as the workflow already verifies.
+3. On the fixed older installation, open Settings → About & updates → Check
+   for updates as Admin. Confirm checking and downloading NN% lead to **Update
+   0.1.4 is ready to install**, and the top bar shows **Update 0.1.4 ready**
+   with **Later** and **Restart to install**. Do not treat 100% alone as ready.
+4. Click **Later**: the pill disappears and stays hidden while navigating.
+   Settings → About still shows the ready message and Restart to install. Fully
+   quit with tray → Exit (closing the window only hides DKS to the tray), then
+   launch again; the ready pill must return. `autoInstallOnAppQuit=false` means
+   this ordinary quit is not the install action.
+5. Click **Restart to install**, cancel once and confirm nothing happens. Open
+   it again, confirm **Restart now** in the existing dialog, and verify exactly
+   one restart/install: DKS reopens as 0.1.4 with local records and the expected
+   sign-in state intact.
+6. Repeat the ready-pill/Later/confirmed-Restart flow on an approved Office
+   session. Office must see the same pill without gaining Settings or any admin
+   capability. Also test a check while offline (could-not-check copy) and, if
+   practical, an interrupted installer download (download-failed copy); Check
+   for updates retries both.
+7. If anything differs, inspect `%APPDATA%\DKS\logs\main.log` for the sanitized
+   `[dks] updater transition` sequence and provide that sequence without tokens,
+   release URLs, customer data or other secrets.
+
+All Windows results above remain **USER-ONLY / not yet confirmed** until the
+owner performs them on installations containing this fix.

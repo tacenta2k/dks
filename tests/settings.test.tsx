@@ -424,7 +424,12 @@ describe('About & updates (R2-06)', () => {
 });
 
 describe('settings application updates (mocked bridge)', () => {
-  function fakeBridge(state: { status: string; version?: string; progress?: number }) {
+  function fakeBridge(state: {
+    status: string;
+    version?: string;
+    progress?: number;
+    errorKind?: 'check' | 'download';
+  }) {
     let listener: ((next: typeof state) => void) | undefined;
     return {
       bridge: {
@@ -478,13 +483,32 @@ describe('settings application updates (mocked bridge)', () => {
     expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
   });
 
-  it('turns bridge failures into a retryable error message', async () => {
-    const { bridge } = fakeBridge({ status: 'error' });
+  it('turns check failures into a retryable could-not-check message', async () => {
+    const { bridge } = fakeBridge({ status: 'error', errorKind: 'check' });
     render(<SettingsPage role="admin" updater={bridge as never} />);
 
     nav('About & updates');
 
-    expect(await screen.findByText(/Update check failed/i)).toBeInTheDocument();
+    expect(await screen.findByText(
+      'Could not check for updates. Check your internet connection and try again.',
+    )).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Check for updates' })).toBeEnabled();
+  });
+
+  it('distinguishes a final installer download failure from a check failure', async () => {
+    const { bridge } = fakeBridge({
+      status: 'error',
+      version: '0.2.0',
+      errorKind: 'download',
+    });
+    render(<SettingsPage role="admin" updater={bridge as never} />);
+
+    nav('About & updates');
+
+    expect(await screen.findByText(
+      'Update 0.2.0 download failed. Check your internet connection and try again.',
+    )).toBeInTheDocument();
+    expect(screen.queryByText(/Could not check for updates/i)).not.toBeInTheDocument();
   });
 
   it('never claims a check happened without a desktop bridge', async () => {
