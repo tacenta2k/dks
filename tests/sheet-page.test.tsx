@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { AuthService, type AuthClientLike } from '../src/features/auth/auth-service';
 import { SheetPage } from '../src/features/sheet/SheetPage';
 import { buildGridColumns } from '../src/features/sheet/grid-columns';
-import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { createInMemorySheetRepository, type SheetRepository } from '../src/features/sheet/repository';
 import { App } from '../src/renderer/App';
 import { seedFixtureColumns } from './fixtures/sheet-columns';
 
@@ -44,6 +44,41 @@ function makeAuthClient(profile: Record<string, unknown> | null, restoredSession
 }
 
 describe('sheet page', () => {
+  it('paints an immediate loading skeleton while the snapshot is in flight', async () => {
+    const inner = createInMemorySheetRepository();
+    await seedFixtureColumns(inner);
+    await inner.createRow({ name: 'Katherine Johnson' });
+
+    // Hold the snapshot reads open so the initial loading state is observed
+    // deterministically (the real Electron bridge resolves after an IPC hop).
+    let releaseSnapshot: () => void = () => undefined;
+    const snapshotGate = new Promise<void>((resolve) => {
+      releaseSnapshot = resolve;
+    });
+    const repository = Object.create(inner) as SheetRepository;
+    repository.getColumns = async () => {
+      await snapshotGate;
+      return inner.getColumns();
+    };
+    repository.getRows = async () => {
+      await snapshotGate;
+      return inner.getRows();
+    };
+
+    render(<SheetPage repository={repository} role="office" />);
+
+    // First commit already shows the placeholder — never a blank pause.
+    expect(screen.getByTestId('sheet-loading-skeleton')).toBeInTheDocument();
+    expect(screen.getByText('Loading visa sheet…')).toBeInTheDocument();
+    expect(screen.queryByText('Katherine Johnson')).not.toBeInTheDocument();
+
+    releaseSnapshot();
+    await waitFor(() => {
+      expect(screen.queryByTestId('sheet-loading-skeleton')).not.toBeInTheDocument();
+    });
+    expect(await screen.findByText('Katherine Johnson')).toBeInTheDocument();
+  });
+
   it('offers a first-column action in the empty state without a Visa template (F3)', async () => {
     const repository = createInMemorySheetRepository();
     render(<SheetPage repository={repository} role="office" />);

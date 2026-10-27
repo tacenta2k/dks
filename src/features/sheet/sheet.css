@@ -4,13 +4,89 @@
   margin-top: 34px;
 }
 
-.sheet-page--loading {
+/* Immediate Visa Sheet placeholder: lightweight shimmer skeleton shown on
+   the first commit while the snapshot read is in flight. */
+.sheet-loading-skeleton {
+  gap: 14px;
   min-height: 290px;
-  place-items: center;
+}
+
+.sheet-loading-skeleton__caption {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.sheet-loading-skeleton__toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+
+.sheet-loading-skeleton__grid {
+  display: grid;
+  gap: 10px;
+  padding: 16px;
   border: 1px solid var(--color-border);
   border-radius: var(--radius-lg);
   background: var(--color-surface);
-  color: var(--color-text-muted);
+}
+
+.sheet-skeleton-row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+}
+
+.sheet-skeleton-bar {
+  display: block;
+  height: 14px;
+  border-radius: 7px;
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-muted) 25%,
+    var(--color-border) 50%,
+    var(--color-surface-muted) 75%
+  );
+  background-size: 200% 100%;
+  animation: sheet-skeleton-shimmer 1.4s ease-in-out infinite;
+}
+
+.sheet-skeleton-bar--search {
+  width: min(280px, 46%);
+  height: 34px;
+}
+
+.sheet-skeleton-bar--select {
+  width: 150px;
+  height: 34px;
+}
+
+.sheet-skeleton-bar--chip {
+  width: 64px;
+  height: 26px;
+}
+
+.sheet-skeleton-row .sheet-skeleton-bar {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+@keyframes sheet-skeleton-shimmer {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet-skeleton-bar {
+    animation: none;
+  }
 }
 
 .sheet-empty-state {

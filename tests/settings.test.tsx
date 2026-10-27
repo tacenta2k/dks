@@ -1,11 +1,11 @@
-import { fireEvent, render, screen, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
-import { SettingsPage } from '../src/features/settings/SettingsPage';
+import { SAVE_BANNER_VISIBLE_MS, SettingsPage } from '../src/features/settings/SettingsPage';
 
 // FIXES_UI §9.1: Settings now uses an inner navigation (Expiry rules /
 // Notifications / Workspace / About & updates) with one section at a time, so
@@ -524,5 +524,72 @@ describe('settings application updates (mocked bridge)', () => {
     expect(screen.queryByText(/development build/i)).not.toBeInTheDocument();
     expect(screen.queryByText('DKS is up to date.')).not.toBeInTheDocument();
     expect(screen.queryByText('Update check requested.')).not.toBeInTheDocument();
+  });
+});
+
+describe('settings save banner lifecycle', () => {
+  // Real timers: React 18's scheduler does not drain reliably under fake
+  // timers in this jsdom setup. The success window is 3.5s, so the waits
+  // below stay just over that.
+  const HIDE_TIMEOUT = SAVE_BANNER_VISIBLE_MS + 1500;
+
+  it('renders no save banner when the page first opens', () => {
+    render(<SettingsPage role="admin" onSettingsChange={vi.fn()} />);
+
+    expect(screen.queryByText(/Settings saved/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/cloud sync failed/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the success banner after a save, auto-hides it, and re-shows it on the next save', async () => {
+    const onSettingsChange = vi.fn().mockResolvedValue(undefined);
+    render(<SettingsPage role="admin" onSettingsChange={onSettingsChange} />);
+
+    fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#008000' } });
+    expect(await screen.findByText('Settings saved to the workspace.')).toBeInTheDocument();
+
+    // The success banner removes itself without any user action.
+    await waitFor(
+      () => expect(screen.queryByText('Settings saved to the workspace.')).not.toBeInTheDocument(),
+      { timeout: HIDE_TIMEOUT },
+    );
+
+    // A second save brings the banner back with a fresh auto-hide window.
+    fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#009000' } });
+    expect(await screen.findByText('Settings saved to the workspace.')).toBeInTheDocument();
+    await waitFor(
+      () => expect(screen.queryByText(/Settings saved/i)).not.toBeInTheDocument(),
+      { timeout: HIDE_TIMEOUT },
+    );
+  });
+
+  it('keeps the save-failure banner visible past the success window until dismissed', async () => {
+    const onSettingsChange = vi.fn().mockRejectedValue(new Error('network offline'));
+    render(<SettingsPage role="admin" onSettingsChange={onSettingsChange} />);
+
+    fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#008000' } });
+    const failureBanner = await screen.findByRole('alert');
+    expect(failureBanner).toHaveTextContent(/cloud sync failed/i);
+
+    // Error banners never auto-hide, even well beyond the success window.
+    await new Promise((resolve) => setTimeout(resolve, HIDE_TIMEOUT));
+    expect(screen.getByRole('alert')).toHaveTextContent(/cloud sync failed/i);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dismiss message' }));
+    await waitFor(() => expect(screen.queryByText(/cloud sync failed/i)).not.toBeInTheDocument());
+  });
+
+  it('replaces a persistent failure banner with the transient success banner on the next edit', async () => {
+    const onSettingsChange = vi.fn()
+      .mockRejectedValueOnce(new Error('network offline'))
+      .mockResolvedValueOnce(undefined);
+    render(<SettingsPage role="admin" onSettingsChange={onSettingsChange} />);
+
+    fireEvent.change(screen.getByLabelText('Green status color'), { target: { value: '#008000' } });
+    expect(await screen.findByRole('alert')).toBeInTheDocument();
+
+    // A new edit is an implicit retry and must clear the persistent error.
+    fireEvent.change(screen.getByLabelText('Yellow status color'), { target: { value: '#eab309' } });
+    expect(await screen.findByText('Settings saved to the workspace.')).toBeInTheDocument();
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 });

@@ -86,4 +86,40 @@ describe('confirmation dialog (SET-11)', () => {
     render(<ConfirmDialog {...base} open={false} />);
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
+
+  it('gates confirm behind the typed requirement and submits on Enter', () => {
+    const onConfirm = vi.fn();
+    render(
+      <ConfirmDialog {...base} requireText="DELETE" onConfirm={onConfirm} />,
+    );
+
+    const input = screen.getByLabelText('Type DELETE to confirm');
+    const confirm = screen.getByRole('button', { name: 'Delete permanently' });
+    expect(input).toBeInTheDocument();
+    expect(confirm).toBeDisabled();
+
+    fireEvent.change(input, { target: { value: 'delete' } });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(input, { target: { value: 'DELETE' } });
+    expect(confirm).toBeEnabled();
+
+    // Enter in the input submits without a mouse click.
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+  });
+
+  it('resets the typed confirmation every time the dialog opens', () => {
+    const { rerender } = render(
+      <ConfirmDialog {...base} requireText="DELETE" />,
+    );
+    const input = screen.getByLabelText('Type DELETE to confirm') as HTMLInputElement;
+    fireEvent.change(input, { target: { value: 'DELETE' } });
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeEnabled();
+
+    rerender(<ConfirmDialog {...base} requireText="DELETE" open={false} />);
+    rerender(<ConfirmDialog {...base} requireText="DELETE" open />);
+    const reopened = screen.getByLabelText('Type DELETE to confirm') as HTMLInputElement;
+    expect(reopened).toHaveValue('');
+    expect(screen.getByRole('button', { name: 'Delete permanently' })).toBeDisabled();
+  });
 });

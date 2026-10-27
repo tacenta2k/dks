@@ -148,4 +148,39 @@ describe('protected local SQLite cache and outbox', () => {
     expect(store.listColumns().find((column) => column.isPrimaryExpiry)?.id).toBe('expiry-two');
     store.close();
   });
+
+  it('gives a bulk recycle-bin delete one outbox item and one audit entry per row with no resurrection', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+    const keep = store.createEntry({ id: 'entry-keep', data: { name: 'Stays' } });
+    const targets = ['entry-a', 'entry-b', 'entry-c'].map((id) => {
+      const entry = store.createEntry({ id, data: { name: id } });
+      store.softDeleteEntry(id);
+      return entry;
+    });
+
+    // The Recycle Bin "Delete all" loop drives the SAME per-row permanent
+    // delete path as the single-row button.
+    for (const entry of targets) {
+      store.permanentDeleteEntry(entry.id, undefined, 'Admin');
+    }
+
+    expect(store.listEntries(true).map((entry) => entry.id)).toEqual([keep.id]);
+    const permanentOutbox = store
+      .listOutbox('all')
+      .filter((item) => item.operation === 'permanent_delete' && item.entityType === 'entry');
+    expect(permanentOutbox).toHaveLength(3);
+    // Unique idempotency keys keep the per-row RPC calls idempotent on sync.
+    expect(new Set(permanentOutbox.map((item) => item.idempotencyKey)).size).toBe(3);
+    expect(permanentOutbox.every((item) => item.status === 'pending')).toBe(true);
+
+    const permanentAudit = store.listAudit().filter((entry) => entry.action === 'permanent_delete');
+    expect(permanentAudit).toHaveLength(3);
+    expect(permanentAudit.every((entry) => entry.actor === 'Admin')).toBe(true);
+
+    // A later snapshot no longer surfaces the deleted rows in either bucket,
+    // so the next sync/reconcile cannot resurrect them.
+    const snapshot = store.listEntries(true);
+    expect(snapshot.some((entry) => targets.some((target) => target.id === entry.id))).toBe(false);
+    store.close();
+  });
 });

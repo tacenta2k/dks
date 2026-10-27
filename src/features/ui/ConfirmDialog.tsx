@@ -13,6 +13,14 @@ export interface ConfirmDialogProps {
   busy?: boolean;
   /** Blocks the confirm button until it returns true (typed confirmation). */
   canConfirm?: boolean;
+  /**
+   * When set, the dialog shows a text input and the confirm button stays
+   * disabled until the user types this exact value (mirrors the audit-log
+   * clear gate, e.g. `requireText="DELETE"`).
+   */
+  requireText?: string;
+  /** Accessible label for the typed-confirmation input. */
+  requireTextLabel?: string;
   error?: string | null;
   onConfirm: () => void | Promise<void>;
   onCancel: () => void;
@@ -37,16 +45,22 @@ export function ConfirmDialog({
   destructive = false,
   busy = false,
   canConfirm = true,
+  requireText,
+  requireTextLabel = 'Type DELETE to confirm',
   error = null,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
   const confirmRef = useRef<HTMLButtonElement | null>(null);
   const [submitting, setSubmitting] = useState(false);
+  const [typedConfirmation, setTypedConfirmation] = useState('');
 
   useEffect(() => {
     if (open) {
       setSubmitting(false);
+      // Every opening starts the typed gate from scratch so a previous
+      // attempt can never leave the confirm button pre-enabled.
+      setTypedConfirmation('');
     }
   }, [open]);
 
@@ -54,7 +68,8 @@ export function ConfirmDialog({
     return null;
   }
 
-  const blocked = busy || submitting || !canConfirm;
+  const typedGateSatisfied = !requireText || typedConfirmation.trim() === requireText;
+  const blocked = busy || submitting || !canConfirm || !typedGateSatisfied;
   const submit = () => {
     if (blocked) {
       return;
@@ -98,6 +113,26 @@ export function ConfirmDialog({
         <h2 className="confirm-dialog__title">{title}</h2>
         {children ? <div className="confirm-dialog__body">{children}</div> : null}
         {hint ? <p className="confirm-dialog__hint">{hint}</p> : null}
+        {requireText ? (
+          <>
+            <p className="confirm-dialog__hint">
+              Type <strong>{requireText}</strong> to confirm.
+            </p>
+            <input
+              className="confirm-dialog__input"
+              aria-label={requireTextLabel}
+              autoFocus
+              value={typedConfirmation}
+              onChange={(event) => setTypedConfirmation(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter' && !blocked) {
+                  event.preventDefault();
+                  submit();
+                }
+              }}
+            />
+          </>
+        ) : null}
         {error ? (
           <p className="confirm-dialog__error" role="alert">{error}</p>
         ) : null}

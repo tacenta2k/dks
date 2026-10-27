@@ -1,8 +1,10 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { describe, expect, it, vi } from 'vitest';
 
 import { RecycleBinPage } from '../src/features/recycle-bin/RecycleBinPage';
+import { AdminRecycleBinPanel } from '../src/features/admin/AdminTools';
+import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 import type { ColumnDefinition } from '../src/lib/columns';
 import type { SheetRow } from '../src/features/sheet/types';
 
@@ -45,6 +47,63 @@ describe('recycle bin page', () => {
 
     expect(screen.getByRole('alert')).toHaveTextContent(/administrator/i);
     expect(screen.queryByRole('button', { name: /Restore/i })).not.toBeInTheDocument();
+    // Office must never see the bulk-delete control either.
+    expect(screen.queryByRole('button', { name: 'Delete all' })).not.toBeInTheDocument();
+  });
+
+  it('shows just the live item count and an Admin-only Delete all action', () => {
+    const onDeleteAll = vi.fn();
+    render(
+      <RecycleBinPage
+        role="admin"
+        rows={rows}
+        columns={columns}
+        onRestore={vi.fn()}
+        onPermanentDelete={vi.fn()}
+        onDeleteAll={onDeleteAll}
+      />,
+    );
+
+    // One deleted row in this fixture: the retention clause is gone.
+    expect(screen.getByTestId('recycle-bin-count')).toHaveTextContent('1 item');
+    expect(screen.queryByText(/kept until permanently deleted/i)).not.toBeInTheDocument();
+
+    const deleteAll = screen.getByRole('button', { name: 'Delete all' });
+    fireEvent.click(deleteAll);
+    expect(onDeleteAll).toHaveBeenCalledTimes(1);
+  });
+
+  it('updates the count with the active search filter', () => {
+    render(
+      <RecycleBinPage
+        role="admin"
+        rows={[
+          { id: 'deleted-1', data: { name: 'Ahmed' }, deleted: true },
+          { id: 'deleted-2', data: { name: 'Fatima' }, deleted: true },
+        ]}
+        columns={columns}
+        onDeleteAll={vi.fn()}
+      />,
+    );
+
+    expect(screen.getByTestId('recycle-bin-count')).toHaveTextContent('2 items');
+    fireEvent.change(screen.getByLabelText('Search deleted records'), { target: { value: 'ahmed' } });
+    expect(screen.getByTestId('recycle-bin-count')).toHaveTextContent('1 item');
+  });
+
+  it('hides the toolbar and Delete all action when the bin is empty', () => {
+    render(
+      <RecycleBinPage role="admin" rows={[{ id: 'active-1', data: { name: 'Active' }, deleted: false }]} columns={columns} onDeleteAll={vi.fn()} />,
+    );
+
+    expect(screen.getByText('Recycle Bin is empty')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete all' })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText('Search deleted records')).not.toBeInTheDocument();
+  });
+
+  it('omits Delete all when no host handler is supplied', () => {
+    render(<RecycleBinPage role="admin" rows={rows} columns={columns} />);
+    expect(screen.queryByRole('button', { name: 'Delete all' })).not.toBeInTheDocument();
   });
 
   it('shows human labels, local DD/MM/YYYY HH:mm deletion time and who deleted (S2)', () => {
@@ -82,5 +141,67 @@ describe('recycle bin page', () => {
     expect(screen.queryByText('2026-01-02T09:30:00.000Z')).not.toBeInTheDocument();
     // Who deleted it, when that information exists.
     expect(screen.getByText('Ahmed K')).toBeInTheDocument();
+  });
+});
+
+describe('Recycle Bin Delete all (AdminRecycleBinPanel)', () => {
+  it('gates on typed DELETE, cancels without changes, then deletes every row through the permanent-delete path', async () => {
+    const repository = createInMemorySheetRepository();
+    await repository.addColumn({ name: 'Name', type: 'text' });
+    const first = await repository.createRow({ name: 'Ahmed' });
+    const second = await repository.createRow({ name: 'Fatima' });
+    await repository.softDeleteRow(first.id);
+    await repository.softDeleteRow(second.id);
+
+    render(
+      <AdminRecycleBinPanel
+        repository={repository}
+        role="admin"
+        actor={{ id: 'admin-1', name: 'Admin' }}
+      />,
+    );
+
+    // The record label and the Name column cell both show the value.
+    expect((await screen.findAllByText('Ahmed')).length).toBeGreaterThan(0);
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Delete all records in the Recycle Bin?' });
+    expect(within(dialog).getByText(/permanently deletes ALL 2 records/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/cannot be undone/i)).toBeInTheDocument();
+    const confirm = within(dialog).getByRole('button', { name: 'Delete all permanently' });
+    const input = within(dialog).getByLabelText('Type DELETE to confirm');
+    expect(confirm).toBeDisabled();
+
+    // The gate is exact: lowercase stays disabled.
+    fireEvent.change(input, { target: { value: 'delete' } });
+    expect(confirm).toBeDisabled();
+    fireEvent.change(input, { target: { value: 'DELETE' } });
+    expect(confirm).toBeEnabled();
+
+    // Cancel performs no deletion and closes the dialog.
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect((await repository.getRows()).filter((row) => row.deleted === true)).toHaveLength(2);
+
+    // Reopen: the typed gate starts empty again.
+    fireEvent.click(screen.getByRole('button', { name: 'Delete all' }));
+    const reopened = await screen.findByRole('dialog', { name: 'Delete all records in the Recycle Bin?' });
+    const reopenedInput = within(reopened).getByLabelText('Type DELETE to confirm') as HTMLInputElement;
+    expect(reopenedInput).toHaveValue('');
+    fireEvent.change(reopenedInput, { target: { value: 'DELETE' } });
+    fireEvent.click(within(reopened).getByRole('button', { name: 'Delete all permanently' }));
+
+    await waitFor(async () => {
+      const deletedRows = (await repository.getRows()).filter((row) => row.deleted === true);
+      expect(deletedRows).toHaveLength(0);
+    });
+    expect(await screen.findByText('Recycle Bin is empty')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Delete all' })).not.toBeInTheDocument();
+
+    // One permanent_delete audit entry per row — identical semantics to the
+    // single-row delete path.
+    const audit = await repository.getAuditHistory?.();
+    expect(audit?.filter((entry) => entry.action === 'permanent_delete')).toHaveLength(2);
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
   });
 });
