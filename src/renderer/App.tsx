@@ -68,6 +68,10 @@ import {
   type SupabaseSyncLocal,
   type SupabaseSyncResult,
 } from '../features/sync/supabase-sync';
+import {
+  createLiveSheetWatcher,
+  type LiveSheetClientLike,
+} from '../features/sync/live-sheet-realtime';
 
 export interface AppProps {
   initialView?: AppView;
@@ -791,36 +795,31 @@ export function App({
       runInBackground();
     }, 60_000);
 
-    type RealtimeChannelLike = {
-      on: (
-        event: string,
-        filter: Record<string, string>,
-        callback: () => void,
-      ) => RealtimeChannelLike;
-      subscribe: () => unknown;
-    };
-    type RealtimeClientLike = {
-      channel?: (name: string) => RealtimeChannelLike;
-      removeChannel?: (channel: RealtimeChannelLike) => unknown;
-    };
-    const realtime = client as unknown as RealtimeClientLike;
-    const channel = realtime.channel?.('dks-data-sync');
-    if (channel) {
-      channel
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'entries' }, runInBackground)
-        .on('postgres_changes', { event: '*', schema: 'public', table: 'app_columns' }, runInBackground)
-        .subscribe();
-    }
+    // ONE Realtime channel per signed-in client on the two tables the Visa
+    // Sheet reconciles from. Events are change notifications only: they are
+    // coalesced for ~1 s and then run this same pull/reconcile, which refreshes
+    // the mounted Sheet/Dashboard/Recycle Bin quietly through refreshToken. A
+    // payload is never applied, so LWW/outbox semantics are unchanged. This
+    // effect only lives while the session is allowed (authenticated, and for
+    // Office approved with the current request id), so signing out, revocation
+    // or the pending gate disposes the watcher and unsubscribes the channel.
+    const liveSheetWatcher = createLiveSheetWatcher({
+      client: client as unknown as LiveSheetClientLike,
+      onWakeup: runInBackground,
+      // Echo hint only: while our own run is pushing/pulling it refreshes the
+      // page itself. Correctness never depends on this.
+      isBusy: () => running,
+    });
 
     return () => {
       stopped = true;
+      // Unsubscribe BEFORE anything else so no event can start a sync after
+      // sign-out / revocation / the clearance-pending gate.
+      liveSheetWatcher.dispose();
       requestSyncRef.current = null;
       syncNowRef.current = null;
       window.clearInterval(interval);
       if (openingTimer !== undefined) window.clearTimeout(openingTimer);
-      if (channel) {
-        void realtime.removeChannel?.(channel);
-      }
     };
   }, [appStore, authService, authStatus, officeApproved, syncAllowed, profile?.id, requestId]);
 

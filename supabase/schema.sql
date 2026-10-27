@@ -1759,7 +1759,12 @@ create policy sync_sessions_delete_authenticated
 on public.sync_sessions for delete to authenticated
 using ((user_id = auth.uid() and public.office_session_is_approved()) or public.is_admin());
 
--- Realtime is used for cross-PC settings and administrator notifications.
+-- Realtime is used for cross-PC settings, administrator notifications,
+-- sign-in approval requests and — change-notification only — the Visa Sheet
+-- (`entries` + `app_columns`). Publishing the two data tables does NOT change
+-- any policy: Realtime postgres_changes is filtered through the existing RLS
+-- SELECT policies, so a client only ever receives changes for rows it may
+-- already read (Office stays inside its approved session).
 do $$
 begin
   if exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
@@ -1786,6 +1791,24 @@ begin
          and tablename = 'office_signin_requests'
     ) then
       execute 'alter publication supabase_realtime add table public.office_signin_requests';
+    end if;
+    -- Live Visa Sheet: change notifications only. Clients never apply the
+    -- payload; an event just triggers the existing debounced pull/reconcile.
+    if not exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'entries'
+    ) then
+      execute 'alter publication supabase_realtime add table public.entries';
+    end if;
+    if not exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'app_columns'
+    ) then
+      execute 'alter publication supabase_realtime add table public.app_columns';
     end if;
   end if;
 end;
