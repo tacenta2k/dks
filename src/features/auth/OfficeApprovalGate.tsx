@@ -1,9 +1,8 @@
-import { useEffect } from 'react';
-
 import type { StoreApi } from 'zustand/vanilla';
 import { useStore } from 'zustand';
 
 import type { AppStore } from '../../lib/store';
+import { formatBusinessDateTime } from '../../lib/date';
 
 /**
  * The ONLY surface a pending / denied / revoked Office session may see.
@@ -22,16 +21,12 @@ import type { AppStore } from '../../lib/store';
 export interface OfficeApprovalGateProps {
   appStore: StoreApi<AppStore>;
   onSignOut: () => void;
+  preparationError?: string | null;
+  onRetryPreparation?: () => void;
 }
 
-const POLL_INTERVAL_MS = 5_000;
-
 function formatRequestedAt(value: string | undefined): string {
-  if (!value) {
-    return 'just now';
-  }
-  const when = new Date(value);
-  return Number.isNaN(when.getTime()) ? value : when.toLocaleString();
+  return value ? formatBusinessDateTime(value) : 'just now';
 }
 
 interface GateStateCopy {
@@ -41,31 +36,22 @@ interface GateStateCopy {
   body: string;
 }
 
-export function OfficeApprovalGate({ appStore, onSignOut }: OfficeApprovalGateProps) {
+export function OfficeApprovalGate({ appStore, onSignOut, preparationError, onRetryPreparation }: OfficeApprovalGateProps) {
   const approval = useStore(appStore, (state) => state.sessionApproval);
   const request = useStore(appStore, (state) => state.sessionApprovalRequest);
   const error = useStore(appStore, (state) => state.sessionApprovalError);
 
-  useEffect(() => {
-    if (approval !== 'pending' && approval !== 'checking') {
-      return undefined;
-    }
-    // The client polls its own row; decisions always arrive server-side.
-    const tick = () => {
-      void appStore.getState().refreshSessionApproval();
-    };
-    const interval = setInterval(tick, POLL_INTERVAL_MS);
-    window.addEventListener('focus', tick);
-    return () => {
-      clearInterval(interval);
-      window.removeEventListener('focus', tick);
-    };
-  }, [appStore, approval]);
-
   const requestedAt = formatRequestedAt(request?.requestedAt);
 
   let copy: GateStateCopy;
-  if (approval === 'checking') {
+  if (preparationError) {
+    copy = {
+      ariaRole: 'alert',
+      ariaLabel: 'Cannot open local records',
+      title: 'Cannot open local records',
+      body: 'The local workspace could not be opened. Please try again.',
+    };
+  } else if (approval === 'checking' || approval === 'approved') {
     copy = {
       ariaRole: 'status',
       ariaLabel: 'Checking sign-in approval',
@@ -119,18 +105,18 @@ export function OfficeApprovalGate({ appStore, onSignOut }: OfficeApprovalGatePr
           </p>
         ) : null}
 
-        {error?.message ? (
-          approval === 'error' ? (
+        {preparationError || error?.message ? (
+          approval === 'error' || preparationError ? (
             <>
               {/* The technical cause is secondary: readable, quiet, wrapped. */}
               <p className="office-approval-card__detail" role="note">
-                {error.message}
+                {preparationError ?? error?.message}
               </p>
               <div className="office-approval-card__actions">
                 <button
                   type="button"
                   className="button button--primary"
-                  onClick={() => void appStore.getState().refreshSessionApproval()}
+                  onClick={() => preparationError ? onRetryPreparation?.() : void appStore.getState().refreshSessionApproval()}
                 >
                   Retry
                 </button>
@@ -142,7 +128,7 @@ export function OfficeApprovalGate({ appStore, onSignOut }: OfficeApprovalGatePr
           ) : (
             <>
               <p className="office-approval-card__detail" role="alert">
-                {error.message}
+                {error?.message}
               </p>
               <div className="office-approval-card__actions">
                 <button type="button" className="button button--secondary" onClick={onSignOut}>

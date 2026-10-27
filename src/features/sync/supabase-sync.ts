@@ -84,6 +84,7 @@ export interface SupabaseSyncLocal {
   listOutbox?: (input?: { status?: string }) => Promise<SupabaseOutboxItem[]>;
   markOutboxSynced?: (id: number | string) => Promise<void> | void;
   markOutboxFailed?: (id: number | string, message: string) => Promise<void> | void;
+  markOutboxTerminal?: (id: number | string, message: string) => Promise<void> | void;
   retryFailedOutbox?: () => Promise<number> | number;
   /**
    * Adopt the server's column id for a local duplicate and rewrite the entry

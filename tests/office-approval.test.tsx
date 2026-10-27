@@ -1,8 +1,8 @@
 import type { Session } from '@supabase/supabase-js';
 import { readFileSync } from 'node:fs';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { AuthService, type AuthClientLike } from '../src/features/auth/auth-service';
 import {
@@ -17,6 +17,7 @@ import { OfficeApprovalGate } from '../src/features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../src/features/admin/OfficeApprovalsPanel';
 import { createAppStore, type AppStore } from '../src/lib/store';
 import { App } from '../src/renderer/App';
+import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 import {
   createLocalIpcHandlers,
   LOCAL_IPC_CHANNELS,
@@ -813,5 +814,166 @@ describe('approval gate — readability contract', () => {
     expect(styles).toMatch(
       /\.office-approval-card__detail\s*\{[^}]*background:\s*var\(--color-surface-muted\)[^}]*color:\s*var\(--color-text-muted\)/s,
     );
+  });
+});
+
+
+describe('immediate approval and revocation', () => {
+  const originalDks = Object.getOwnPropertyDescriptor(window, 'dks');
+  afterEach(() => {
+    if (originalDks) Object.defineProperty(window, 'dks', originalDks);
+    else Reflect.deleteProperty(window, 'dks');
+  });
+
+  it('awaits clearance, snapshot, and the first sync before opening; a Realtime revoke fences and signs out locally', async () => {
+    const order: string[] = [];
+    let current = makeRequest({ status: 'pending' });
+    let wake: (() => void) | undefined;
+    let releaseClearance!: () => void;
+    const allowed = new Promise<void>((resolve) => { releaseClearance = resolve; });
+    let fenced = false;
+    let actualClearance = 'allowed';
+    let signedOutListener: ((event: 'SIGNED_OUT', session: null) => void) | undefined;
+    const client = makeAuthClient({ id: 'user-office', role: 'office' });
+    vi.mocked(client.auth.onAuthStateChange).mockImplementation((listener) => {
+      signedOutListener = listener as typeof signedOutListener;
+      return { data: { subscription: { unsubscribe: vi.fn() } } };
+    });
+    vi.mocked(client.auth.signOut).mockImplementation(async () => {
+      order.push('sign-out');
+      signedOutListener?.('SIGNED_OUT', null);
+      return { error: null };
+    });
+    const profileFrom = client.from;
+    client.from = ((table: string) => table === 'profiles'
+      ? profileFrom(table)
+      : { select: () => { order.push(`sync:${table}`); return Promise.resolve({ data: [], error: null }); } }) as AuthClientLike['from'];
+    const authService = new AuthService(client);
+    const { service } = makeFakeApprovalService({});
+    vi.mocked(service.fetchMyRequest).mockImplementation(async () => ({ data: current, error: null }));
+    service.subscribeChanges = vi.fn((callback, id) => {
+      expect(id).toBe('req-1');
+      wake = callback;
+      return () => { wake = undefined; };
+    });
+    const syncState = { status: 'offline' as const, lastSyncAt: null, lastError: null, pendingCount: 0 };
+    const snapshot = { rows: [], deletedRows: [], columns: [], syncStatus: syncState };
+    const local = {
+      setSessionClearance: vi.fn(async (next: 'allowed' | 'office-pending') => {
+        order.push(`clearance:${next}:start`);
+        if (next === 'office-pending') fenced = true;
+        if (next === 'allowed' && fenced) await allowed;
+        actualClearance = next;
+        order.push(`clearance:${next}:done`);
+        return next;
+      }),
+      getSnapshot: vi.fn(async () => {
+        order.push('snapshot');
+        if (actualClearance !== 'allowed') throw new Error('Waiting for Admin Approval — this session cannot access local records');
+        return snapshot;
+      }),
+      applyRemoteSnapshot: vi.fn(async () => snapshot),
+      setSyncStatus: vi.fn(async (state: object) => ({ ...syncState, ...state })),
+      acknowledgeOutbox: vi.fn(async () => ({ ...syncState, status: 'healthy' })),
+      listOutbox: vi.fn(async () => []),
+      retryFailedOutbox: vi.fn(async () => ({ requeued: 0 })),
+      listNotifications: vi.fn(async () => []),
+    };
+    Object.defineProperty(window, 'dks', { configurable: true, value: { local } });
+    render(<App authService={authService} approvalService={service} sheetRepository={createInMemorySheetRepository()} />);
+
+    await waitFor(() => expect(screen.getByRole('status', { name: 'Waiting for admin approval' })).toBeInTheDocument());
+    await waitFor(() => expect(wake).toBeTypeOf('function'));
+    expect(local.getSnapshot).not.toHaveBeenCalled();
+    expect(order.some((item) => item.startsWith('sync:'))).toBe(false);
+
+    // Event contents are not authoritative: first wake while server is still pending.
+    act(() => wake?.());
+    await waitFor(() => expect(service.fetchMyRequest).toHaveBeenCalledTimes(2));
+    expect(screen.getByRole('status', { name: 'Waiting for admin approval' })).toBeInTheDocument();
+
+    current = { ...current, status: 'approved' };
+    act(() => wake?.());
+    await waitFor(() => expect(order).toContain('clearance:allowed:start'));
+    expect(local.getSnapshot).not.toHaveBeenCalled();
+    expect(screen.queryByRole('banner', { name: 'DKS top bar' })).not.toBeInTheDocument();
+    await act(async () => { releaseClearance(); });
+    await waitFor(() => expect(screen.getByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument(), { timeout: 4_000 });
+    const allowedDone = order.lastIndexOf('clearance:allowed:done');
+    expect(allowedDone).toBeGreaterThan(order.indexOf('clearance:office-pending:done'));
+    expect(order.indexOf('snapshot')).toBeGreaterThan(allowedDone);
+    expect(order.indexOf('sync:entries')).toBeGreaterThan(order.indexOf('snapshot'));
+    expect(screen.queryByTestId('local-store-error')).not.toBeInTheDocument();
+
+    current = { ...current, status: 'revoked' };
+    act(() => wake?.());
+    await waitFor(() => expect(client.auth.signOut).toHaveBeenCalledWith({ scope: 'local' }));
+    const revokedFence = order.indexOf('clearance:office-pending:done', allowedDone);
+    expect(revokedFence).toBeGreaterThan(allowedDone);
+    expect(revokedFence).toBeLessThan(order.indexOf('sign-out'));
+    expect(screen.getByRole('alert', { name: 'Approval revoked' })).toBeInTheDocument();
+    expect(screen.queryByRole('banner', { name: 'DKS top bar' })).not.toBeInTheDocument();
+  });
+
+  it('clears an earlier refusal on the next successful local call after retrying preparation', async () => {
+    let attempts = 0;
+    let notify: (() => void) | undefined;
+    const snapshot = { rows: [], deletedRows: [], columns: [], syncStatus: { status: 'offline', lastSyncAt: null, lastError: null, pendingCount: 0 } };
+    const local = {
+      setSessionClearance: vi.fn(async (next: string) => next),
+      onOperationSuccess: (callback: () => void) => { notify = callback; return () => { notify = undefined; }; },
+      getSnapshot: vi.fn(async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("Error invoking remote method 'dks:local:get-snapshot': Error: Waiting for Admin Approval");
+        notify?.();
+        return snapshot;
+      }),
+    };
+    Object.defineProperty(window, 'dks', { configurable: true, value: { local } });
+    const { service } = makeFakeApprovalService({ my: makeRequest({ status: 'approved' }) });
+    render(<App authService={new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }))} approvalService={service} sheetRepository={createInMemorySheetRepository()} />);
+    expect(await screen.findByRole('alert', { name: 'Cannot open local records' })).toHaveTextContent('Waiting for Admin Approval');
+    fireEvent.click(screen.getByRole('button', { name: 'Retry' }));
+    await waitFor(() => expect(screen.getByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument());
+    expect(attempts).toBeGreaterThanOrEqual(2);
+    expect(screen.queryByTestId('local-store-error')).not.toBeInTheDocument();
+  });
+
+  it('updates the Admin badge on a Realtime wakeup without waiting for the polling interval', async () => {
+    let rows: OfficeSigninRequest[] = [];
+    let wake: (() => void) | undefined;
+    const { service } = makeFakeApprovalService({});
+    vi.mocked(service.listRequests).mockImplementation(async () => ({ data: rows, error: null }));
+    const unsub = vi.fn();
+    service.subscribeChanges = vi.fn((callback) => { wake = callback; return unsub; });
+    const { unmount } = render(<OfficeApprovalsPanel service={service} pollMs={60_000} />);
+    await waitFor(() => expect(wake).toBeTypeOf('function'));
+    expect(screen.getByRole('button', { name: 'Office sign-in approvals' })).toBeInTheDocument();
+    rows = [makeRequest({ status: 'pending' })];
+    act(() => wake?.());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Office sign-in approvals (1 pending)' })).toBeInTheDocument());
+    expect(service.listRequests).toHaveBeenCalledTimes(2);
+    unmount();
+    expect(unsub).toHaveBeenCalledOnce();
+  });
+
+  it('subscribes to the current request and treats Realtime payloads only as wakeups', () => {
+    let callback: (() => void) | undefined;
+    const on = vi.fn((_event: string, _filter: Record<string, string>, cb: () => void) => { callback = cb; return channel; });
+    const channel = { on, subscribe: vi.fn() };
+    const removeChannel = vi.fn();
+    const client = {
+      rpc: vi.fn(), from: vi.fn(), channel: vi.fn(() => channel), removeChannel,
+    } as unknown as ApprovalClientLike;
+    const service = createOfficeApprovalService(client)!;
+    const wake = vi.fn();
+    const unsubscribe = service.subscribeChanges!(wake, 'req-1');
+    expect(on).toHaveBeenCalledWith('postgres_changes', {
+      event: '*', schema: 'public', table: 'office_signin_requests', filter: 'id=eq.req-1',
+    }, expect.any(Function));
+    (callback as unknown as (payload: object) => void)({ new: { status: 'approved' } });
+    expect(wake).toHaveBeenCalledWith();
+    unsubscribe();
+    expect(removeChannel).toHaveBeenCalledWith(channel);
   });
 });

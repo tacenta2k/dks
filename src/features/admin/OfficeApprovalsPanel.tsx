@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
+import { formatBusinessDateTime } from '../../lib/date';
+
 import {
   createOfficeApprovalService,
   type OfficeApprovalService,
@@ -29,8 +31,7 @@ function formatDateTime(value: string | null | undefined): string {
   if (!value) {
     return '';
   }
-  const when = new Date(value);
-  return Number.isNaN(when.getTime()) ? value : when.toLocaleString();
+  return formatBusinessDateTime(value);
 }
 
 function PeopleIcon() {
@@ -52,13 +53,16 @@ export function OfficeApprovalsPanel({ service: providedService, pollMs }: Offic
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const sectionRef = useRef<HTMLElement>(null);
+  const refreshVersion = useRef(0);
 
   const refresh = useCallback(async () => {
     if (!service) {
       setError('Supabase is not configured — approvals cannot be read here.');
       return;
     }
+    const version = ++refreshVersion.current;
     const result = await service.listRequests(['pending', 'approved']);
+    if (version !== refreshVersion.current) return;
     if (result.error) {
       setError(result.error.message);
       return;
@@ -73,13 +77,17 @@ export function OfficeApprovalsPanel({ service: providedService, pollMs }: Offic
   // every action forces a refresh so the panel reflects the server truth.
   useEffect(() => {
     void refresh();
+    // Change events never supply UI state; every wakeup re-reads under RLS.
+    const unsubscribe = service?.subscribeChanges?.(() => void refresh());
     const interval = setInterval(() => void refresh(), pollMs ?? REQUEST_REFRESH_MS);
     window.addEventListener('focus', refresh);
     return () => {
+      refreshVersion.current += 1;
+      unsubscribe?.();
       clearInterval(interval);
       window.removeEventListener('focus', refresh);
     };
-  }, [refresh, pollMs]);
+  }, [refresh, pollMs, service]);
 
   // Escape / outside click closes (matches NotificationBell).
   useEffect(() => {
