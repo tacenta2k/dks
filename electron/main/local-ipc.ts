@@ -47,6 +47,7 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   listOutbox: 'dks:local:list-outbox',
   markOutboxSynced: 'dks:local:mark-outbox-synced',
   markOutboxFailed: 'dks:local:mark-outbox-failed',
+  markOutboxTerminal: 'dks:local:mark-outbox-terminal',
   retryFailedOutbox: 'dks:local:retry-failed-outbox',
   flushSync: 'dks:local:flush-sync',
   close: 'dks:local:close',
@@ -139,6 +140,7 @@ export interface LocalIpcStore {
   listOutbox?: (status?: string) => readonly unknown[];
   markOutboxSynced?: (id: number | string) => void;
   markOutboxFailed?: (id: number | string, message: string) => void;
+  markOutboxTerminal?: (id: number | string, message: string) => void;
   retryFailedOutbox?: () => number;
   sync?: () => Promise<void> | void;
   flush: () => Promise<void> | void;
@@ -946,6 +948,20 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         throw new Error('Outbox failure recording is unavailable in this local store');
       }
       store.markOutboxFailed(id as number | string, message.slice(0, 500));
+      return { ok: true };
+    },
+
+    [LOCAL_IPC_CHANNELS.markOutboxTerminal]: (payload) => {
+      const input = asRecord(payload, 'outbox terminal input');
+      const id = input.id;
+      if (!((typeof id === 'number' && Number.isInteger(id)) || (typeof id === 'string' && id.trim()))) {
+        throw new Error('outbox id is required');
+      }
+      const message = requiredString(input.message, 'outbox terminal message');
+      if (!store.markOutboxTerminal) {
+        throw new Error('Terminal outbox recording is unavailable in this local store');
+      }
+      store.markOutboxTerminal(id as number | string, message.slice(0, 500));
       return { ok: true };
     },
 

@@ -199,6 +199,7 @@ export interface DksLocalApi {
    * ('office-pending' while waiting for admin approval).
    */
   setSessionClearance: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
+  onOperationSuccess: (listener: () => void) => () => void;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
@@ -225,6 +226,7 @@ export interface DksLocalApi {
   listOutbox?: (input?: { status?: string }) => Promise<DksLocalOutboxItem[]>;
   markOutboxSynced?: (input: { id: number | string }) => Promise<{ ok: boolean }>;
   markOutboxFailed?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
+  markOutboxTerminal?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
   retryFailedOutbox?: () => Promise<{ requeued: number }>;
   recordConflict?: (input: DksLocalConflictInput) => Promise<unknown>;
   getSettings?: () => Promise<Record<string, unknown>>;
@@ -291,6 +293,7 @@ const LOCAL_CHANNELS = {
   listOutbox: 'dks:local:list-outbox',
   markOutboxSynced: 'dks:local:mark-outbox-synced',
   markOutboxFailed: 'dks:local:mark-outbox-failed',
+  markOutboxTerminal: 'dks:local:mark-outbox-terminal',
   retryFailedOutbox: 'dks:local:retry-failed-outbox',
   recordConflict: 'dks:local:record-conflict',
   getSettings: 'dks:local:get-settings',
@@ -561,6 +564,8 @@ function cloneSerializable<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
 }
 
+const localSuccessListeners = new Set<() => void>();
+
 async function invokeLocal<T>(
   channel: string,
   payload: unknown,
@@ -571,6 +576,13 @@ async function invokeLocal<T>(
     const result = payload === undefined
       ? await ipcRenderer.invoke(channel)
       : await ipcRenderer.invoke(channel, payload);
+    // A successful data operation proves that an earlier local-store error is
+    // stale. Clearance changes and close do not prove the database is usable.
+    if (channel !== LOCAL_CHANNELS.setSessionClearance && channel !== LOCAL_CHANNELS.close) {
+      for (const listener of localSuccessListeners) {
+        try { listener(); } catch { /* Observers cannot fail an IPC operation. */ }
+      }
+    }
     return cloneSerializable(result) as T;
   } catch (caught) {
     // Preserve a useful, bounded error while preventing a renderer caller from
@@ -586,6 +598,11 @@ async function invokeLocal<T>(
 
 const localApi: DksLocalApi = Object.freeze({
   getSnapshot: () => invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.getSnapshot, undefined),
+  onOperationSuccess: (listener: () => void) => {
+    if (typeof listener !== 'function') throw new TypeError('listener must be a function');
+    localSuccessListeners.add(listener);
+    return () => { localSuccessListeners.delete(listener); };
+  },
   createRow: (input: DksLocalCreateRowInput) => invokeLocal<DksLocalRow>(LOCAL_CHANNELS.createRow, input, validateCreateRow),
   updateRow: (input: DksLocalUpdateRowInput) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.updateRow, input, validateUpdateRow),
   duplicateRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.duplicateRow, input, validateRowCommand),
@@ -625,6 +642,7 @@ const localApi: DksLocalApi = Object.freeze({
   listOutbox: (input: { status?: string } = {}) => invokeLocal<DksLocalOutboxItem[]>(LOCAL_CHANNELS.listOutbox, input, validateListOutbox),
   markOutboxSynced: (input: { id: number | string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.markOutboxSynced, input, validateMarkOutboxSynced),
   markOutboxFailed: (input: { id: number | string; message: string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.markOutboxFailed, input, validateMarkOutboxFailed),
+  markOutboxTerminal: (input: { id: number | string; message: string }) => invokeLocal<{ ok: boolean }>(LOCAL_CHANNELS.markOutboxTerminal, input, validateMarkOutboxFailed),
   retryFailedOutbox: () => invokeLocal<{ requeued: number }>(LOCAL_CHANNELS.retryFailedOutbox, undefined),
   recordConflict: (input: DksLocalConflictInput) => invokeLocal<unknown>(LOCAL_CHANNELS.recordConflict, input, validateConflict),
   getSettings: () => invokeLocal<Record<string, unknown>>(LOCAL_CHANNELS.getSettings, undefined),

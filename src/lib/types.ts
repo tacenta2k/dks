@@ -202,6 +202,8 @@ export interface DksLocalApi {
    * process ('office-pending' while an Office session awaits admin approval).
    */
   setSessionClearance?: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
+  /** A successful data IPC call clears any stale local-store error banner. */
+  onOperationSuccess?: (listener: () => void) => () => void;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
@@ -233,6 +235,7 @@ export interface DksLocalApi {
   listOutbox?: (input?: { status?: string }) => Promise<DksLocalOutboxItem[]>;
   markOutboxSynced?: (input: { id: number | string }) => Promise<{ ok: boolean }>;
   markOutboxFailed?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
+  markOutboxTerminal?: (input: { id: number | string; message: string }) => Promise<{ ok: boolean }>;
   retryFailedOutbox?: () => Promise<{ requeued: number }>;
   getSettings?: () => Promise<Record<string, unknown>>;
   setSettings?: (input: { settings: Record<string, unknown> }) => Promise<Record<string, unknown>>;

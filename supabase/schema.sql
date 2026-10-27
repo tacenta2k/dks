@@ -723,6 +723,52 @@ $$;
 comment on function public.office_session_is_approved()
   is 'Admin always true; Office true only when this signed session has an approved, live grant.';
 
+-- Keep the Office SELECT predicate and the visibility-only RPC in lockstep.
+-- Future Office visibility restrictions belong in this one stable helper.
+create or replace function public.office_entry_is_visible(p_entry public.entries)
+returns boolean
+language sql
+stable
+set search_path = public
+as $$
+  select (p_entry).deleted is false;
+$$;
+
+-- Exposes only visibility, never row data. Pending/revoked Office sessions
+-- cannot use this RPC to distinguish a hidden record from a missing one.
+create or replace function public.entry_visibility(p_id uuid)
+returns text
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare
+  v_visibility text;
+begin
+  if auth.uid() is null or not (
+    public.is_admin()
+    or (public.is_office() and public.office_session_is_approved())
+  ) then
+    raise exception 'An approved session is required' using errcode = '42501';
+  end if;
+
+  select case
+    when public.is_admin() or public.office_entry_is_visible(e) then 'visible'
+    else 'hidden'
+  end into v_visibility
+  from public.entries e
+  where e.id = p_id;
+
+  return coalesce(v_visibility, 'missing');
+end;
+$$;
+
+revoke all on function public.office_entry_is_visible(public.entries) from anon, public;
+revoke all on function public.entry_visibility(uuid) from anon, public;
+grant execute on function public.office_entry_is_visible(public.entries) to authenticated;
+grant execute on function public.entry_visibility(uuid) to authenticated;
+
 -- Office: open (or re-open) the pending request for THIS signed session.
 create or replace function public.request_office_signin()
 returns public.office_signin_requests
@@ -1217,6 +1263,7 @@ grant execute on function public.request_office_signin() to authenticated;
 grant execute on function public.my_office_signin() to authenticated;
 grant execute on function public.decide_office_signin(uuid, text) to authenticated;
 grant execute on function public.revoke_office_signin(uuid) to authenticated;
+revoke all on function public.sign_out_all_office_sessions() from anon, public;
 grant execute on function public.sign_out_all_office_sessions() to authenticated;
 
 -- Profiles are readable by the signed-in user, while only administrators may
@@ -1242,12 +1289,20 @@ create policy profiles_admin_delete
 on public.profiles for delete to authenticated
 using (public.is_admin());
 
--- A user may see ONLY its own sign-in requests; Admin sees everything.
--- All writes flow through the SECURITY DEFINER RPCs above.
+-- Office's account is shared: only this JWT's own request is visible,
+-- including while pending/revoked, so Realtime can deliver its decisions.
+-- Admin sees all requests. Writes remain SECURITY DEFINER RPCs only.
 drop policy if exists office_signin_requests_select_own_or_admin on public.office_signin_requests;
 create policy office_signin_requests_select_own_or_admin
 on public.office_signin_requests for select to authenticated
-using (user_id = auth.uid() or public.is_admin());
+using (
+  public.is_admin()
+  or (
+    public.is_office()
+    and user_id = auth.uid()
+    and auth_session_id = nullif(auth.jwt() ->> 'session_id', '')::uuid
+  )
+);
 
 -- Both roles may work with active column definitions.  Direct DELETE is an
 -- administrator operation; office deletion goes through the empty-column RPC
@@ -1292,7 +1347,10 @@ using (public.is_admin());
 drop policy if exists entries_select_authenticated on public.entries;
 create policy entries_select_authenticated
 on public.entries for select to authenticated
-using (public.is_admin() or (not deleted and public.is_office() and public.office_session_is_approved()));
+using (
+  public.is_admin()
+  or (public.is_office() and public.office_session_is_approved() and public.office_entry_is_visible(entries))
+);
 
 drop policy if exists entries_insert_authenticated on public.entries;
 create policy entries_insert_authenticated
@@ -1585,6 +1643,14 @@ begin
          and tablename = 'admin_notifications'
     ) then
       execute 'alter publication supabase_realtime add table public.admin_notifications';
+    end if;
+    if not exists (
+      select 1 from pg_publication_tables
+       where pubname = 'supabase_realtime'
+         and schemaname = 'public'
+         and tablename = 'office_signin_requests'
+    ) then
+      execute 'alter publication supabase_realtime add table public.office_signin_requests';
     end if;
   end if;
 end;

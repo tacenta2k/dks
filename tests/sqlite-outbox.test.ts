@@ -30,6 +30,32 @@ describe('protected local SQLite cache and outbox', () => {
     store.close();
   });
 
+  it('keeps terminal changes and concurrent edits out of automatic acknowledgement and retries', () => {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
+    try {
+      store.createEntry({ id: 'entry-1', data: { name: 'Kept locally' } });
+      const [create] = store.listOutbox('all');
+      store.markOutboxSynced(create.id);
+      store.updateEntry('entry-1', { data: { name: 'Unsynchronised edit' } });
+      const update = store.listOutbox('pending')[0];
+      store.markOutboxTerminal(update.id, 'This record can no longer be changed from the Office account');
+      store.createEntry({ id: 'entry-2', data: { name: 'Concurrent edit' } });
+
+      expect(store.retryFailedOutbox()).toBe(0);
+      expect(store.acknowledgeOutbox().status).toBe('error');
+      expect(store.getPendingOutboxCount()).toBe(2);
+      expect(store.listOutbox('all').find((item) => item.id === update.id)).toMatchObject({
+        status: 'terminal', attempts: 1, lastError: expect.stringContaining('Office account'),
+      });
+      expect(store.getEntry('entry-1')?.data.name).toBe('Unsynchronised edit');
+      expect(store.listOutbox('pending')).toHaveLength(1);
+      store.markOutboxSynced(update.id);
+      expect(store.listOutbox('all').find((item) => item.id === update.id)?.status).toBe('terminal');
+    } finally {
+      store.close();
+    }
+  });
+
   it('updates sync metadata and resolves conflicts by updated_at', () => {
     const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-01T00:00:00.000Z' });
     store.setSyncStatus({ status: 'syncing', lastError: null });

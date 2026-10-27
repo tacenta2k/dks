@@ -144,7 +144,7 @@ export interface ColumnInput extends LocalColumnDefinition {
   idempotency_key?: string;
 }
 
-export type OutboxStatus = 'pending' | 'processing' | 'synced' | 'failed';
+export type OutboxStatus = 'pending' | 'processing' | 'synced' | 'failed' | 'terminal';
 
 export interface OutboxItem extends SyncOutboxItem {
   id: number;
@@ -1395,7 +1395,7 @@ export class SqliteStore {
 
   public markOutboxSynced(id: number | string): void {
     this.ensureOpen();
-    this.database.prepare('UPDATE outbox SET status = \'synced\', last_error = NULL WHERE id = ?').run(id);
+    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE id = ? AND status <> 'terminal'").run(id);
   }
 
   public markOutboxFailed(id: number | string, message: string): void {
@@ -1408,11 +1408,25 @@ export class SqliteStore {
     ).run(message, id);
   }
 
-  /** Mark the local mutation queue complete after a full remote reconciliation. */
+  /** A server-confirmed inaccessible entry is retained but never auto-retried. */
+  public markOutboxTerminal(id: number | string, message: string): void {
+    this.ensureOpen();
+    this.database.prepare(
+      "UPDATE outbox SET status = 'terminal', last_error = ?, attempts = attempts + 1 WHERE id = ? AND status <> 'synced'",
+    ).run(message, id);
+  }
+
+  /**
+   * Complete a reconciliation without blanket-acknowledging the queue. The
+   * sync engine has already acknowledged each captured item individually;
+   * a concurrent edit or terminal item must never be silently cleared here.
+   */
   public acknowledgeOutbox(): SyncState {
     this.ensureOpen();
-    this.database.prepare("UPDATE outbox SET status = 'synced', last_error = NULL WHERE status <> 'synced' AND entity_type IN ('entry', 'column')").run();
-    return this.setSyncStatus({ status: 'healthy', lastSyncAt: this.now(), lastError: null });
+    const remaining = this.getPendingOutboxCount();
+    return this.setSyncStatus(remaining > 0
+      ? { status: 'error', lastError: 'Some changes have not synchronised yet.' }
+      : { status: 'healthy', lastSyncAt: this.now(), lastError: null });
   }
 
   public acknowledgeSettings(): SyncState {
@@ -1438,7 +1452,7 @@ export class SqliteStore {
 
   public getPendingOutboxCount(): number {
     this.ensureOpen();
-    const row = this.database.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('pending', 'processing', 'failed')").get() as { count?: number } | undefined;
+    const row = this.database.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('pending', 'processing', 'failed', 'terminal')").get() as { count?: number } | undefined;
     return Number(row?.count ?? 0);
   }
 
