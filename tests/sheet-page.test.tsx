@@ -123,6 +123,16 @@ describe('sheet page', () => {
     expect(defs.filter((column) => column.colId === '__actions')).toHaveLength(1);
   });
 
+  // Timeout note (Windows CI): this is the only test in this file that drives
+  // the full integration path — App (session restore) → Shell → Sheet (add a
+  // column) → Dashboard → back to the Sheet — instead of rendering a single
+  // component with an injected repository. There is no artificial wait to
+  // trim: the cost is real React/jsdom/Recharts render work (~6s on a fast
+  // Linux runner), which is markedly slower on the Windows GitHub Actions
+  // runner. An explicit per-test timeout takes precedence over vitest's
+  // `--testTimeout` (the Release DKS workflow passes 60000), so this ceiling
+  // is raised to match that intent; at the old 10000 the release run aborted
+  // while the assertions themselves were still healthy.
   it('retains the default local sheet repository while navigating the workspace', async () => {
     // Real authenticated flow (restored session) — the offline-demo
     // startInWorkspace entry only exists when Supabase is unconfigured.
@@ -143,7 +153,8 @@ describe('sheet page', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Visa Sheet' }));
 
     expect(await screen.findByText('Days Left')).toBeInTheDocument();
-  }, 10_000);
+  }, 60_000);
+
   describe('input focus is not stolen by background refreshes (focus-delay regression)', () => {
     it('lets you type immediately in the Add Column dialog, and survives a background refresh', async () => {
       const repository = createInMemorySheetRepository();
