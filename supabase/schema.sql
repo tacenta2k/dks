@@ -723,15 +723,97 @@ $$;
 comment on function public.office_session_is_approved()
   is 'Admin always true; Office true only when this signed session has an approved, live grant.';
 
--- Keep the Office SELECT predicate and the visibility-only RPC in lockstep.
--- Future Office visibility restrictions belong in this one stable helper.
+-- PostgreSQL applies the SELECT policy to a new row when UPDATE reads an id
+-- in its WHERE clause, even with no RETURNING. While an approved Office user
+-- soft-deletes a live row, expose only that already-readable row to the UPDATE
+-- check, and only until its AFTER trigger runs. This private, transaction- and
+-- backend-scoped marker cannot be created/read by API roles; it rolls back
+-- with a failed statement. Ordinary SELECTs and the visibility RPC still hide
+-- all deleted rows. Do not replace this with a client-settable GUC or header.
+create schema if not exists dks_private;
+revoke all on schema dks_private from public, anon, authenticated;
+create table if not exists dks_private.office_entry_soft_delete_context (
+  backend_pid integer not null,
+  transaction_id bigint not null,
+  entry_id uuid not null,
+  primary key (backend_pid, transaction_id, entry_id)
+);
+alter table dks_private.office_entry_soft_delete_context enable row level security;
+revoke all on dks_private.office_entry_soft_delete_context from public, anon, authenticated;
+
+create or replace function dks_private.entry_is_being_soft_deleted(p_id uuid)
+returns boolean
+language sql
+volatile
+security definer
+set search_path = pg_catalog, public
+as $$
+  select exists (
+    select 1 from dks_private.office_entry_soft_delete_context c
+     where c.backend_pid = pg_backend_pid()
+       and c.transaction_id = txid_current_if_assigned()
+       and c.entry_id = p_id
+  );
+$$;
+revoke all on function dks_private.entry_is_being_soft_deleted(uuid) from public, anon, authenticated;
+
+create or replace function dks_private.begin_office_entry_soft_delete()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+  if public.is_office() and public.office_session_is_approved() then
+    insert into dks_private.office_entry_soft_delete_context (backend_pid, transaction_id, entry_id)
+    values (pg_backend_pid(), txid_current(), new.id)
+    on conflict do nothing;
+  end if;
+  return new;
+end;
+$$;
+
+create or replace function dks_private.end_office_entry_soft_delete()
+returns trigger
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+begin
+  delete from dks_private.office_entry_soft_delete_context c
+   where c.backend_pid = pg_backend_pid()
+     and c.transaction_id = txid_current_if_assigned()
+     and c.entry_id = new.id;
+  return new;
+end;
+$$;
+revoke all on function dks_private.begin_office_entry_soft_delete() from public, anon, authenticated;
+revoke all on function dks_private.end_office_entry_soft_delete() from public, anon, authenticated;
+
+drop trigger if exists entries_office_soft_delete_begin on public.entries;
+create trigger entries_office_soft_delete_begin
+before update of deleted on public.entries
+for each row when (old.deleted is false and new.deleted is true)
+execute function dks_private.begin_office_entry_soft_delete();
+
+drop trigger if exists entries_office_soft_delete_end on public.entries;
+create trigger entries_office_soft_delete_end
+after update of deleted on public.entries
+for each row when (old.deleted is false and new.deleted is true)
+execute function dks_private.end_office_entry_soft_delete();
+
+-- This is the ONE Office visibility predicate shared by RLS and the RPC. The
+-- private marker is an execution-only allowance, not a persisted visibility
+-- change; ordinary SELECT and RPC calls see deleted records as hidden.
 create or replace function public.office_entry_is_visible(p_entry public.entries)
 returns boolean
 language sql
 stable
-set search_path = public
+security definer
+set search_path = pg_catalog, public
 as $$
-  select (p_entry).deleted is false;
+  select (p_entry).deleted is false
+      or dks_private.entry_is_being_soft_deleted((p_entry).id);
 $$;
 
 -- Exposes only visibility, never row data. Pending/revoked Office sessions

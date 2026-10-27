@@ -5,11 +5,13 @@ import { afterEach } from 'vitest';
 // runs in. Components that adapt to width (the Visa Sheet toolbar collapses its
 // last quick filters below 1080px) should be tested at the real desktop size
 // unless a test deliberately overrides `window.innerWidth`.
-Object.defineProperty(window, 'innerWidth', {
-  configurable: true,
-  writable: true,
-  value: 1440,
-});
+if (typeof window !== 'undefined') {
+  Object.defineProperty(window, 'innerWidth', {
+    configurable: true,
+    writable: true,
+    value: 1440,
+  });
+}
 
 afterEach(() => {
   cleanup();

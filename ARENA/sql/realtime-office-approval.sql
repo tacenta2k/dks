@@ -10,6 +10,7 @@
 select to_regclass('public.office_signin_requests') is not null as requests_exist,
        to_regprocedure('public.is_admin()') is not null as admin_helper_exists,
        to_regprocedure('public.is_office()') is not null as office_helper_exists,
+       to_regprocedure('public.sign_out_all_office_sessions()') is not null as bulk_signout_exists,
        exists (select 1 from pg_publication where pubname = 'supabase_realtime') as realtime_publication_exists;
 select schemaname, tablename, rowsecurity
   from pg_tables where schemaname = 'public' and tablename = 'office_signin_requests';
@@ -21,6 +22,11 @@ select pubname, schemaname, tablename from pg_publication_tables
 
 -- 1. INSTALL ---------------------------------------------------------------
 begin;
+
+-- Keep bulk sign-out administrator-only through its internal check; do not
+-- expose this SECURITY DEFINER RPC to unauthenticated roles.
+revoke all on function public.sign_out_all_office_sessions() from anon, public;
+grant execute on function public.sign_out_all_office_sessions() to authenticated;
 
 -- Office is a shared account: user_id alone would expose other devices'
 -- request rows. Keep the current session's row readable even after revocation
@@ -64,3 +70,7 @@ select pubname, schemaname, tablename from pg_publication_tables
    and tablename = 'office_signin_requests';
 -- Expect one publication row, RLS true, and the signed-session predicate.
 -- Verify delivery and the cross-session restriction using real sessions later.
+
+select has_function_privilege('authenticated', 'public.sign_out_all_office_sessions()', 'execute') as authenticated_can_call_bulk_signout,
+       has_function_privilege('anon', 'public.sign_out_all_office_sessions()', 'execute') as anon_can_call_bulk_signout;
+-- Expected: true, false; the function itself permits administrators only.

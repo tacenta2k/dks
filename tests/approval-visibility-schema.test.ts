@@ -16,6 +16,15 @@ describe('visibility and approval SQL contract', () => {
     expect(sql).toContain('grant execute on function public.entry_visibility(uuid) to authenticated');
   });
 
+  it.each([schema, visibilityMigration])('scopes the soft-delete RLS exception to a private, unforgeable transaction marker', (sql) => {
+    expect(sql).toContain('revoke all on schema dks_private from public, anon, authenticated');
+    expect(sql).toContain('revoke all on dks_private.office_entry_soft_delete_context from public, anon, authenticated');
+    expect(sql).toMatch(/backend_pid = pg_backend_pid\(\)[\s\S]*?transaction_id = txid_current_if_assigned\(\)[\s\S]*?entry_id = p_id/);
+    expect(sql).toMatch(/before update of deleted on public\.entries[\s\S]*?old\.deleted is false and new\.deleted is true/);
+    expect(sql).toMatch(/after update of deleted on public\.entries[\s\S]*?old\.deleted is false and new\.deleted is true/);
+    expect(sql).toContain('dks_private.entry_is_being_soft_deleted((p_entry).id)');
+  });
+
   it.each([schema, realtimeMigration])('publishes requests idempotently and limits Office reads to the signed session', (sql) => {
     expect(sql).toMatch(/create policy office_signin_requests_select_own_or_admin[\s\S]*?user_id = auth\.uid\(\)[\s\S]*?auth_session_id = nullif\(auth\.jwt\(\) ->> 'session_id', ''\)::uuid/);
     expect(sql).toMatch(/pg_publication_tables[\s\S]*?tablename = 'office_signin_requests'[\s\S]*?alter publication supabase_realtime add table public\.office_signin_requests/);
@@ -32,7 +41,9 @@ describe('visibility and approval SQL contract', () => {
   });
 
   it('explicitly revokes the bulk-signout RPC from unauthenticated roles', () => {
-    expect(schema).toContain('revoke all on function public.sign_out_all_office_sessions() from anon, public;');
-    expect(schema).toContain('grant execute on function public.sign_out_all_office_sessions() to authenticated;');
+    for (const sql of [schema, realtimeMigration]) {
+      expect(sql).toContain('revoke all on function public.sign_out_all_office_sessions() from anon, public;');
+      expect(sql).toContain('grant execute on function public.sign_out_all_office_sessions() to authenticated;');
+    }
   });
 });
