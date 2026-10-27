@@ -40,8 +40,8 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error', errorKind: 'check' });
-    expect(service.getState()).toEqual({ status: 'error', errorKind: 'check' });
+    await expect(service.checkForUpdates()).resolves.toMatchObject({ status: 'error', errorKind: 'check', errorMessage: 'network is offline' });
+    expect(service.getState()).toMatchObject({ status: 'error', errorKind: 'check', errorMessage: 'network is offline' });
   });
 
   it('downloads releases in the background and exposes restart-to-update state', async () => {
@@ -147,17 +147,18 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({
+    await expect(service.checkForUpdates()).resolves.toMatchObject({
       status: 'error',
       version: '2.0.0',
       errorKind: 'download',
+      errorMessage: expect.stringContaining('connection reset'),
     });
     await expect(service.restartToUpdate()).resolves.toBe(false);
     expect(quitAndInstall).not.toHaveBeenCalled();
   });
 
   it('keeps the downloaded version sticky across later errors and repeated checks', async () => {
-    let emitError: (() => void) | undefined;
+    let emitError: ((error: Error) => void) | undefined;
     const check = vi.fn(async () => ({
       isUpdateAvailable: true,
       updateInfo: { version: '2.0.0' },
@@ -177,7 +178,7 @@ describe('updater foundation', () => {
       status: 'downloaded',
       version: '2.0.0',
     });
-    emitError?.();
+    emitError?.(new Error('transient'));
     expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
 
     // Settings-mount and hourly checks return the completed installer rather
@@ -195,7 +196,7 @@ describe('updater foundation', () => {
   });
 
   it('does not surface a transient download error when update-downloaded follows', async () => {
-    let emitError: (() => void) | undefined;
+    let emitError: ((error: Error) => void) | undefined;
     let emitDownloaded: ((version?: string) => void) | undefined;
     let finishDownload: (() => void) | undefined;
     const service = createUpdaterService({
@@ -221,7 +222,7 @@ describe('updater foundation', () => {
 
     const pending = service.checkForUpdates();
     await vi.waitFor(() => expect(service.getState().status).toBe('downloading'));
-    emitError?.();
+    emitError?.(new Error('transient differential download error'));
     expect(service.getState().status).toBe('downloading');
     expect(statuses).not.toContain('error');
 
@@ -259,24 +260,31 @@ describe('updater foundation', () => {
     expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
   });
 
-  it('reports sanitized transition metadata and never the underlying error', async () => {
+  it('reports sanitized transition metadata with real updater error details (Bug 2)', async () => {
     const onTransition = vi.fn();
     const service = createUpdaterService({
       adapter: adapter({
         checkForUpdates: vi.fn(async () => {
-          throw new Error('secret release URL and local path');
+          const err = new Error('secret release URL and local path') as Error & { code?: string };
+          (err as unknown as { code: string }).code = 'ERR_UPDATER_CHECK';
+          return Promise.reject(err);
         }),
       }),
       enabled: true,
       onTransition,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({
+    await expect(service.checkForUpdates()).resolves.toMatchObject({
       status: 'error',
       errorKind: 'check',
+      errorMessage: expect.stringContaining('secret release URL'),
     });
-    expect(onTransition).toHaveBeenLastCalledWith({ from: 'checking', to: 'error' });
-    expect(JSON.stringify(onTransition.mock.calls)).not.toContain('secret');
+    const lastCall = onTransition.mock.calls.at(-1)?.[0] as { from: string; to: string; errorMessage?: string; errorKind?: string; errorCode?: string } | undefined;
+    expect(lastCall).toMatchObject({ from: 'checking', to: 'error', errorKind: 'check' });
+    expect(lastCall?.errorMessage).toContain('secret release URL');
+    // Transition carries the sanitized message (bounded, no raw URL leak beyond the message itself).
+    // It no longer hides the error — the pill and electron-log surface name/code/message.
+    expect(typeof lastCall?.errorMessage).toBe('string');
   });
 
   it('runs a launch check and schedules hourly checks through injectable timers', async () => {

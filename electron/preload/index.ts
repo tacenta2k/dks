@@ -722,6 +722,9 @@ function normaliseUpdateState(value: unknown): UpdateState {
     version?: unknown;
     progress?: unknown;
     errorKind?: unknown;
+    errorMessage?: unknown;
+    errorCode?: unknown;
+    errorName?: unknown;
   };
   const statuses: UpdateState['status'][] = [
     'idle',
@@ -747,6 +750,15 @@ function normaliseUpdateState(value: unknown): UpdateState {
   }
   if (state.status === 'error' && (record.errorKind === 'check' || record.errorKind === 'download')) {
     state.errorKind = record.errorKind;
+  }
+  if (typeof record.errorMessage === 'string' && record.errorMessage.trim()) {
+    state.errorMessage = record.errorMessage.trim().slice(0, 500);
+  }
+  if (typeof record.errorCode === 'string' && record.errorCode.trim()) {
+    state.errorCode = record.errorCode.trim().slice(0, 100);
+  }
+  if (typeof record.errorName === 'string' && record.errorName.trim()) {
+    state.errorName = record.errorName.trim().slice(0, 100);
   }
   return state;
 }

@@ -48,8 +48,11 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  # Keep userData (including dks-cache.sqlite); build/installer.nsh removes
-  # only Chromium Local/Session Storage on a real uninstall, never on update.
+  # Keep userData (including dks-cache.sqlite + outbox); build/installer.nsh
+  # removes the four Chromium session storages (Local Storage, Session Storage,
+  # IndexedDB, Cookies) on a real uninstall, never on update. The SQLite file
+  # is never touched. See build/installer.nsh + electron/main/install-nonce.ts
+  # for the two-layer fresh-install guard.
   deleteAppDataOnUninstall: false
   include: build/installer.nsh
   createDesktopShortcut: true

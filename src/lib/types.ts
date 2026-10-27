@@ -276,6 +276,10 @@ export interface DksUpdateState {
   progress?: number;
   /** Distinguishes a failed release check from a failed installer download. */
   errorKind?: DksUpdateErrorKind;
+  /** Real updater error detail — surfaces error.name/code/message from electron-updater (Bug 2). */
+  errorMessage?: string;
+  errorCode?: string;
+  errorName?: string;
 }
 
 export interface DksUpdaterApi {

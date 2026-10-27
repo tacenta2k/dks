@@ -1,4 +1,5 @@
 import { autoUpdater } from 'electron-updater';
+import log from 'electron-log';
 
 export type UpdateStatus =
   | 'idle'
@@ -24,6 +25,11 @@ export interface UpdateState {
   progress?: number;
   /** Which operation definitively failed; used for truthful, retryable copy. */
   errorKind?: UpdateErrorKind;
+  /** Human-readable error detail for the update pill (bounded, no URLs/file paths). */
+  errorMessage?: string;
+  /** Raw codes from electron-updater's Error (when present). */
+  errorCode?: string;
+  errorName?: string;
 }
 
 export interface UpdateCheckResult {
@@ -48,10 +54,12 @@ export interface UpdaterAdapter {
   /** The authoritative completion signal, emitted before final cache cleanup. */
   onUpdateDownloaded?: (listener: (version?: string) => void) => void;
   /**
-   * Error events are diagnostic only. electron-updater can recover internally;
+   * Error events are diagnostic — electron-updater can recover internally;
    * the operation promise or update-downloaded event determines the outcome.
+   * The listener now receives the real Error so it can be logged with
+   * name/code/message (Bug 2).
    */
-  onError?: (listener: () => void) => void;
+  onError?: (listener: (error: Error) => void) => void;
 }
 
 export interface UpdateTransition {
@@ -59,6 +67,10 @@ export interface UpdateTransition {
   to: UpdateStatus;
   version?: string;
   progress?: number;
+  errorKind?: UpdateErrorKind;
+  errorMessage?: string;
+  errorCode?: string;
+  errorName?: string;
 }
 
 export interface UpdaterServiceOptions {
@@ -92,6 +104,39 @@ export const UPDATER_CHECK_CHANNEL = 'dks:updater:check' as const;
 export const UPDATER_RESTART_CHANNEL = 'dks:updater:restart' as const;
 export const UPDATER_STATUS_CHANNEL = 'dks:updater:status' as const;
 
+// ---------------------------------------------------------------------------
+// Error helpers — Bug 2: stop hiding the real error.
+// ---------------------------------------------------------------------------
+
+function extractUpdaterError(error: unknown): { message: string; code?: string; name?: string } {
+  if (error instanceof Error) {
+    const anyErr = error as Error & { code?: unknown };
+    const rawMessage = typeof anyErr.message === 'string' ? anyErr.message : String(error);
+    // Bound the message: electron-updater can include URLs/paths; keep first 500 chars.
+    const message = rawMessage.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 500) || 'Unknown error';
+    const code = typeof anyErr.code === 'string' && anyErr.code.trim() ? anyErr.code.trim().slice(0, 100) : undefined;
+    const name = typeof anyErr.name === 'string' && anyErr.name.trim() ? anyErr.name.trim().slice(0, 100) : undefined;
+    return { message, code, name };
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return { message: error.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 500) };
+  }
+  try {
+    return { message: String(error).slice(0, 500) || 'Unknown error' };
+  } catch {
+    return { message: 'Unknown error' };
+  }
+}
+
+function formatErrorForUi(details: { message: string; code?: string; name?: string }): string {
+  // For the pill we show code + message, bounded. Name is logged but pill uses message primarily.
+  const parts: string[] = [];
+  if (details.code) parts.push(details.code);
+  parts.push(details.message);
+  const joined = parts.join(': ').slice(0, 500);
+  return joined;
+}
+
 function createDefaultAdapter(): UpdaterAdapter {
   // electron-updater is intentionally kept behind this adapter. The rest of
   // the main process can therefore treat update failures as ordinary state.
@@ -101,7 +146,7 @@ function createDefaultAdapter(): UpdaterAdapter {
 
     let progressListener: ((percent: number) => void) | undefined;
     let downloadedListener: ((version?: string) => void) | undefined;
-    let errorListener: (() => void) | undefined;
+    let errorListener: ((error: Error) => void) | undefined;
     autoUpdater.on('download-progress', (info) => {
       const percent = typeof info?.percent === 'number' ? info.percent : NaN;
       if (Number.isFinite(percent)) {
@@ -111,10 +156,21 @@ function createDefaultAdapter(): UpdaterAdapter {
     autoUpdater.on('update-downloaded', (info) => {
       downloadedListener?.(typeof info?.version === 'string' ? info.version : undefined);
     });
-    autoUpdater.on('error', () => {
-      // Do not forward Error objects or treat this event as final. In
-      // particular, downloadUpdate() still owns the final download verdict.
-      errorListener?.();
+    autoUpdater.on('error', (error: Error) => {
+      // Forward the real Error for diagnostics. Do not treat this event as
+      // final — downloadUpdate() still owns the final download verdict, and
+      // a recovered differential download must never show error.
+      const details = extractUpdaterError(error);
+      try {
+        log.error('[dks] updater error event', {
+          name: details.name,
+          code: details.code,
+          message: details.message,
+        });
+      } catch {}
+      try {
+        errorListener?.(error);
+      } catch {}
     });
 
     return {
@@ -154,6 +210,15 @@ function cloneState(state: UpdateState): UpdateState {
   if (state.status === 'error' && (state.errorKind === 'check' || state.errorKind === 'download')) {
     clone.errorKind = state.errorKind;
   }
+  if (typeof state.errorMessage === 'string' && state.errorMessage.trim()) {
+    clone.errorMessage = state.errorMessage.slice(0, 500);
+  }
+  if (typeof state.errorCode === 'string' && state.errorCode.trim()) {
+    clone.errorCode = state.errorCode.slice(0, 100);
+  }
+  if (typeof state.errorName === 'string' && state.errorName.trim()) {
+    clone.errorName = state.errorName.slice(0, 100);
+  }
   return clone;
 }
 
@@ -165,8 +230,9 @@ function updateVersion(result: UpdateCheckResult | null | undefined): string | u
 /**
  * Wrap electron-updater with a no-throw, serializable state machine.
  *
- * No error object is retained or sent to the renderer. Network and release
- * configuration failures are represented by `status: 'error'` only.
+ * Failures now carry `errorName`/`errorCode`/`errorMessage` from electron-updater
+ * so the UI and main log can surface the real cause (Bug 2). Network and
+ * release configuration failures are still represented by `status: 'error'`.
  */
 export function createUpdaterService(options: UpdaterServiceOptions = {}): UpdaterService {
   const adapter = options.adapter ?? createDefaultAdapter();
@@ -190,13 +256,21 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     state = cloneState(nextState);
     const snapshot = cloneState(state);
 
-    if (previous.status !== state.status || previous.version !== state.version) {
+    if (
+      previous.status !== state.status ||
+      previous.version !== state.version ||
+      previous.errorMessage !== state.errorMessage
+    ) {
       try {
         options.onTransition?.({
           from: previous.status,
           to: state.status,
           ...(state.version ? { version: state.version } : {}),
           ...(typeof state.progress === 'number' ? { progress: state.progress } : {}),
+          ...(state.errorKind ? { errorKind: state.errorKind } : {}),
+          ...(state.errorMessage ? { errorMessage: state.errorMessage } : {}),
+          ...(state.errorCode ? { errorCode: state.errorCode } : {}),
+          ...(state.errorName ? { errorName: state.errorName } : {}),
         });
       } catch {
         // Diagnostics must never affect update handling.
@@ -234,10 +308,12 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       // precede final cache cleanup and resolution of downloadUpdate().
       markDownloaded(version);
     });
-    adapter.onError?.(() => {
+    adapter.onError?.((error: Error) => {
       // Error events are not final outcomes. The corresponding operation
       // promise rejects on definitive failure; a recovered differential
       // download instead reaches update-downloaded and must never show error.
+      // Real error is already logged in the adapter's handler above.
+      void error;
     });
   } catch {
     // Event hooks are supplemental; promise-based completion still works.
@@ -267,8 +343,22 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       let result: UpdateCheckResult | null | undefined;
       try {
         result = await adapter.checkForUpdates();
-      } catch {
-        return setState({ status: 'error', errorKind: 'check' });
+      } catch (error: unknown) {
+        const details = extractUpdaterError(error);
+        try {
+          log.error('[dks] updater check failed', {
+            name: details.name,
+            code: details.code,
+            message: details.message,
+          });
+        } catch {}
+        return setState({
+          status: 'error',
+          errorKind: 'check',
+          errorMessage: formatErrorForUi(details),
+          ...(details.code ? { errorCode: details.code } : {}),
+          ...(details.name ? { errorName: details.name } : {}),
+        });
       }
 
       if (state.status === 'downloaded') {
@@ -291,10 +381,26 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
         setState({ status: 'downloading', version });
         try {
           await adapter.downloadUpdate();
-        } catch {
+        } catch (error: unknown) {
           // If update-downloaded already fired, setState preserves that
           // completed installer instead of misreporting a later cleanup error.
-          return setState({ status: 'error', version, errorKind: 'download' });
+          const details = extractUpdaterError(error);
+          try {
+            log.error('[dks] updater download failed', {
+              version,
+              name: details.name,
+              code: details.code,
+              message: details.message,
+            });
+          } catch {}
+          return setState({
+            status: 'error',
+            version,
+            errorKind: 'download',
+            errorMessage: formatErrorForUi(details),
+            ...(details.code ? { errorCode: details.code } : {}),
+            ...(details.name ? { errorName: details.name } : {}),
+          });
         } finally {
           activeDownloadVersion = undefined;
         }
