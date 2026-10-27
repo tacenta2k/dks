@@ -25,8 +25,8 @@ Chromium session (Supabase JWT) lives under `%APPDATA%\DKS`:
 
 **1. Installer `build/installer.nsh` — second layer (NSIS)**
 
-- `SetShellVarContext current` at top of each macro to resolve the *real* user’s `%APPDATA%` even if the uninstaller is elevated.
-- `customInstall`: when `${isUpdated}` is false (fresh install, not auto-update) create a new GUID (`ole32::CoCreateGuid` → `$APPDATA\DKS\install-nonce`), `CreateDirectory` first, `DetailPrint`. Preserved on update.
+- `SetShellVarContext current` at top of each macro to resolve the *real* user’s `%APPDATA%` even if the uninstaller is elevated (UAC limitation: `SetShellVarContext current` does not resolve the original user under 'Run as different user' elevation — that mode is unsupported; installer uses `perMachine: false` / `RequestExecutionLevel user`).
+- `customInstall`: via file-existence check (`${FileExists} "$APPDATA\DKS\install-nonce"`): if present preserve (covers both auto-update `${isUpdated}` and manual in-place upgrade where `${isUpdated}` is false), else mint a new GUID (`ole32::CoCreateGuid` → `$APPDATA\DKS\install-nonce`), `CreateDirectory` first, `DetailPrint`. Legacy pre-nonce upgrade (no file) mints then preserves login via app-level storedNonce null.
 - `customUnInstall`: when `${isUpdated}` false, first `nsProcess::FindProcess "DKS.exe"` → if `0` (found), `MessageBox` + `Abort` (tray `Exit` required). Then delete *only* session locations:
   ```
   RMDir /r "$APPDATA\DKS\Local Storage"
@@ -38,7 +38,7 @@ Chromium session (Supabase JWT) lives under `%APPDATA%\DKS`:
   Delete "$APPDATA\DKS\Network\Cookies"
   Delete "$APPDATA\DKS\Network\Cookies-journal"
   ```
-  Never `RMDir "$APPDATA\DKS"` nor `Delete *.sqlite`; `dks-cache.sqlite`, `install-nonce`, `logs/` remain. Tests assert `SetShellVarContext current`, `Network\Cookies`, `install-nonce`, `CoCreateGuid`, `nsProcess::FindProcess`.
+  Never `RMDir "$APPDATA\DKS"` nor `Delete *.sqlite`; `dks-cache.sqlite` and `logs/` remain (`install-nonce` is intentionally deleted on genuine uninstall so the next fresh install can trigger app-level clear; it is preserved on update). Tests assert `SetShellVarContext current`, `Network\Cookies`, `install-nonce`, `CoCreateGuid`, `nsProcess::FindProcess`.
 
 **2. App `electron/main/install-nonce.ts` + `index.ts` + `sqlite.ts` — first layer**
 
@@ -54,19 +54,18 @@ Chromium session (Supabase JWT) lives under `%APPDATA%\DKS`:
 
 - `index.ts` `startMainProcess()`:
   ```ts
-  openLocalStore();
-  await enforceSessionIsolation({ isPackaged: app.isPackaged, userDataPath: app.getPath('userData'), store: localStore, session: session.defaultSession });
-  // Only after await succeeds do we create the window:
-  createMainWindow({ startHidden });
+  const ok = await enforceSessionIsolation({ isPackaged: app.isPackaged, userDataPath: app.getPath('userData'), store: localStore, session: session.defaultSession });
+  if (!ok && app.isPackaged) { dialog.showErrorBox(...); app.quit(); return; } // fail-closed: never silently resume old session
+  createMainWindow({ startHidden }); // only after await succeeds
   ```
-  `log.info` on fresh-install detected, `log.error` on `clearStorageData` failure.
+  `log.info` on fresh-install detected, `log.error` on `clearStorageData` failure; failure blocks window creation.
 
 **Login behavior preserved/broken as required (§2 below):**
 
 - **Quit/relaunch:** nonce matches → no clear → **preserve login** (Admin + Office).
 - **Upgrade from pre-nonce 0.1.3/0.1.4 (no file, no DB key):** file missing → mint → `store.getInstallNonce()==null` → just record → **preserve login**.
-- **0.1.5 → next version in-app update (electron-updater):** `isUpdated` true → NSIS preserves `install-nonce` file → nonces match → **preserve login**.
-- **Manual in-place upgrade without uninstall (run new exe over old):** NSIS detects existing install → `isUpdated` true → preserves file → **preserve login**.
+- **0.1.5 → next version in-app update (electron-updater):** auto-updater launches installer with `--updated` → `isUpdated` true → old uninstaller preserves app data, new `customInstall` sees existing `install-nonce` file → preserves → nonces match → **preserve login**.
+- **Manual in-place upgrade without uninstall (run new exe over old):** new installer `customInstall` checks `FileExists "$APPDATA\DKS\install-nonce"` → file exists → preserves nonce (even though `${isUpdated}` is false) → **preserve login**. This is why file-existence is used instead of `isUpdated` alone.
 - **Genuine uninstall/reinstall:** NSIS deletes 4 locations (or fails if tray running); fresh `customInstall` writes new nonce → mismatch vs DB’s old nonce → `clearStorageData` + Session Storage rm → stores new nonce → **require email/password** for both roles. `dks-cache.sqlite` and outbox rows survive (tests assert).
 - **Office after reinstall:** new `session_id` → requires new approval (expected).
 
@@ -140,10 +139,10 @@ gh release edit $tag --draft=false --latest
 
 ## Files Changed (vs `origin/main` `0.1.4`)
 
-- `build/installer.nsh` — `SetShellVarContext current`, nonce GUID, `nsProcess::FindProcess DKS.exe` guard, 4 locations including `Network\Cookies` + `Cookies-journal` handling, never `dks-cache.sqlite`.
+- `build/installer.nsh` — `SetShellVarContext current`, nonce GUID via file-existence preserve (handles manual upgrade), `nsProcess::FindProcess DKS.exe` guard, 4 locations including `Network\Cookies` + `Cookies-journal` handling, deletes `install-nonce` on genuine uninstall to trigger app-level clear, never `dks-cache.sqlite`.
 - `electron/main/install-nonce.ts` — NEW; documented `['cookies','localstorage','indexdb']` + Session Storage fs, await before renderer, failure does not record nonce.
 - `electron/main/sqlite.ts` — `getInstallNonce`/`setInstallNonce`.
-- `electron/main/index.ts` — `await enforceSessionIsolation` before `createMainWindow`.
+- `electron/main/index.ts` — `await enforceSessionIsolation` before `createMainWindow`; fail-closed: on `clearStorageData` failure blocks window, shows dialog, quits for retry (never silently resume old session).
 - `electron/main/updater.ts` — real `error.name/code/message`, transition logging.
 - `electron/preload/index.ts` — forward new fields.
 - `src/lib/types.ts` — `DksUpdateState` error fields.

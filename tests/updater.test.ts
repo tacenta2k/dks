@@ -350,7 +350,12 @@ describe('release provider configuration', () => {
     // and must not sign the user out.
     expect(installer).toContain('!macro customInstall');
     expect(installer).toContain('!macro customUnInstall');
+    // customUnInstall is gated by isUpdated so auto-update preserves session
     expect(installer).toContain('${ifNot} ${isUpdated}');
+    // customInstall preserves existing nonce via file-existence (handles manual
+    // in-place upgrade where isUpdated is false, unlike auto-update)
+    expect(installer).toContain('FileExists');
+    expect(installer).toContain('$APPDATA\\DKS\\install-nonce');
     // Fresh-install nonce: new GUID on fresh install, preserved on update (Bug 1).
     expect(installer).toContain('install-nonce');
     expect(installer).toContain('CoCreateGuid');
@@ -367,6 +372,8 @@ describe('release provider configuration', () => {
     // Cookies: legacy directory + legacy file + current Network\\Cookies file
     expect(installer).toContain('Cookies');
     expect(installer).toContain('Network');
+    // Genuine uninstall deletes install-nonce so next fresh install triggers app-level clear
+    expect(installer).toMatch(/Delete.*install-nonce/);
     // The SQLite business cache at the userData root is never targeted - it holds
     // customer data + outbox and must survive uninstall/reinstall.
     expect(installer).not.toMatch(/RMDir[^\\n]*\\$APPDATA\\\\DKS"/);

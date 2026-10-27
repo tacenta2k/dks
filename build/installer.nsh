@@ -36,13 +36,24 @@
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
 ; The main process stores the last seen nonce in SQLite (sync_meta.installNonce)
 ; and clears session storages when the file's nonce differs or is missing.
+; customInstall runs for every install (fresh + manual upgrade + auto-update).
+; We must NOT overwrite an existing install-nonce on upgrade, otherwise a
+; manual in-place upgrade (user double-clicks new exe, not launched with
+; --updated) would mint a fresh nonce and trigger a false fresh-install clear.
+; Electron-builder's ${isUpdated} is only true when launched with --updated
+; (auto-updater path), so we use file-existence instead: preserve if present,
+; mint only if missing. This correctly handles:
+;   fresh install (no file) -> mint
+;   manual upgrade (file exists, old GUID) -> preserve
+;   auto-update (file exists, ${isUpdated} true) -> preserve
+;   legacy pre-nonce upgrade (no file, old DB) -> mint (app-level will preserve login via storedNonce null)
 !macro customInstall
-  ${ifNot} ${isUpdated}
+  SetShellVarContext current
+  CreateDirectory "$APPDATA\DKS"
+  ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
+    DetailPrint "DKS: preserving existing install nonce (upgrade)"
+  ${Else}
     DetailPrint "DKS: creating fresh install nonce"
-    SetShellVarContext current
-    CreateDirectory "$APPDATA\DKS"
-    ; Generate a GUID via ole32; fall back to tick count if unavailable.
-    ; The GUID text is written verbatim to $APPDATA\DKS\install-nonce .
     System::Call 'ole32::CoCreateGuid(g .s)'
     Pop $0
     System::Call 'ole32::StringFromGUID2(g s, t .r1, i 40)'
@@ -55,7 +66,7 @@
       FileWrite $0 "$1"
       FileClose $0
     ${EndIf}
-  ${endIf}
+  ${EndIf}
 !macroend
 
 !macro customUnInstall
@@ -74,8 +85,7 @@
     ${EndIf}
 
     ; Delete ONLY the Chromium session locations under the real user's
-    ; %APPDATA%\DKS. Never touch dks-cache.sqlite, install-nonce, logs/,
-    ; or any other file at the userData root.
+    ; %APPDATA%\DKS. Never touch dks-cache.sqlite, logs/, or other user data.
     ; Local Storage, Session Storage, IndexedDB are directories.
     RMDir /r "$APPDATA\DKS\Local Storage"
     RMDir /r "$APPDATA\DKS\Session Storage"
@@ -87,5 +97,10 @@
     ; Current Chromium (Electron 34 / Chromium 130) stores cookies at Network\Cookies.
     Delete "$APPDATA\DKS\Network\Cookies"
     Delete "$APPDATA\DKS\Network\Cookies-journal"
+    ; Remove install-nonce so next fresh install mints a new GUID and the
+    ; app-level guard (install-nonce.ts) detects mismatch vs SQLite's old
+    ; nonce and clears any leftover session. Not deleted on update
+    ; (${isUpdated} true) — there it is preserved.
+    Delete "$APPDATA\DKS\install-nonce"
   ${endIf}
 !macroend
