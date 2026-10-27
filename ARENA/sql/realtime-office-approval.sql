@@ -1,0 +1,100 @@
+-- DKS: immediate Office approval/revocation notifications
+-- Apply manually in the Supabase SQL editor after reviewing preflight. This
+-- idempotent migration publishes only the existing request table; it does not
+-- change any request or Auth session. RLS still governs every change event.
+-- Quota: one approval channel per signed-in client (in addition to DKS's
+-- existing data-sync channel), with a handful of change messages per sign-in.
+-- The client treats every event only as a trigger to re-poll the server.
+
+-- 0. READ-ONLY PREFLIGHT -----------------------------------------------------
+select to_regclass('public.office_signin_requests') is not null as requests_exist,
+       to_regprocedure('public.is_admin()') is not null as admin_helper_exists,
+       to_regprocedure('public.is_office()') is not null as office_helper_exists,
+       to_regprocedure('public.sign_out_all_office_sessions()') is not null as bulk_signout_exists,
+       exists (select 1 from pg_publication where pubname = 'supabase_realtime') as realtime_publication_exists;
+select schemaname, tablename, rowsecurity
+  from pg_tables where schemaname = 'public' and tablename = 'office_signin_requests';
+select policyname, cmd, permissive, roles, qual, with_check
+  from pg_policies where schemaname = 'public' and tablename = 'office_signin_requests';
+select pubname, schemaname, tablename from pg_publication_tables
+ where pubname = 'supabase_realtime' and schemaname = 'public'
+   and tablename = 'office_signin_requests';
+
+-- 1. INSTALL ---------------------------------------------------------------
+begin;
+
+-- A second permissive policy could expose another device's request over
+-- Realtime. Do not silently install over an unknown policy or disabled RLS.
+do $$
+declare
+  v_unexpected text;
+begin
+  if not exists (
+    select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'office_signin_requests' and c.relrowsecurity
+  ) then
+    raise exception 'DKS approval Realtime migration aborted: request RLS is not enabled' using errcode = '42501';
+  end if;
+  select string_agg(format('%s (%s)', policyname, cmd), ', ' order by policyname)
+    into v_unexpected
+    from pg_policies
+   where schemaname = 'public' and tablename = 'office_signin_requests' and permissive = 'PERMISSIVE'
+     and (policyname, cmd) <> ('office_signin_requests_select_own_or_admin', 'SELECT');
+  if v_unexpected is not null then
+    raise exception 'DKS approval Realtime migration aborted: unexpected permissive policies: %', v_unexpected
+      using errcode = '42501', hint = 'Review the read-only preflight and resolve unexpected policies before installing.';
+  end if;
+end;
+$$;
+
+-- Keep bulk sign-out administrator-only through its internal check; do not
+-- expose this SECURITY DEFINER RPC to unauthenticated roles.
+revoke all on function public.sign_out_all_office_sessions() from anon, public;
+grant execute on function public.sign_out_all_office_sessions() to authenticated;
+
+-- Office is a shared account: user_id alone would expose other devices'
+-- request rows. Keep the current session's row readable even after revocation
+-- so the decision event can be delivered. Admin can still read all requests.
+drop policy if exists office_signin_requests_select_own_or_admin on public.office_signin_requests;
+create policy office_signin_requests_select_own_or_admin
+on public.office_signin_requests for select to authenticated
+using (
+  public.is_admin()
+  or (
+    public.is_office()
+    and user_id = auth.uid()
+    and auth_session_id = nullif(auth.jwt() ->> 'session_id', '')::uuid
+  )
+);
+
+do $$
+begin
+  if not exists (select 1 from pg_publication where pubname = 'supabase_realtime') then
+    raise exception 'The supabase_realtime publication is missing; enable Realtime before running this migration';
+  end if;
+  if not exists (
+    select 1 from pg_publication_tables
+     where pubname = 'supabase_realtime' and schemaname = 'public'
+       and tablename = 'office_signin_requests'
+  ) then
+    execute 'alter publication supabase_realtime add table public.office_signin_requests';
+  end if;
+end;
+$$;
+
+commit;
+
+-- 2. READ-ONLY VERIFICATION -------------------------------------------------
+select schemaname, tablename, rowsecurity
+  from pg_tables where schemaname = 'public' and tablename = 'office_signin_requests';
+select policyname, cmd, permissive, roles, qual, with_check
+  from pg_policies where schemaname = 'public' and tablename = 'office_signin_requests';
+select pubname, schemaname, tablename from pg_publication_tables
+ where pubname = 'supabase_realtime' and schemaname = 'public'
+   and tablename = 'office_signin_requests';
+-- Expect one publication row, RLS true, and the signed-session predicate.
+-- Verify delivery and the cross-session restriction using real sessions later.
+
+select has_function_privilege('authenticated', 'public.sign_out_all_office_sessions()', 'execute') as authenticated_can_call_bulk_signout,
+       has_function_privilege('anon', 'public.sign_out_all_office_sessions()', 'execute') as anon_can_call_bulk_signout;
+-- Expected: true, false; the function itself permits administrators only.

@@ -33,7 +33,8 @@ describe('administrator delete notifications', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Notifications (1 unread)' }));
-    expect(screen.getByText(record.body)).toBeInTheDocument();
+    expect(screen.getByText('Office deleted Amina on 01/01/2026 14:30')).toBeInTheDocument();
+    expect(screen.getByText('Amina · 01/01/2026 14:30')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'View' }));
     fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
     fireEvent.click(screen.getByRole('button', { name: 'Dismiss' }));

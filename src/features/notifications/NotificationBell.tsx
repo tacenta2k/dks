@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { formatDisplayDate, formatLocalDateTime } from '../../lib/date';
+import { formatBusinessDateTime, formatDisplayDate } from '../../lib/date';
+import { formatNotificationText } from './notification-display';
 import {
   dedupeNotifications,
   isNotificationSnoozed,
@@ -58,8 +59,8 @@ function expiryLabel(record: ExpiryNotificationRecord): string {
   // body = "<record label> expires in N days." / "<record label> expires today."
   // Strip only that exact generated suffix so a label that itself contains
   // the word "expires" is not truncated. Never fall back to the raw row id.
-  const label = record.body.replace(/\s+expires (?:today|in \d+ days?)\.$/i, '').trim();
-  return label && label !== record.rowId ? label : 'Unnamed record';
+  const label = record.body.replace(/\s+expires (?:today|in \d+ days?|(?:on )?(?:\d{4}-\d{2}-\d{2}|\d{1,2}\/\d{1,2}\/\d{4}))\.?$/i, '').trim();
+  return label && label !== record.rowId ? formatNotificationText(label, record) : 'Unnamed record';
 }
 
 function isSnoozed(record: NotificationRecord): boolean {
@@ -67,7 +68,7 @@ function isSnoozed(record: NotificationRecord): boolean {
 }
 
 function primaryLine(record: NotificationRecord): string {
-  return record.body || record.title;
+  return formatNotificationText(record.body || record.title, record);
 }
 
 function secondaryLine(record: NotificationRecord): string {
@@ -75,7 +76,7 @@ function secondaryLine(record: NotificationRecord): string {
     return `${expiryLabel(record)} · ${formatDisplayDate(record.expiryValue)}`;
   }
   if (record.kind === 'office-delete') {
-    return `${record.rowLabel} · ${formatLocalDateTime(record.createdAt)}`;
+    return `${formatNotificationText(record.rowLabel, record)} · ${formatBusinessDateTime(record.createdAt)}`;
   }
   return formatDisplayDate(record.summaryDate);
 }

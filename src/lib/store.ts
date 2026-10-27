@@ -66,6 +66,8 @@ export interface AppStore {
    */
   submitOfficeApprovalRequest: () => Promise<void>;
   refreshSessionApproval: () => Promise<void>;
+  /** Keep the denied/revoked gate visible while clearing this device's Auth session. */
+  endOfficeSessionAfterDecision: () => Promise<void>;
   /** Admin-only server action: terminate every Office Auth session. */
   signOutAllOfficeSessions: () => Promise<AuthResult<OfficeSessionSignOutSummary>>;
 }
@@ -116,6 +118,9 @@ export function createAppStore(
   approvalService: OfficeApprovalService | null = createOfficeApprovalService(),
 ): StoreApi<AppStore> {
   let authRequestId = 0;
+  let approvalRequestId = 0;
+  let preserveOfficeGate = false;
+  let explicitSignOut = false;
   const serviceHealth: SupabaseHealth = {
     ...EMPTY_HEALTH,
     configured: authService.isConfigured,
@@ -161,6 +166,8 @@ export function createAppStore(
     ...initialState(serviceHealth),
 
     signIn: async (email, password) => {
+      preserveOfficeGate = false;
+      approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null });
       const result = await authService.signIn(email, password);
@@ -202,6 +209,8 @@ export function createAppStore(
     },
 
     restoreSession: async () => {
+      preserveOfficeGate = false;
+      approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null });
       const result = await authService.restoreSession();
@@ -259,8 +268,12 @@ export function createAppStore(
     },
 
     signOut: async () => {
+      preserveOfficeGate = false;
+      approvalRequestId += 1;
       const requestId = ++authRequestId;
+      explicitSignOut = true;
       const result = await authService.signOut();
+      explicitSignOut = false;
       if (requestId !== authRequestId) {
         return;
       }
@@ -308,6 +321,8 @@ export function createAppStore(
     setTheme: (theme) => set({ theme }),
 
     reset: () => {
+      preserveOfficeGate = false;
+      approvalRequestId += 1;
       authRequestId += 1;
       set(initialState(serviceHealth));
     },
@@ -328,8 +343,11 @@ export function createAppStore(
         });
         return;
       }
+      const approvalId = ++approvalRequestId;
+      const authId = authRequestId;
       set({ sessionApproval: 'checking', sessionApprovalError: null });
       const result = await approvalService.requestApproval();
+      if (approvalId !== approvalRequestId || authId !== authRequestId || get().profile?.role !== 'office') return;
       applyApprovalStatus(set, result.data, result.error);
     },
 
@@ -349,8 +367,11 @@ export function createAppStore(
         });
         return;
       }
+      const approvalId = ++approvalRequestId;
+      const authId = authRequestId;
       set({ sessionApprovalError: null });
       const result = await approvalService.fetchMyRequest();
+      if (approvalId !== approvalRequestId || authId !== authRequestId || get().profile?.role !== 'office') return;
       if (result.error) {
         applyApprovalStatus(set, null, result.error);
         return;
@@ -360,10 +381,29 @@ export function createAppStore(
       if (!result.data) {
         set({ sessionApproval: 'checking' });
         const requested = await approvalService.requestApproval();
+        if (approvalId !== approvalRequestId || authId !== authRequestId || get().profile?.role !== 'office') return;
         applyApprovalStatus(set, requested.data, requested.error);
         return;
       }
       applyApprovalStatus(set, result.data, null);
+    },
+
+    endOfficeSessionAfterDecision: async () => {
+      const decision = get().sessionApproval;
+      if (get().profile?.role !== 'office' || (decision !== 'denied' && decision !== 'revoked') || preserveOfficeGate) return;
+      // Preserve only the gate copy, not the access token. Auth's SIGNED_OUT
+      // callback must not replace the explanatory gate with the login form.
+      preserveOfficeGate = true;
+      approvalRequestId += 1;
+      const requestId = ++authRequestId;
+      const result = await authService.signOut(); // scope: 'local'
+      if (requestId !== authRequestId) return;
+      set({
+        session: null,
+        authStatus: 'unauthenticated',
+        health: { ...get().health, authenticated: false },
+        ...(result.error ? { sessionApprovalError: result.error } : {}),
+      });
     },
 
     signOutAllOfficeSessions: async () => {
@@ -390,8 +430,18 @@ export function createAppStore(
   }));
 
   authService.onAuthStateChange((_event, session) => {
+    if (preserveOfficeGate) return;
     const requestId = ++authRequestId;
     if (!session) {
+      const current = store.getState();
+      if (!explicitSignOut && current.authStatus === 'authenticated' && current.profile?.role === 'office') {
+        // An Auth refresh may discover that the administrator deleted this
+        // session before Realtime delivers the revoked-row event. Fail closed
+        // and show the same gate; the App fences IPC and clears local Auth.
+        approvalRequestId += 1;
+        store.setState({ session: null, sessionApproval: 'revoked', sessionApprovalError: null });
+        return;
+      }
       store.setState({
         session: null,
         profile: null,

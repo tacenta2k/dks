@@ -37,7 +37,14 @@ export interface RpcErrorLike {
   status?: number;
 }
 
+export interface ApprovalRealtimeChannel {
+  on: (event: string, filter: Record<string, string>, callback: () => void) => ApprovalRealtimeChannel;
+  subscribe: () => unknown;
+}
+
 export interface ApprovalClientLike {
+  channel?: (name: string) => ApprovalRealtimeChannel;
+  removeChannel?: (channel: ApprovalRealtimeChannel) => unknown;
   rpc: (
     name: string,
     params?: Record<string, unknown>,
@@ -141,6 +148,8 @@ export interface OfficeApprovalService {
   requestApproval(): Promise<AuthResult<OfficeSigninRequest>>;
   /** Office: read the current session's request (restart recovery / polling). */
   fetchMyRequest(): Promise<AuthResult<OfficeSigninRequest | null>>;
+  /** Realtime is a wake-up hint only; callbacks must re-read server state. */
+  subscribeChanges?(onChange: () => void, requestId?: string): () => void;
   /** Admin: pending + approved requests, newest first. */
   listRequests(statuses?: ApprovalStatus[]): Promise<AuthResult<OfficeSigninRequest[]>>;
   /** Admin: approve or deny a pending request. */
@@ -162,6 +171,24 @@ export function createOfficeApprovalService(
   }
 
   return {
+    subscribeChanges(onChange, requestId) {
+      // RLS restricts Office to this signed session; the additional id filter
+      // avoids irrelevant wakeups. Never interpret the event payload.
+      try {
+        const channel = resolved.channel?.('dks-office-approval');
+        if (!channel) return () => undefined;
+        const filter: Record<string, string> = {
+          event: '*', schema: 'public', table: 'office_signin_requests',
+        };
+        if (requestId) filter.filter = `id=eq.${requestId}`;
+        channel.on('postgres_changes', filter, () => onChange()).subscribe();
+        return () => { void resolved.removeChannel?.(channel); };
+      } catch {
+        // Polling/focus remain the fallback when Realtime is unavailable.
+        return () => undefined;
+      }
+    },
+
     async requestApproval(): Promise<AuthResult<OfficeSigninRequest>> {
       try {
         const result = await resolved.rpc('request_office_signin');

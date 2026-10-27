@@ -5,7 +5,7 @@ import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
 import { OfficeApprovalGate } from '../features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../features/admin/OfficeApprovalsPanel';
-import type { OfficeApprovalService } from '../features/auth/office-approval-service';
+import { createOfficeApprovalService, type OfficeApprovalService } from '../features/auth/office-approval-service';
 import {
   hasSavedThemePreference,
   loadThemePreference,
@@ -55,6 +55,7 @@ import {
   fromLocalNotification,
   toLocalNotificationInput,
 } from '../features/notifications/local-notifications';
+import { notificationOsContent } from '../features/notifications/notification-display';
 import {
   dismissAdminNotification,
   loadAdminNotifications,
@@ -110,7 +111,10 @@ export function App({
   updater: providedUpdater,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
-  const [appStore] = useState(() => createAppStore(authService, providedApprovalService));
+  const [approvalService] = useState(() => providedApprovalService === undefined
+    ? createOfficeApprovalService()
+    : providedApprovalService);
+  const [appStore] = useState(() => createAppStore(authService, approvalService));
   const [baseSheetRepository] = useState<SheetRepository>(
     () => providedSheetRepository ?? createElectronSheetRepository({ role: 'office' }),
   );
@@ -256,28 +260,110 @@ export function App({
     saveThemePreference(preference);
   };
 
-  // Office-only session approval gate. The signed-in user may still hold a
-  // valid password-authenticated session, but until the SERVER confirms this
-  // session is approved the workspace (Sheet, Dashboard, local cache, sync)
-  // never mounts and its effects never run.
+  // Office clearance is a barrier, not a fire-and-forget side effect. The
+  // workspace stays unmounted until clearance, snapshot and an initial sync
+  // attempt have run in that order. A stable request id prevents token refresh
+  // or quiet background sync from remounting a page/editor.
   const sessionApproval = useStore(appStore, (state) => state.sessionApproval);
+  const approvalRequest = useStore(appStore, (state) => state.sessionApprovalRequest);
+  const [officePreparation, setOfficePreparation] = useState<{ requestId: string; phase: 'snapshot' | 'ready' } | null>(null);
+  const [preparationError, setPreparationError] = useState<string | null>(null);
+  const [preparationAttempt, setPreparationAttempt] = useState(0);
+  const clearanceQueue = useRef<Promise<void>>(Promise.resolve());
+  const officeSignedIn = authStatus === 'authenticated' && profile?.role === 'office';
+  const decisionBlocked = profile?.role === 'office' && (sessionApproval === 'denied' || sessionApproval === 'revoked');
+  const officeApproved = officeSignedIn && sessionApproval === 'approved';
+  const requestId = approvalRequest?.id ?? '';
+  const officeSnapshotReady = officeApproved && officePreparation?.requestId === requestId;
   const isWorkspaceVisible = (authStatus === 'authenticated' || authStatus === 'demo')
-    && (profile?.role !== 'office' || sessionApproval === 'approved');
+    && (profile?.role !== 'office' || (officeSnapshotReady && officePreparation?.phase === 'ready'));
+  const syncAllowed = profile?.role === 'office' ? officeSnapshotReady : isWorkspaceVisible;
 
-  // Push the session clearance into the main process so a pending Office
-  // session cannot read/write local cached customer records via IPC either.
+  const pushClearance = useCallback((state: 'office-pending' | 'allowed'): Promise<void> => {
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    const next = clearanceQueue.current.catch(() => undefined).then(async () => {
+      if (!local) return; // browser/demo tests without the desktop bridge
+      if (!local.setSessionClearance) throw new Error('Local session clearance is unavailable.');
+      const actual = await local.setSessionClearance(state);
+      if (actual !== state) throw new Error('Local session clearance could not be changed.');
+    });
+    clearanceQueue.current = next.catch(() => undefined);
+    return next;
+  }, []);
+
+  // Preload notifies on every successful customer-data IPC operation. Neither
+  // a clearance change nor close counts as a successful database operation.
   useEffect(() => {
     const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
-    if (!local || typeof local.setSessionClearance !== 'function') {
-      return;
+    return local?.onOperationSuccess?.(() => setLocalStoreError(null));
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+    if (!officeSignedIn && !decisionBlocked) {
+      setOfficePreparation(null);
+      setPreparationError(null);
+      // Admin/demo/sign-out must release a prior Office fence as well.
+      void pushClearance('allowed').catch(() => undefined);
+      return () => { cancelled = true; };
     }
-    const pending = authStatus === 'authenticated'
-      && profile?.role === 'office'
-      && sessionApproval !== 'approved'
-      && sessionApproval !== 'not-required';
-    void local.setSessionClearance(pending ? 'office-pending' : 'allowed')
-      .catch(() => undefined);
-  }, [authStatus, profile?.role, sessionApproval]);
+    if (!officeApproved) {
+      setOfficePreparation(null);
+      setPreparationError(null);
+      void (async () => {
+        try {
+          await pushClearance('office-pending');
+        } catch (error) {
+          if (!cancelled) setPreparationError(localStoreErrorMessage(error));
+        } finally {
+          // Even if the bridge fails, clear Auth locally and keep the gate
+          // closed; a failed IPC transition must not preserve valid tokens.
+          if (!cancelled && decisionBlocked) await appStore.getState().endOfficeSessionAfterDecision();
+        }
+      })();
+      return () => { cancelled = true; };
+    }
+
+    void (async () => {
+      try {
+        await pushClearance('allowed');
+        if (cancelled || appStore.getState().sessionApproval !== 'approved') return;
+        if (local?.getSnapshot) {
+          const snapshot = await local.getSnapshot();
+          if (cancelled || appStore.getState().sessionApproval !== 'approved') return;
+          setLocalStoreError(null);
+          if (snapshot.syncStatus) setSyncStatus(snapshot.syncStatus);
+        }
+        setPreparationError(null);
+        setOfficePreparation({ requestId, phase: 'snapshot' });
+      } catch (error) {
+        if (!cancelled) {
+          const message = localStoreErrorMessage(error);
+          setLocalStoreError(message);
+          setPreparationError(message);
+        }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [appStore, officeSignedIn, decisionBlocked, officeApproved, pushClearance, requestId, preparationAttempt]);
+
+  // One approval channel per signed-in client. Payloads are deliberately
+  // ignored: only my_office_signin() can change the approval state. Polling
+  // and focus refresh remain active even after the workspace is opened.
+  const watchOfficeApproval = officeSignedIn && !decisionBlocked;
+  useEffect(() => {
+    if (!watchOfficeApproval) return undefined;
+    const tick = () => { void appStore.getState().refreshSessionApproval(); };
+    const unsubscribe = requestId ? approvalService?.subscribeChanges?.(tick, requestId) : undefined;
+    const interval = window.setInterval(tick, 5_000);
+    window.addEventListener('focus', tick);
+    return () => {
+      unsubscribe?.();
+      window.clearInterval(interval);
+      window.removeEventListener('focus', tick);
+    };
+  }, [appStore, approvalService, requestId, watchOfficeApproval]);
 
   useEffect(() => {
     if (!isWorkspaceVisible || authStatus === 'demo') {
@@ -527,7 +613,7 @@ export function App({
         if (osNotifications?.show) {
           for (const record of generated) {
             try {
-              await osNotifications.show({ title: record.title, body: record.body });
+              await osNotifications.show(notificationOsContent(record));
             } catch {
               // OS notification delivery is best effort; the in-app record remains durable.
             }
@@ -559,7 +645,7 @@ export function App({
   }, [authService, isWorkspaceVisible, profile?.id, sheetRepository, snoozes]);
 
   useEffect(() => {
-    if (!isWorkspaceVisible || authStatus === 'demo') {
+    if (!syncAllowed || authStatus === 'demo') {
       setSyncStatus((current) => (
         current.status === 'offline' && current.lastError === null
           ? current
@@ -571,6 +657,7 @@ export function App({
     const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
     const client = authService.authClient;
     if (!local || !client || typeof local.applyRemoteSnapshot !== 'function') {
+      if (officeApproved) setOfficePreparation({ requestId, phase: 'ready' });
       return undefined;
     }
 
@@ -603,6 +690,10 @@ export function App({
       markOutboxFailed: async (id, message) => {
         await local.markOutboxFailed?.({ id, message });
       },
+      markOutboxTerminal: async (id, message) => {
+        if (!local.markOutboxTerminal) throw new Error('Terminal outbox recording is unavailable.');
+        await local.markOutboxTerminal({ id, message });
+      },
       retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
       // R3 batch B: adopt the server's column id after a duplicate-name
       // reconciliation so the column stops failing on every sync.
@@ -614,7 +705,10 @@ export function App({
 
     let activeRun: Promise<SupabaseSyncResult | null> | null = null;
     const run = (): Promise<SupabaseSyncResult | null> => {
-      if (stopped) {
+      const current = appStore.getState();
+      if (stopped || current.authStatus !== 'authenticated'
+        || (current.profile?.role === 'office'
+          && (current.sessionApproval !== 'approved' || current.sessionApprovalRequest?.id !== requestId))) {
         return Promise.resolve(null);
       }
       if (activeRun) {
@@ -627,6 +721,15 @@ export function App({
           client: syncClient,
           local: syncLocal,
           userId: profile?.id ?? null,
+          // Read the store at each async boundary, not a stale render value:
+          // a Realtime revocation must stop an already-running sync too.
+          isSessionAllowed: () => {
+            if (stopped) return false;
+            const current = appStore.getState();
+            return current.authStatus === 'authenticated'
+              && (current.profile?.role !== 'office'
+                || (current.sessionApproval === 'approved' && current.sessionApprovalRequest?.id === requestId));
+          },
         });
         if (!stopped && result.status === 'healthy') {
           setRepositoryRevision((revision) => revision + 1);
@@ -656,7 +759,23 @@ export function App({
         throw new Error(result.error ?? result.errors[0] ?? 'Some changes have not synchronised yet.');
       }
     };
-    runInBackground();
+    // Wait for the first attempt before mounting Office. A bounded wait keeps
+    // the local-first workspace usable when the network hangs; the same run
+    // continues quietly and refreshes the mounted page through refreshToken.
+    let openingTimer: number | undefined;
+    if (officeApproved) {
+      const openingDeadline = new Promise<void>((resolve) => {
+        openingTimer = window.setTimeout(resolve, 1_500);
+      });
+      void Promise.race([run().then(() => undefined).catch(() => undefined), openingDeadline]).then(() => {
+        if (openingTimer !== undefined) window.clearTimeout(openingTimer);
+        if (!stopped && appStore.getState().sessionApproval === 'approved') {
+          setOfficePreparation({ requestId, phase: 'ready' });
+        }
+      });
+    } else {
+      runInBackground();
+    }
     const interval = window.setInterval(() => {
       // Hang guard: a sync stuck for more than 5 minutes (e.g. a network
       // socket that never resolves) releases the lock and surfaces the
@@ -698,11 +817,12 @@ export function App({
       requestSyncRef.current = null;
       syncNowRef.current = null;
       window.clearInterval(interval);
+      if (openingTimer !== undefined) window.clearTimeout(openingTimer);
       if (channel) {
         void realtime.removeChannel?.(channel);
       }
     };
-  }, [authService, authStatus, isWorkspaceVisible, profile?.id]);
+  }, [appStore, authService, authStatus, officeApproved, syncAllowed, profile?.id, requestId]);
 
   // SYNC-10: restore the persisted sync state on restart so the top bar shows
   // the real outbox (pending count / last sync / error) immediately instead of
@@ -743,7 +863,7 @@ export function App({
   // is never hidden.
   useEffect(() => {
     const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
-    if (!local?.listOutbox) {
+    if (!isWorkspaceVisible || !local?.listOutbox) {
       setPendingOutbox([]);
       return undefined;
     }
@@ -767,7 +887,7 @@ export function App({
     return () => {
       cancelled = true;
     };
-  }, [syncStatus]);
+  }, [isWorkspaceVisible, syncStatus]);
 
   const persistNotification = async (
     id: string,
@@ -914,10 +1034,12 @@ export function App({
     // A password-authenticated Office session with no approval yet gets the
     // dedicated gate — never the AuthScreen (that would let it re-sign-in in
     // a loop) and NEVER any other workspace surface.
-    if (authStatus === 'authenticated' && profile?.role === 'office') {
+    if (officeSignedIn || decisionBlocked) {
       return (
         <OfficeApprovalGate
           appStore={appStore}
+          preparationError={preparationError}
+          onRetryPreparation={() => setPreparationAttempt((attempt) => attempt + 1)}
           onSignOut={() => void appStore.getState().signOut()}
         />
       );
@@ -975,7 +1097,7 @@ export function App({
       onNotificationRestore={handleNotificationRestore}
       onNotificationSnooze={handleNotificationSnooze}
       officeApprovalsSlot={profile?.role === 'admin'
-        ? <OfficeApprovalsPanel />
+        ? <OfficeApprovalsPanel service={approvalService} />
         : null}
       onLogout={() => appStore.getState().signOut()}
     />

@@ -31,7 +31,7 @@ function recordExplicitWrite(log: RecordedWrite[]) {
     update: (values: Record<string, unknown>) => ({
       eq: async (_column: string, id: string) => {
         log.push({ table, mode: 'update', value: { ...values, id } });
-        return { data: null, error: null };
+        return { data: null, error: null, count: 1 };
       },
     }),
   });
@@ -115,6 +115,8 @@ describe('Supabase offline reconciliation', () => {
         };
         return localSnapshot;
       },
+      listOutbox: async () => [{ id: 1, operation: 'create', entityType: 'entry', entityId: LOCAL_ID, status: 'pending' }],
+      markOutboxSynced: async () => undefined,
       acknowledgeOutbox: async () => {
         localSnapshot = {
           ...localSnapshot,
@@ -300,7 +302,7 @@ describe('pending outbox synchronisation (B3)', () => {
             if (name === 'entries' && id === failingId) {
               return { data: null, error: { message: 'new row violates row-level security policy' } };
             }
-            return { data: null, error: null };
+            return { data: null, error: null, count: 1 };
           },
         }),
       }),
@@ -333,7 +335,7 @@ describe('pending outbox synchronisation (B3)', () => {
     expect(state.acknowledged).toBe(0);
   });
 
-  it('sends deleted_by for soft deletes and inserts missing rows before deleting them', async () => {
+  it('sends a queued soft delete as UPDATE even when the row was not visible to SELECT', async () => {
     const state = fakeOutbox([
       {
         id: 7,
@@ -371,12 +373,10 @@ describe('pending outbox synchronisation (B3)', () => {
 
     expect(result.status).toBe('healthy');
     const entryWrites = writes.filter((write) => write.table === 'entries');
-    expect(entryWrites.map((write) => write.mode)).toEqual(['insert', 'update']);
-    // First write inserts the row in an active state (remote insert policy
-    // rejects rows that are already deleted) …
-    expect(entryWrites[0].value).toEqual(expect.objectContaining({ id: DELETED_ID, deleted: false }));
-    // … then the deletion is a real UPDATE with the acting user recorded.
-    expect(entryWrites[1].value).toEqual(expect.objectContaining({
+    expect(entryWrites.map((write) => write.mode)).toEqual(['update']);
+    // Remote SELECT visibility never decides the operation; this queued
+    // deletion is a real UPDATE with the acting user recorded.
+    expect(entryWrites[0].value).toEqual(expect.objectContaining({
       id: DELETED_ID,
       deleted: true,
       deleted_by: USER_ID,
@@ -494,6 +494,7 @@ describe('pending outbox synchronisation (B3)', () => {
         entityId: 'row-not-a-uuid',
         status: 'pending',
       },
+      { id: 22, operation: 'create', entityType: 'entry', entityId: LOCAL_ID, status: 'pending' },
     ]);
 
     const client: SupabaseDataClient = {
@@ -829,6 +830,8 @@ describe('outbox queue drains after successful sync (B3)', () => {
         data: { name: 'Edited locally' },
         category: 'Employee',
       });
+      store.markOutboxSynced(store.listOutbox('pending')[0].id);
+      store.updateEntry(row.id, { data: { name: 'Edited locally' } });
       expect(store.getPendingOutboxCount()).toBe(1);
 
       const { client, tables } = createFakeRemote({
@@ -1119,7 +1122,7 @@ describe('entries insert authorization (RLS regression)', () => {
               // The SQL trigger keeps created_by immutable.
               rows[index] = { ...rows[index], ...values, id, created_by: rows[index].created_by };
             }
-            return { data: null, error: null };
+            return { data: null, error: null, count: index >= 0 ? 1 : 0 };
           },
         }),
         upsert: async () => ({
@@ -1211,8 +1214,9 @@ describe('entries insert authorization (RLS regression)', () => {
           updated_at: '2026-01-01T00:00:00.000Z',
         }],
       };
-      // Local copy edited later (newer updated_at) -> local wins -> UPDATE.
-      store.createEntry({ id: rowId, data: { name: 'Edited' }, category: 'Employee' });
+      // Cache the remote row without a create, then queue a genuine update.
+      store.applyRemoteEntry(remoteSeed.entries[0] as never);
+      store.updateEntry(rowId, { data: { name: 'Edited' } });
 
       const { client, entriesInserts, entriesUpdates } = capturingRemote(remoteSeed);
       await runSupabaseSync({ client, local, userId: OFFICE_UID });

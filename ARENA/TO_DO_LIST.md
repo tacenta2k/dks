@@ -44,6 +44,28 @@ Locked decisions that resolve conflicts (later decisions win):
 
 ---
 
+## Current Office approval and sync repair (2026-10-27)
+
+The earlier `CONFIRMED_BY_USER` records are historical; the changes below still
+need the owner to apply SQL and re-test on the actual PCs. Nothing here is
+confirmed on Windows or against the live Supabase project.
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| PC-APPROVAL-01 | Await Office IPC `allowed` clearance, local snapshot, then an initial sync attempt before mounting the workspace; clear a prior local refusal after a successful customer-data IPC. The 1.5-second network deadline keeps opening usable offline; quiet sync continues without remounting. | IMPLEMENTED_AWAITING_CONFIRMATION |
+| PC-SYNC-02 | Outbox-driven entries: INSERT on create, exact-count UPDATE by id on edit/soft-delete without returning rows, duplicate create acknowledged once, inaccessible zero-row changes preserved as terminal with an actionable message. Pending/revoked sessions cannot classify or sync. SQL guards RLS, and a private short-lived marker permits legitimate Office soft-deletes without exposing old deleted rows. | IMPLEMENTED_AWAITING_CONFIRMATION (owner must run `ARENA/sql/entry-visibility.sql`) |
+| PC-REALTIME-03 | One request-change channel per signed-in client; Office re-polls `my_office_signin()` rather than trusting event payloads. Denial/revocation fences local IPC, stops sync and signs out local Auth. Admin badge re-reads; 5-second/focus polling remains fallback. | IMPLEMENTED_AWAITING_CONFIRMATION (owner must run `ARENA/sql/realtime-office-approval.sql`) |
+| PC-NOTIF-04 | Bell, OS notifications, summaries and Office-delete cards use shared DD/MM/YYYY formatting, with timestamps and calendar windows in Asia/Muscat. | IMPLEMENTED_AWAITING_CONFIRMATION |
+
+Owner steps: run the **read-only preflight** in each SQL file, review any
+unexpected policies or missing helpers, apply each file's transaction and run
+its verification; see `ARENA/ARENA_PROGRESS.md` §34 for exact ordering and PC
+checks. The migrations intentionally abort on disabled RLS or unexpected
+permissive policies. The terminal outbox item is retained, not silently
+retried or cleared; coordinate resolution with the administrator.
+
+---
+
 ## 1. Critical blockers
 
 | ID | Source | Requirement | Type | Status |

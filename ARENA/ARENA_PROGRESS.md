@@ -1,6 +1,7 @@
 # DKS — Session Progress (Agent)
 
 Session branch: `arena/cce2ff33-dks` (round 2; PR #1 merged into `main`).
+Current Office approval/sync repair session: `arena/b28e239b-dks`; see §34.
 Round-2 work is listed in section 8 onwards. Nothing in this file is
 "CONFIRMED" unless the user verified it on Windows.
 Companion file: `ARENA/TO_DO_LIST.md` (single implementation checklist).
@@ -2516,3 +2517,160 @@ attached as a single in-memory PDF.
 - The migration was reviewed, not executed. Apply §0 and §5 of
   `ARENA/sql/expiry-digest-report.sql` on the target project first.
 - No email was sent; no Resend key exists here.
+
+## 34. Office approval, idempotent sync, Realtime and notification dates (2026-10-27)
+
+Status: **IMPLEMENTED_AWAITING_CONFIRMATION**. Session branch
+`arena/b28e239b-dks` started at `origin/main` `639b23b`; the branch was pushed,
+not merged into `main`. Compare:
+https://github.com/tacenta2k/dks/compare/main...arena/b28e239b-dks
+No live Supabase project was accessed, no real messages were delivered, and no
+Windows/packaged-PC test was performed.
+
+### 34.1 Root causes and fixes
+
+1. **Approval transition:** the old workspace mounted as soon as the renderer
+   saw `approved`, while IPC clearance was still being changed asynchronously.
+   Snapshot/outbox calls could hit the pending fence and leave a stale refusal.
+   `App.tsx` now serializes and awaits local `allowed` clearance, loads the
+   snapshot, starts the first sync, and only then opens the workspace. If the
+   network hangs, a 1.5-second deadline lets the offline-first workspace open;
+   that attempt continues quietly rather than blocking indefinitely or
+   remounting an editor. Successful customer-data IPC calls clear stale local
+   error banners; a clearance toggle alone does not.
+2. **RLS-filtered sync:** the old client chose INSERT versus UPDATE from an
+   Office-visible remote snapshot. A server row hidden by RLS looked absent,
+   so the client repeatedly inserted it and lost the useful duplicate error
+   code. Entries now follow the outbox operation: INSERT for create, UPDATE
+   filtered by id with an exact count and no returned rows for edit/soft-delete;
+   no entries/columns upserts. A create `23505` is safely logged and only that
+   create is acknowledged, leaving later queued edits/deletes intact. A
+   zero-count update uses approved-session `entry_visibility(uuid)`; hidden or
+   missing becomes a durable terminal item, retains the local row, reports
+   `This record can no longer be changed from the Office account`, and is not
+   automatically retried. Visible, transient errors and pending approval do not
+   become terminal. Terminal/concurrent items keep the sync indicator non-green.
+3. **Realtime:** the earlier gate-owned poll disappeared once the workspace
+   mounted. The signed-in client now keeps one `postgres_changes` approval
+   channel, plus the five-second/focus fallback. Events are only wakeups for
+   `my_office_signin()`, never authoritative payloads. Admin's panel similarly
+   re-reads on events. Denial/revocation fences local IPC, stops work, displays
+   the gate and calls Supabase sign-out with `scope: 'local'`; stale responses
+   and unexpected local Auth sign-out cannot reopen the session.
+4. **Display dates:** a shared notification formatter normalizes known legacy
+   ISO/US text using record dates and is used by bell text and desktop payloads;
+   secondary dates and Office-delete datetimes use the same DD/MM/YYYY helper.
+   Date-only storage remains YYYY-MM-DD. Summary/expiry calendar windows and
+   deletion timestamps use Asia/Muscat. An ambiguous legacy slash date without
+   matching record metadata is not guessed or silently swapped.
+
+### 34.2 SQL security and the soft-delete edge case
+
+`supabase/schema.sql` mirrors the two idempotent manual migrations below. Both
+migrations contain read-only preflight, an atomic installation and read-only
+verification. They refuse to run with RLS disabled or an unexpected permissive
+policy, because PostgreSQL ORs permissive policies. They do not silently drop
+unknown policies. The entry SELECT policy and the guarded `entry_visibility`
+RPC use the same stable visibility helper; the RPC returns only `visible`,
+`hidden` or `missing`, and pending/revoked Office callers receive 42501. The
+request SELECT policy restricts Office to its signed `session_id`. The bulk
+Office sign-out function is explicitly revoked from `anon` and `PUBLIC`.
+
+A local PostgreSQL test uncovered a subtle issue: even an UPDATE with no
+RETURNING can check the SELECT policy against the **new** row when its WHERE
+clause reads `id`; an Office soft-delete would otherwise fail. The schema and
+entry migration therefore create `dks_private.office_entry_soft_delete_context`
+and two triggers. Only an approved Office transition from an already-visible
+live row gets a backend/transaction/id-scoped marker between BEFORE and AFTER
+checks; API roles cannot access or forge it, the marker is removed or rolls
+back, and ordinary reads/RPCs still hide deleted rows. The `write_audit_log()`
+old/new deleted dereferences remain nested under the entries/table guard.
+
+Realtime publication membership is installed idempotently. Approximate usage
+is one approval channel per signed-in client in addition to the existing sync
+channel, with a handful of messages per sign-in/decision; polling remains the
+fallback, and payloads do not grant access.
+
+### 34.3 Manual SQL actions — owner only
+
+On the **existing** project, in this order:
+
+1. Open `ARENA/sql/entry-visibility.sql` in the Supabase SQL editor. Run the
+   section 0 read-only queries first; check the existing helpers, enabled RLS
+   and all policies. Investigate unexpected permissive rules or missing
+   dependencies before proceeding. Run section 1 as its transaction, then the
+   section 2 verification queries. Expect the authenticated RPC grant, no anon
+   grant, no authenticated access to `dks_private`, and both context triggers.
+2. Do the same for `ARENA/sql/realtime-office-approval.sql`: inspect section 0
+   (request RLS/policies, helpers and `supabase_realtime` publication), run
+   section 1, and check section 2 for one publication membership and the
+   authenticated/anon function privileges. Resolve an unexpected policy or
+   missing publication deliberately; do not bypass the guards.
+
+These files were **not** run on the live project here. `supabase/schema.sql` is
+for the corresponding fresh-install definition, not an extra existing-project
+migration. Real Realtime delivery, policy behavior under the target Supabase
+version and authorization across actual signed sessions still require checking.
+
+### 34.4 Manual PC verification — owner only
+
+Use disposable test records, an Admin session and a separate Office session;
+install an appropriate build of this branch on both PCs after the SQL above.
+No installer was produced by `npm run build`.
+
+1. Sign in Office and leave it pending. Approve from Admin; Office should open
+   without restart (target about two seconds online), have no stale local
+   refusal, and show the snapshot. Confirm the Admin pending badge changes on
+   the event. Also check the five-second/focus fallback when Realtime is absent.
+2. Create a disposable record on Office while offline; reconnect and verify it
+   appears once, sync drains, and a later edit and Office soft-delete reach
+   Admin. Confirm the deletion notification and Recycle Bin entry; do not use
+   real customer records for destructive tests.
+3. On a disposable record, queue an Office edit offline, then have Admin
+   soft-delete it before Office reconnects. Expect the stated terminal message,
+   the local change still present and no repeated retry/duplicate. Repeat with a
+   genuinely missing disposable record if appropriate. A new pending Office
+   request must not mark its outbox terminal or sync before approval.
+4. Revoke/deny an Office session while open: confirm the gate appears, local
+   Auth is signed out and sync stops; signing in again creates a new request.
+   Check two Office devices cannot see each other's request details.
+5. Inspect expiry bell primary/secondary lines, desktop notifications,
+   daily/weekly summaries and Office-delete cards for DD/MM/YYYY, including a
+   timestamp crossing Muscat midnight. Check a background refresh does not
+   remount the sheet/editor or steal focus.
+
+### 34.5 Local verification and files
+
+- Node `20.19.0`: `npm run typecheck` **PASS**; `npm test` **78 files passed,
+  704 passed / 3 skipped / 0 failed** (220.30 s); `npm run build` **PASS**
+  (renderer 2,859 modules, Electron TypeScript build). Three real-Electron
+  packaging tests were skipped because the Electron binary is unavailable in
+  this Linux sandbox. The build emitted existing Vite CJS and large-chunk
+  warnings; tests emitted existing AG Grid warnings. No Enterprise package was
+  added.
+- `tests/entry-visibility-postgres.test.ts` runs the complete schema and both
+  actual migrations twice in local PGlite/PostgreSQL 18 with a minimal Auth
+  stub. It exercises approved/pending/admin/anon RLS, exact UPDATE counts,
+  soft-delete/audit, hidden/missing RPC results, private-context permissions,
+  session-scoped request reads, publication membership and unexpected-policy
+  guard rollback. This is not a live Supabase or Realtime-delivery test.
+- `tests/office-approval.test.tsx`, `entry-sync-idempotency.test.ts`,
+  `approval-visibility-schema.test.ts`, `notification-display-dates.test.tsx`
+  and updated sync/SQLite/notification suites cover the mocked races,
+  acknowledgements, terminal state, event wakeups and displayed dates.
+- Main implementation: `src/renderer/App.tsx`, `src/lib/store.ts`,
+  `src/features/auth/{OfficeApprovalGate,office-approval-service}.ts(x)`,
+  `src/features/admin/OfficeApprovalsPanel.tsx`,
+  `src/features/sync/supabase-sync.ts`, `electron/main/{local-ipc,sqlite}.ts`,
+  `electron/preload/index.ts`, `src/lib/types.ts`,
+  `src/features/notifications/{NotificationBell,alert-service,notification-display}.ts(x)`,
+  `src/lib/date.ts`, the two SQL files above, `supabase/schema.sql`, and tests.
+  `@electric-sql/pglite` is a pinned dev-only test dependency.
+- Local install deferred lifecycle scripts and rebuilt `better-sqlite3` against
+  the pinned Node headers; this is not a Windows native build. The existing
+  lockfile resolves Supabase 2.118.0 packages that warn they require Node >=22
+  even though `.nvmrc` pins Node 20.19.0; this separate compatibility issue
+  was not concealed. `npm install` reported 24 existing audit findings
+  (3 moderate, 17 high, 4 critical), not addressed in this task.
+- Implementation commits: `22946de`, `6011d7f`, `de4616b`, `4ae418b`,
+  `302dac1`, `15af228`; the checklist/progress update follows these commits.

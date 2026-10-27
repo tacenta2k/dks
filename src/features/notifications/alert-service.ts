@@ -1,5 +1,6 @@
 import {
   calculateDaysLeft,
+  DKS_BUSINESS_TIME_ZONE,
   isValidIsoDate,
   type StatusThresholds,
 } from '../../lib/date';
@@ -278,15 +279,22 @@ function asDate(value: string | Date | undefined): Date {
   return new Date();
 }
 
-function localDateKey(value: string | Date | undefined): string {
-  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) {
-    return value.trim();
-  }
+const businessClock = new Intl.DateTimeFormat('en-GB', {
+  timeZone: DKS_BUSINESS_TIME_ZONE,
+  year: 'numeric', month: '2-digit', day: '2-digit',
+  hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+});
 
-  const date = asDate(value);
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+function businessParts(date: Date): { year: string; month: string; day: string; hour: number; minute: number } {
+  const parts = businessClock.formatToParts(date);
+  const get = (type: string) => parts.find((part) => part.type === type)?.value ?? '0';
+  return { year: get('year'), month: get('month'), day: get('day'), hour: Number(get('hour')), minute: Number(get('minute')) };
+}
+
+function localDateKey(value: string | Date | undefined): string {
+  // Date-only inputs are already calendar dates, not UTC instants.
+  if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value.trim())) return value.trim();
+  const { year, month, day } = businessParts(asDate(value));
   return `${year}-${month}-${day}`;
 }
 
@@ -594,7 +602,7 @@ export function refreshExpiryNotificationLabels(
 }
 
 /**
- * Evaluate the current local calendar day without touching Electron, storage,
+ * Evaluate the current Muscat calendar day without touching Electron, storage,
  * or the network.  A record's stable dedupe key makes hourly evaluations safe.
  */
 export function evaluateAlerts(options: AlertEvaluationOptions): ExpiryNotificationRecord[] {
@@ -680,14 +688,14 @@ function summaryRecordId(kind: SummaryKind, date: string): string {
   return `${kind}-summary:${date}`;
 }
 
-/** Return the summaries due in the local 09:00 window. */
+/** Return summaries due in the Asia/Muscat 09:00 business window. */
 export function getSummaryKinds(
   value: string | Date | undefined,
   summaryHour = DEFAULT_SUMMARY_HOUR,
   summaryWindowMinutes = DEFAULT_SUMMARY_WINDOW_MINUTES,
 ): SummaryKind[] {
-  const date = asDate(value);
-  const minuteOfDay = date.getHours() * 60 + date.getMinutes();
+  const date = businessParts(asDate(value));
+  const minuteOfDay = date.hour * 60 + date.minute;
   const start = summaryHour * 60;
   const window = Number.isFinite(summaryWindowMinutes) && summaryWindowMinutes > 0
     ? summaryWindowMinutes
@@ -698,7 +706,8 @@ export function getSummaryKinds(
   }
 
   const kinds: SummaryKind[] = ['daily'];
-  if (date.getDay() === 1) {
+  const weekday = new Date(Date.UTC(Number(date.year), Number(date.month) - 1, Number(date.day))).getUTCDay();
+  if (weekday === 1) {
     kinds.push('weekly');
   }
   return kinds;
@@ -781,8 +790,8 @@ export function snoozeUntil(
 
   const result = asDate(now);
   const days = duration === '1d' ? 1 : duration === '3d' ? 3 : 7;
-  result.setDate(result.getDate() + days);
-  return result.toISOString();
+  // Oman has no DST; fixed day durations avoid the host PC's DST rules.
+  return new Date(result.getTime() + days * 86_400_000).toISOString();
 }
 
 export function createSnooze(
