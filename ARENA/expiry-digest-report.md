@@ -1,12 +1,14 @@
 # Daily rolling cloud expiry report (expiry digest)
 
 An optional, server-side only email report that summarises every DKS record
-whose expiry falls in a rolling 30-day window, and attaches a PDF with all of
-the active Visa Sheet columns.
+whose expiry falls in a rolling 30-day window, and attaches a landscape-A4
+**grid** PDF with every visible Visa Sheet column — one row per record, exactly
+like the sheet.
 
 This document is the design + acceptance record. It complements
-`supabase/README.md` (deployment) and `ARENA/sql/expiry-digest-report.sql`
-(the upgrade script).
+`supabase/README.md` (deployment), `ARENA/sql/expiry-digest-report.sql` (the
+30-day window upgrade) and `ARENA/sql/digest-full-columns.sql` (full
+Passport / Civil ID values are the default).
 
 ## 1. Acceptance criteria
 
@@ -27,10 +29,22 @@ This document is the design + acceptance record. It complements
 - **Empty day is calm.** With nothing qualifying the email says "All clear —
   nothing expiring within the next 30 days." and the PDF is a single page.
   No rows are invented.
-- **HTML summary only, inline styles.** The email body is a single self-
-  containing HTML document with inline `style="…"` attributes (no external
-  CSS, no remote assets), plus a plain-text fallback for clients that strip
-  HTML.
+- **Short email body, inline styles.** The body is one self-contained HTML
+  document with inline `style="…"` attributes (no external CSS, no remote
+  assets) plus a plain-text fallback. It carries one sentence — "Your DKS daily
+  expiry summary is attached." — the five counts and, at most, 15 record names
+  with their days-left wording. It never repeats the table and never carries a
+  Passport / Civil ID value, whatever the PDF does.
+- **Excel-like landscape grid in the PDF.** One row per record and one column
+  per visible Visa Sheet column in the sheet's saved `position` order, followed
+  by Expiry (DD/MM/YYYY), Days left ("Expired 3 days ago" / "Expires today" /
+  "12 days left") and Status. Header row repeated on every page, alternate row
+  shading, summary counts on top (Expired, Today, Next 7, Next 30, Total),
+  report date/time in `Asia/Muscat`, and "Page X of Y" on every page. Column
+  widths are auto-sized from the widest cell, clamped between a minimum and a
+  maximum, with wrapping. If the columns exceed one landscape page the table
+  splits into COLUMN GROUPS on successive pages, each repeating the record name
+  (`Record (continued)`) — no column is ever dropped.
 - **Status is never colour-only.** Every status is text in both media (the PDF
   also colours it; the text is the source of truth).
 - **PDF carries every active column.** The attachment includes every
@@ -42,11 +56,16 @@ This document is the design + acceptance record. It complements
   Nothing is written to disk, Supabase Storage, or a database table. The
   attachment is bounded in size (well under Resend's 40 MB/email after
   base64).
-- **Masking is on by default everywhere.** Passport and Civil ID values are
-  masked (last 4 digits) in the PDF; the HTML/plain-text summary does not
-  carry them at all. Full values appear only when an **administrator** opts in
-  via Settings → Notifications; Office accounts cannot (admin-only RLS on the
-  settings row, and Office never reaches the settings screen).
+- **FULL identifiers are the default in the PDF** (owner decision,
+  2026-10-27). The digest is delivered only to the **Admin** mailbox (the Office
+  cannot read it), so the Admin must be able to call the customer from the
+  email alone: Passport and Civil ID values are printed in full.
+  Settings → Notifications keeps the same toggle and key
+  (`email_notifications.include_full_ids`, label "Include full Passport /
+  Civil ID values in the emailed PDF"), checked by default; switching it OFF
+  masks them (last 4 digits) and the report says so. Only an **Administrator**
+  can change it (admin-only RLS; Office never reaches the settings screen). The
+  HTML/plain-text body never carries identifiers in either case.
 - **No sensitive data in logs.** Delivery details are truncated and
   control-character-stripped; record payloads are never echoed.
 - **Dedupe.** At most one digest email per recipient per Muscat day.
@@ -84,7 +103,7 @@ bundled into the Edge Function at deploy time.
 | File | Responsibility |
 | --- | --- |
 | `digest-report.ts` | Window/ordering, column normalisation, value formatting, masking, WinAnsi sanitising, HTML + plain-text renderers, model assembly |
-| `digest-pdf.ts` | A4 PDF layout through a minimal `PdfDocument` interface (so it runs on Deno `npm:jspdf` and is testable with real jsPDF) |
+| `digest-pdf.ts` | Landscape A4 grid layout (auto-sized columns, column groups, repeated header row, status colours, summary strip, footers) through a minimal `PdfDocument` interface (so it runs on Deno `npm:jspdf` and is testable with real jsPDF) |
 | `outbox-email.ts` | `buildOutboxEmail(row)` — subject/HTML/text/attachment decision; `sanitizeDetail` |
 | `base64.ts` | Dependency-free `bytesToBase64` (avoids `btoa`'s argument-count limits) |
 | `email.ts` | Recipient parsing, Office approval email, dedupe key, outbox row type |
@@ -113,34 +132,67 @@ an invented label would leak by accident.
 
 ## 6. Truncation
 
-- Summary table: first **200** records, with a visible note and the full
-  qualifying count when truncation occurs. Truncation is a presentation limit,
-  not an error.
-- PDF detail blocks: first **100** records, each as one unsplit block.
+- One cap only: the first **200** records (the summary + detail split is gone —
+  every row is a grid row). When it bites, the last PDF page and both email
+  bodies state "This report shows the 200 most urgent of N records expiring
+  within 30 days." Truncation is a presentation limit, not an error.
+- The email body lists at most 15 record names, then points at the attachment
+  (`+N more in the attached PDF.`).
 
 ## 7. PDF rendering notes
 
-- `jsPDF`, A4, standard Helvetica. `addPage()` is used (jsPDF has no
-  `newPage()`). `output('arraybuffer')` + `new Uint8Array(ab)` is used because
-  `output('uint8array')` returns `null`.
+- `jsPDF` with `PDF_DOCUMENT_OPTIONS = { orientation: 'landscape', unit: 'pt',
+  format: 'a4' }` (841.89 × 595.28 pt), standard Helvetica. `addPage()` is used
+  (jsPDF has no `newPage()`). `output('arraybuffer')` + `new Uint8Array(ab)` is
+  used because `output('uint8array')` returns `null`.
+- **Unit bug fixed while building the grid.** jsPDF defaults to PORTRAIT
+  MILLIMETRES; the previous layout drew point coordinates onto a 210 × 297 mm
+  page, so the footer and right-hand content fell outside the page. The options
+  above pin landscape A4 in points, and a test asserts the resulting
+  `/MediaBox` is `841.89 × 595.28`.
 - Two passes: pass 1 counts pages on a throwaway document, pass 2 renders the
   final bytes with `totalPages` so the footer can print "Page X of Y".
-- A detail block is measured and moved wholly to the next page rather than
-  being split across a boundary.
-- The font is WinAnsi only. Characters outside cp1252 are replaced with `?`
-  and flagged, and the report prints an explicit notice — nothing is ever
+- Grid: column width = widest measured cell (header or value) + padding,
+  clamped to `[42, 150]` pt (`[92, 150]` for the record column), then the group
+  is scaled proportionally to fill the page width. Column groups are packed
+  greedily; the record column is prepended to each group.
+- A row is measured (wrapped line count) before it is drawn; when it does not
+  fit, the page breaks and the HEADER ROW is redrawn, so a page never starts
+  with an unlabelled row. A cell's text is hard-split by character only if a
+  single token is wider than the column, so nothing is truncated.
+- The font is WinAnsi only. Characters outside cp1252 are replaced with `?`,
+  flagged, and the last page prints an explicit notice — nothing is ever
   silently blank or garbled. **The mask bullet `•` is cp1252 (byte 0x95) but is
   not a contiguous code point**, so the codec check uses the full cp1252
   supplemental set; a naive range check turned `•••• 4567` into `???? 4567`.
-- Status text is drawn next to the record label, not only as a colour.
+- A currency symbol the font cannot encode (the Arabic OMR symbol `ر.ع.`) is
+  replaced by the ISO code (`OMR 1,234.500`) and the report says so on the
+  first page — never `????`.
+- Status is TEXT as well as colour: expired/today red, 1–7 amber, everything
+  else neutral; the `Days left` column uses the same colour band.
 
 ## 8. Deployment
 
 1. Apply `ARENA/sql/expiry-digest-report.sql` (§0 first — it only `SELECT`s).
-2. Deploy the function: `supabase functions deploy send-email`.
-3. Set secrets: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `DKS_TRIGGER_KEY`.
+2. Apply `ARENA/sql/digest-full-columns.sql` (sets
+   `include_full_ids = true` on the live row and re-creates the digest builder
+   with the same default; idempotent).
+3. Deploy the function. Deno has no CLI support for the repo's
+   `supabase/edge-functions/_shared/` layout (Supabase only bundles each
+   function's own directory), so the owner uses a temporary copy:
+
+   ```bash
+   mkdir -p supabase/functions
+   cp -r supabase/edge-functions/_shared supabase/edge-functions/send-email supabase/functions/
+   supabase functions deploy send-email --project-ref vjhlccafuqupbxajccvy --no-verify-jwt
+   rm -rf supabase/functions
+   ```
+
+   `supabase/functions/` is git-ignored — the temporary copy must never be
+   committed.
+4. Set secrets: `RESEND_API_KEY`, `RESEND_FROM_EMAIL`, `DKS_TRIGGER_KEY`.
    None of these may reach the repo, the desktop app, or the installer.
-4. Set `settings.email_worker_url` to the deployed function URL.
+5. Set `settings.email_worker_url` to the deployed function URL.
 
 `RESEND_API_KEY` absent → the function is a quiet no-op; local Windows alerts
 keep working and nothing degrades.
@@ -148,23 +200,39 @@ keep working and nothing degrades.
 ## 9. Tests
 
 `tests/expiry-digest-report.test.ts` covers the window/ordering, renewal and
-the Muscat rollover, dynamic column add/rename/reorder, value formatting,
-masking on/off in every medium, labels, truncation, pagination, the
-WinAnsi bullet regression, the Office notification (no attachment, no session
-link), dedupe, sanitized details, and source-level guardrails that the Edge
+the Muscat rollover, dynamic column add/rename/reorder, value formatting, the
+FULL-by-default / opt-out masking split in every medium, labels, the 200-row
+truncation note, pagination, the landscape `/MediaBox`, header repetition,
+alternate shading, status colours, column-group splitting with the repeated
+record name, days-left wording at −3/0/1/12, the empty one-pager, the base64
+attachment shape, the WinAnsi bullet regression, the currency-symbol fallback,
+the Office notification (no attachment, no session link), dedupe, sanitized
+details, the SQL defaults (`schema.sql` + `digest-full-columns.sql`), the
+`supabase/functions/` ignore rule, and source-level guardrails that the Edge
 Functions never touch disk, Storage, or a connection string.
+
+`tests/digest-full-columns-postgres.test.ts` executes BOTH migrations, twice
+each, against a real local PostgreSQL (PGlite WASM — no Supabase project): it
+proves an existing `include_full_ids: false` becomes `true` with every other
+preference preserved, that a fresh project gets the documented defaults, that
+the Admin opt-out still round-trips afterwards, and that no table, policy or
+trigger appears.
 
 `tests/settings.test.tsx` and `tests/email-notifications.test.ts` cover the
 Admin opt-in UI/state and the preference round-trip.
 
 ## 10. Honest gaps / not verified here
 
-- No SQL has been run against a live project; the migration is reviewed, not
-  executed. Apply §0 and §5 on the target project first.
-- No email has been sent and no Resend key is configured.
+- No SQL has been run against a live project; both migrations are reviewed,
+  not executed. Apply the §0/§3 preflight blocks (read-only) first.
+- No email has been sent and no Resend key is configured — live delivery has
+  NOT been verified by the agent.
 - `send-email/index.ts` imports `npm:jspdf`, which is outside the `tsc`
   program (`tsconfig` covers only `src` and `tests`). It has been reviewed by
   hand and its shared dependencies are typechecked through the tests, but it
   has **not** been executed — Deno is not available in this environment.
 - `jsPDF` resolves to its Node build under Deno's `npm:` resolution; verify
   on the target Edge Function runtime before relying on it.
+- The grid is verified by unit tests with a recording document plus REAL jsPDF
+  bytes (page size, page count, text content). Visual polish on Windows/Acrobat
+  still needs one look at a real attachment.

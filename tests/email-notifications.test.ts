@@ -124,7 +124,7 @@ describe('email preferences persistence contract', () => {
     expect(saved).toEqual([{ key: EMAIL_PREFS_SETTINGS_KEY, value: emailPrefsToRecord(result.data!) }]);
   });
 
-  it('loads defaults when no row exists (email fully off)', async () => {
+  it('loads defaults when no row exists (email off, full identifiers ON)', async () => {
     const client = fakeClient(null);
     const result = await loadEmailNotificationPrefs(client);
     expect(result.data).toEqual({
@@ -132,7 +132,9 @@ describe('email preferences persistence contract', () => {
       adminEmail: null,
       expiryDigestEnabled: false,
       expiryRecipients: [],
-      includeFullIds: false,
+      // Product default (owner decision 2026-10-27): the Admin-only PDF carries
+      // full Passport / Civil ID values unless the Admin opts out.
+      includeFullIds: true,
     });
     expect(result.error).toBeNull();
   });
@@ -146,6 +148,36 @@ describe('email preferences persistence contract', () => {
     });
     expect(parsed.adminEmail).toBe('admin@example.com');
     expect(parsed.expiryRecipients).toEqual(['a@b.co']); // bad entry filtered
+    // A row written before the key existed keeps the FULL-value default.
+    expect(parsed.includeFullIds).toBe(true);
+  });
+
+  it('honours an explicit opt-out and round-trips it', async () => {
+    expect(parseEmailPrefs({ include_full_ids: false }).includeFullIds).toBe(false);
+    expect(parseEmailPrefs({ include_full_ids: true }).includeFullIds).toBe(true);
+    // Strings are not a stored boolean: the default stays on.
+    expect(parseEmailPrefs({ include_full_ids: 'false' }).includeFullIds).toBe(true);
+
+    const saved: unknown[] = [];
+    const client = fakeClient(null, saved);
+    const result = await saveEmailNotificationPrefs(client, {
+      enabled: false,
+      adminEmail: null,
+      expiryDigestEnabled: false,
+      expiryRecipients: [],
+      includeFullIds: false,
+    });
+    expect(result.data?.includeFullIds).toBe(false);
+    expect(saved).toEqual([{
+      key: EMAIL_PREFS_SETTINGS_KEY,
+      value: {
+        enabled: false,
+        admin_email: null,
+        expiry_digest_enabled: false,
+        expiry_recipients: [],
+        include_full_ids: false,
+      },
+    }]);
   });
 
   it('blocks saving an ON config without a valid admin email (free-tier trap guard)', () => {

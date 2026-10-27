@@ -35,7 +35,7 @@
 import { jsPDF } from 'npm:jspdf';
 
 import { bytesToBase64 } from '../_shared/base64.ts';
-import { renderDigestPdf, type PdfDocument } from '../_shared/digest-pdf.ts';
+import { PDF_DOCUMENT_OPTIONS, renderDigestPdf, type PdfDocument } from '../_shared/digest-pdf.ts';
 import { buildOutboxEmail, sanitizeDetail, type OutboxEmail } from '../_shared/outbox-email.ts';
 import {
   recipientsFrom,
@@ -119,11 +119,12 @@ function recipientFor(row: EmailOutboxRow): string | null {
  * characters are replaced with a visible marker and reported by the renderer.
  */
 function generateExpiryPdf(model: NonNullable<OutboxEmail['model']>, jsPDFClass: unknown): Uint8Array {
-  const factory = (jsPDFClass as { new (): PdfDocument });
-  const probe = new factory();
+  // Landscape A4 in POINTS (jsPDF defaults to portrait millimetres).
+  const factory = (jsPDFClass as { new (options?: unknown): PdfDocument });
+  const probe = new factory(PDF_DOCUMENT_OPTIONS);
   const first = renderDigestPdf(probe, model, { totalPages: 0 });
 
-  const doc = new factory();
+  const doc = new factory(PDF_DOCUMENT_OPTIONS);
   renderDigestPdf(doc, model, { totalPages: first.pages });
 
   const arrayBuffer = doc.output('arraybuffer') as ArrayBuffer;

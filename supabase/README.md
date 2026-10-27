@@ -252,10 +252,17 @@ Both are processed by a scheduled POST to this Edge Function, which claims rows
 server-side (service-role only — a desktop client cannot drive the queue)
 and delivers via Resend.
 
-Deploy (links the function to THIS project — adjust `<PROJECT_REF>`):
+Deploy (links the function to THIS project — adjust `<PROJECT_REF>`). The
+shared report modules live in `supabase/edge-functions/_shared/`, which the
+Supabase CLI does not bundle for a function outside its own directory, so use
+the temporary-copy method (the copy is git-ignored — never commit it):
 
 ```bash
-supabase functions deploy send-email
+mkdir -p supabase/functions
+cp -r supabase/edge-functions/_shared supabase/edge-functions/send-email \
+  supabase/functions/
+supabase functions deploy send-email --project-ref <PROJECT_REF> --no-verify-jwt
+rm -rf supabase/functions
 # REQUIRED secrets — none of these may end up in the repo / app / installer:
 supabase secrets set RESEND_API_KEY=re_...
 supabase secrets set RESEND_FROM_EMAIL="DKS <noreply@your-domain.example>"
@@ -274,17 +281,26 @@ supabase db execute -c "insert into public.settings (key, value) values \
   MUST come from a Resend-verified domain once you want real delivery.
 - Without `RESEND_API_KEY` the function returns a quiet no-op; the user
   experience never degrades (local Windows alerts keep working).
-- By default emails NEVER include passport/Civil ID values. They are masked
-  (last 4 digits) in the PDF, and the HTML/plain-text summary does not carry
-  them at all. Only an **administrator** can opt in from Settings →
-  Notifications → "Include full Passport / Civil ID values in the emailed
-  PDF"; the setting row lives behind admin-only RLS, so Office accounts
-  cannot turn it on.
-- The PDF is generated in memory (jsPDF, standard WinAnsi fonts) and attached
-  straight to the Resend call. It is never written to disk, Storage, or a
-  database table. Characters the WinAnsi font cannot encode are replaced with
-  a visible `?` and flagged in the report, so nothing is ever blank or
-  garbled silently.
+- The digest PDF is addressed to the **administrator mailbox only** (the
+  Office cannot read it), so it carries **FULL Passport / Civil ID values by
+  default** — the Admin must be able to call the customer from the email
+  alone. Settings → Notifications → "Include full Passport / Civil ID values
+  in the emailed PDF" keeps the same
+  `settings.email_notifications.include_full_ids` key and is checked by
+  default; turning it OFF masks them
+  (last 4 digits). The setting row lives behind admin-only RLS, so Office
+  accounts can never change it. The HTML/plain-text email body never carries
+  an identifier in either state — it lists record names and days left only.
+- The PDF is a landscape A4 **grid**: one row per record, one column per
+  visible Visa Sheet column in the sheet's saved order, then Expiry, Days left
+  and Status; header row on every page, alternate row shading, status colours,
+  "Page X of Y", and column groups (with the record name repeated) when the
+  columns exceed one page. It is generated in memory (jsPDF, landscape A4 in
+  points, standard WinAnsi fonts) and attached straight to the Resend call. It
+  is never written to disk, Storage, or a database table. Characters the
+  WinAnsi font cannot encode are replaced with a visible `?`, an unsupported
+  currency symbol falls back to the ISO code, and the report says so — nothing
+  is ever blank or garbled silently.
 - If PDF generation fails, the HTML/text report is still delivered (with a
   sanitized note) rather than sending nothing.
 - Email failure never blocks login, approval, or local saves — failed rows
@@ -294,10 +310,17 @@ supabase db execute -c "insert into public.settings (key, value) values \
 
 ### Upgrading an existing deployment
 
-`ARENA/sql/expiry-digest-report.sql` upgrades an already-deployed project. It
-is additive and idempotent: it preflights the existing digest function, adds
-`public.dks_parse_iso_date(text)`, rewrites `enqueue_expiry_digest()` in place
-(the old 90-day/UTC body is gone), adds the optional `include_full_ids`
-setting without clobbering an existing `true`, grants the RPCs, and prints
-read-only verification queries. Run §0 first — it only `SELECT`s. Do not run
-it against production without a backup.
+Apply these in order; both are additive and idempotent, and their preflight /
+verification sections are read-only (`SELECT`s).
+
+1. `ARENA/sql/expiry-digest-report.sql` — preflights the existing digest
+   function, adds `public.dks_parse_iso_date(text)`, rewrites
+   `enqueue_expiry_digest()` in place (the old 90-day/UTC body is gone), adds
+   the `include_full_ids` setting without clobbering an existing value, grants
+   the RPCs, and prints read-only verification queries.
+2. `ARENA/sql/digest-full-columns.sql` — sets the live `include_full_ids` to
+   `true` (every other preference preserved) and re-creates the digest builder
+   with the same full-value default.
+
+Then redeploy `send-email` with the temporary-copy command above. Do not run
+either file against production without a backup.

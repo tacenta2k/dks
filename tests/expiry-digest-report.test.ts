@@ -7,33 +7,53 @@ import { describe, expect, it } from 'vitest';
 import { jsPDF } from 'jspdf';
 
 import {
-  EXPIRY_REPORT_WINDOW_DAYS,
+  DIGEST_ATTACHMENT_SENTENCE,
+  DIGEST_EMPTY_HEADLINE,
+  EMPTY_DAY_NOTE,
   EMPTY_VALUE,
-  MAX_DETAIL_RECORDS,
+  EXPIRY_REPORT_WINDOW_DAYS,
+  MAX_INLINE_LIST_ITEMS,
   MAX_REPORT_RECORDS,
   UNNAMED_LABEL,
   buildDigestReportModel,
   computeSummary,
+  currencyFallbackNote,
+  formatDaysLeft,
   formatReportValue,
   isWinAnsiEncodable,
   maskIdentifier,
   muscatCalendarParts,
+  muscatDateTimeDisplay,
   muscatTodayIso,
   normalizeReportColumns,
   pdfAttachmentFileName,
   renderDigestHtml,
   renderDigestText,
+  reportDateTimeLabel,
   rowLabel,
   sanitizePdfText,
   selectReportEntries,
+  summaryCountItems,
+  summaryLine,
+  truncationNote,
   type ReportColumn,
   type ReportColumnType,
 } from '../supabase/edge-functions/_shared/digest-report';
-import { renderDigestPdf, type PdfDocument } from '../supabase/edge-functions/_shared/digest-pdf';
+import {
+  PDF_DOCUMENT_OPTIONS,
+  buildGridColumns,
+  buildGridTable,
+  planGridGroups,
+  renderDigestPdf,
+  type PdfDocument,
+} from '../supabase/edge-functions/_shared/digest-pdf';
+import { bytesToBase64 } from '../supabase/edge-functions/_shared/base64';
 import { buildOutboxEmail, sanitizeDetail } from '../supabase/edge-functions/_shared/outbox-email';
 import { dedupeKey } from '../supabase/edge-functions/_shared/email';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+const edgeFunctionsDir = resolve(__dirname, '../supabase/edge-functions');
+const sendEmailSource = readFileSync(resolve(edgeFunctionsDir, 'send-email/index.ts'), 'utf8');
 
 /**
  * The PDF renderer is written against a tiny document interface so it can run
@@ -118,8 +138,8 @@ class RecordingPdf implements PdfDocument {
     this.records.push({ kind: 'line', x: x1, y: y1 });
   }
 
-  rect(x: number, y: number, _w: number, _h: number): void {
-    this.records.push({ kind: 'rect', x, y });
+  rect(x: number, y: number, w: number, h: number, style?: 'S' | 'F' | 'FD' | 'FS'): void {
+    this.records.push({ kind: 'rect', x, y, w, h, style: style ?? 'S', fill: this.fillColor });
   }
 
   addPage(): void {
@@ -138,8 +158,13 @@ class RecordingPdf implements PdfDocument {
   }
 
   textsOfColor(color: [number, number, number]): string[] {
+    // Colours are compared by VALUE: each setTextColor call stores a fresh RGB
+    // triple, so reference equality would never match.
+    const expected = color.join(',');
     return this.records
-      .filter((record) => record.kind === 'text' && record.color === color)
+      .filter((record) => record.kind === 'text'
+        && Array.isArray(record.color)
+        && (record.color as number[]).join(',') === expected)
       .map((record) => String(record.text ?? ''));
   }
 }
@@ -187,21 +212,36 @@ function renderToBytes(model: ReturnType<typeof buildDigestReportModel>): {
   pages: number;
   unsupportedText: boolean;
 } {
-  const doc = new jsPDF();
-  const result = renderDigestPdf(doc, model, { totalPages: 0 });
+  const doc = new jsPDF(PDF_DOCUMENT_OPTIONS);
+  const result = renderDigestPdf(doc as never, model, { totalPages: 0 });
   const arrayBuffer = doc.output('arraybuffer') as ArrayBuffer;
   return { bytes: new Uint8Array(arrayBuffer), pages: result.pages, unsupportedText: result.unsupportedText };
 }
 
+/**
+ * Product default: FULL identifiers (the PDF goes only to the Admin mailbox).
+ * `generatedAt` is fixed so the printed Asia/Muscat date/time is deterministic.
+ */
 function model(overrides: Partial<Parameters<typeof buildDigestReportModel>[0]> = {}) {
   return buildDigestReportModel({
     reportDateIso: '2026-10-26',
+    generatedAt: '2026-10-26T10:05:00Z',
     columns: makeColumns(),
     currency: 'ر.ع.',
-    includeFullIds: false,
+    includeFullIds: true,
     entries: [],
     ...overrides,
   });
+}
+
+/** A spread of urgency bands for the layout tests (−3, 0, 5, 12 days). */
+function bandEntries() {
+  return [
+    { id: 'expired', expiry: '2026-10-23', data: { full_name: 'Ali Hassan', passport_no: 'P1234567', civil_id: '009988776655', fee: 12.5 } },
+    { id: 'today', expiry: '2026-10-26', data: { full_name: 'Sara', passport_no: 'P7654321', fee: 3 } },
+    { id: 'soon', expiry: '2026-10-31', data: { full_name: 'Omar', passport_no: 'P2222222' } },
+    { id: 'later', expiry: '2026-11-07', data: { full_name: 'Noor', passport_no: 'P3333333' } },
+  ];
 }
 
 describe('Muscat business date', () => {
@@ -316,10 +356,11 @@ describe('renewal and the next Muscat calendar day', () => {
 });
 
 describe('report window and limits', () => {
-  it('exports a 30-day window, a 200-row summary cap and a 100-block detail cap', () => {
+  it('exports a 30-day window and a single 200-row grid cap', () => {
     expect(EXPIRY_REPORT_WINDOW_DAYS).toBe(30);
     expect(MAX_REPORT_RECORDS).toBe(200);
-    expect(MAX_DETAIL_RECORDS).toBe(100);
+    // The old 100-record detail-block cap is gone: every row is a grid row.
+    expect(MAX_INLINE_LIST_ITEMS).toBeLessThan(MAX_REPORT_RECORDS);
   });
 
   it('marks truncation and reports the full qualifying count', () => {
@@ -410,10 +451,11 @@ describe('dynamic columns', () => {
       { id: 'full_name', name: 'Full Name', type: 'text', position: 1, visible: true },
     ];
     const report = model({ columns, entries: [{ id: 'r', expiry: '2026-11-02', data: { full_name: 'Ali', daysLeft: 999 } }] });
+    const headers = buildGridColumns(report).map((column) => column.header);
+    expect(headers).toEqual(['Record', 'Full Name', 'Expiry', 'Days left', 'Status']);
     const text = renderWithRecording(report).allText();
     expect(text).toContain('Expires in 7 days');
     expect(text).not.toContain('999');
-    expect(text).not.toMatch(/\bDays Left\b\s*7\b/);
   });
 });
 
@@ -491,7 +533,7 @@ describe('sensitive identifier masking', () => {
     { includeFullIds, currency },
   );
 
-  it('masks by default and keeps the value only when explicitly opted in', () => {
+  it('returns full values when the flag is on and masks only on an explicit opt-out', () => {
     expect(fmt('P1234567')).toBe(maskIdentifier('P1234567'));
     expect(fmt('P1234567')).not.toContain('P1234567');
     expect(fmt('P1234567', passport, true)).toBe('P1234567');
@@ -519,20 +561,29 @@ describe('sensitive identifier masking', () => {
     }
   });
 
-  it('masks identifiers in the PDF unless the administrator opted in', () => {
-    const entries = [{ id: 'r', expiry: '2026-11-01', data: { full_name: 'Ali', passport_no: 'P1234567' } }];
-    const masked = renderWithRecording(model({ entries })).allText();
-    expect(masked).not.toContain('P1234567');
-    expect(masked).toContain('••••');
+  it('puts FULL identifiers in the PDF by default and masks them only when opted out', () => {
+    const entries = [{ id: 'r', expiry: '2026-11-01', data: { full_name: 'Ali', passport_no: 'P1234567', civil_id: '009988776655' } }];
 
-    const full = renderWithRecording(model({ entries, includeFullIds: true })).allText();
+    // Default (flag omitted) → the Admin can read the numbers and call.
+    const full = renderWithRecording(model({ entries })).allText();
     expect(full).toContain('P1234567');
+    expect(full).toContain('009988776655');
+
+    // Explicit opt-out → masked, and the report says so.
+    const masked = renderWithRecording(model({ entries, includeFullIds: false })).allText();
+    expect(masked).not.toContain('P1234567');
+    expect(masked).not.toContain('009988776655');
+    expect(masked).toContain('••••');
+    expect(masked).toContain('Passport and Civil ID values are masked');
   });
 
-  it('says when identifiers are masked and when they are shown', () => {
+  it('says when identifiers are masked and when they are shown in full', () => {
     const entries = [{ id: 'r', expiry: '2026-11-01', data: { full_name: 'Ali', passport_no: 'P1234567' } }];
-    expect(renderDigestHtml(model({ entries }))).toMatch(/Passport and Civil ID values are masked/);
-    expect(renderDigestHtml(model({ entries, includeFullIds: true }))).not.toMatch(/are masked/);
+    expect(renderDigestHtml(model({ entries, includeFullIds: false })))
+      .toMatch(/Passport and Civil ID values are masked/);
+    const full = renderDigestHtml(model({ entries }));
+    expect(full).not.toMatch(/are masked/);
+    expect(full).toMatch(/Full Passport and Civil ID values are included/);
   });
 
   it('never shows a label derived from a sensitive identifier', () => {
@@ -576,43 +627,65 @@ describe('summary math', () => {
 });
 
 describe('report media', () => {
-  it('renders an HTML summary with inline styles and text statuses', () => {
+  it('keeps the HTML body short, styled inline and free of the grid', () => {
     const entries = [
-      { id: 'a', expiry: '2026-10-25', data: { full_name: 'Ali' } },
+      { id: 'a', expiry: '2026-10-23', data: { full_name: 'Ali' } },
       { id: 'b', expiry: '2026-10-26', data: { full_name: 'Sara' } },
-      { id: 'c', expiry: '2026-11-02', data: { full_name: 'Omar' } },
+      { id: 'c', expiry: '2026-10-31', data: { full_name: 'Omar' } },
     ];
     const html = renderDigestHtml(model({ entries }));
     expect(html).toMatch(/^<!doctype html>/i);
     expect(html).toContain('style="');
-    expect(html).toContain('<table');
-    expect(html).toContain('Expired');
-    expect(html).toContain('Expires today');
-    expect(html).toContain('Expires in 7 days');
+    expect(html).toContain(DIGEST_ATTACHMENT_SENTENCE);
+    // Summary counts, then names + days left only — never a second copy of the table.
+    expect(html).toContain('Expired: 1');
+    expect(html).toContain('Today: 1');
+    expect(html).toContain('Next 7: 1');
+    expect(html).toContain('Total: 3');
     expect(html).toContain('Ali');
-    expect(html).toContain('Report date: 26/10/2026');
-    expect(html).toContain('A PDF with the full Visa Sheet columns is attached');
+    expect(html).toContain('Expired 3 days ago');
+    expect(html).toContain('Expires today');
+    expect(html).toContain('5 days left');
+    expect(html).toContain('Report date: 26/10/2026 14:05 (Asia/Muscat)');
     expect(html).toContain('DKS-expiry-report-2026-10-26.pdf');
+    expect(html).not.toContain('<table');
   });
 
-  it('renders a plain-text fallback', () => {
-    const entries = [{ id: 'a', expiry: '2026-10-25', data: { full_name: 'Ali' } }];
-    const text = renderDigestText(model({ entries }));
+  it('renders a short plain-text fallback', () => {
+    const entries = [{ id: 'a', expiry: '2026-10-23', data: { full_name: 'Ali' } }];
+    const text = renderDigestText(model({ entries, includeFullIds: false }));
     expect(text).toContain('DKS Daily Expiry Report');
-    expect(text).toContain('Report date: 26/10/2026');
+    expect(text).toContain('Report date: 26/10/2026 14:05 (Asia/Muscat)');
+    expect(text).toContain(DIGEST_ATTACHMENT_SENTENCE);
     expect(text).toContain('Ali');
-    expect(text).toContain('Expired');
+    expect(text).toContain('Expired 3 days ago');
     expect(text).toContain('Passport and Civil ID values are masked');
-    expect(text).toContain('A PDF with the full Visa Sheet columns is attached: DKS-expiry-report-2026-10-26.pdf');
+    expect(text).toContain('Attachment: DKS-expiry-report-2026-10-26.pdf');
+    // The table is only in the PDF: no column headers in the body.
+    expect(text).not.toContain('Passport No');
   });
 
   it('explains the empty day without inventing rows', () => {
     const report = model({ entries: [] });
     const text = renderDigestText(report);
-    expect(text).toContain('All clear');
-    expect(text).toContain('nothing expiring within the next 30 days');
+    expect(text).toContain(DIGEST_EMPTY_HEADLINE);
+    expect(text).toContain(EMPTY_DAY_NOTE);
+    expect(text).not.toContain('Passport');
     expect(renderDigestHtml(report)).toContain('All clear');
     expect(report.summary.total).toBe(0);
+  });
+
+  it('prints the five summary counts in a fixed order', () => {
+    const report = model({ entries: bandEntries() });
+    expect(summaryCountItems(report)).toEqual([
+      { label: 'Expired', value: 1 },
+      { label: 'Today', value: 1 },
+      { label: 'Next 7', value: 1 },
+      { label: 'Next 30', value: 2 },
+      { label: 'Total', value: 4 },
+    ]);
+    expect(summaryLine(report)).toBe('Expired: 1 · Today: 1 · Next 7: 1 · Next 30: 2 · Total: 4');
+    expect(reportDateTimeLabel(report)).toBe('26/10/2026 14:05 (Asia/Muscat)');
   });
 
   it('builds the attachment filename from the Muscat report date', () => {
@@ -621,17 +694,30 @@ describe('report media', () => {
 });
 
 describe('PDF rendering', () => {
-  it('emits a valid PDF and reports every page', () => {
-    const entries = Array.from({ length: MAX_DETAIL_RECORDS }, (_, index) => ({
+  const manyRows = (count: number, extra: Record<string, unknown> = {}) => Array.from(
+    { length: count },
+    (_, index) => ({
       id: `r${index}`,
       expiry: '2026-11-01',
-      data: { full_name: `Row ${index}` },
-    }));
-    const { bytes, pages } = renderToBytes(model({ entries }));
+      data: { full_name: `Row ${index}`, ...extra },
+    }),
+  );
+
+  it('emits a valid PDF and reports every page', () => {
+    const { bytes, pages } = renderToBytes(model({ entries: manyRows(120) }));
     expect(pages).toBeGreaterThan(1);
     const header = new TextDecoder('latin1').decode(bytes.slice(0, 4));
     expect(header).toBe('%PDF');
     expect(bytes.length).toBeGreaterThan(1000);
+  });
+
+  it('produces a LANDSCAPE A4 page (pt), not portrait millimetres', () => {
+    expect(PDF_DOCUMENT_OPTIONS).toEqual({ orientation: 'landscape', unit: 'pt', format: 'a4' });
+    const { bytes } = renderToBytes(model({ entries: manyRows(3) }));
+    const text = new TextDecoder('latin1').decode(bytes);
+    // 841.89 x 595.28 pt = A4 rotated. Portrait (or a mm page) fails here.
+    expect(text).toMatch(/\/MediaBox\s*\[0 0 841\.\d+ 595\.\d+\]/);
+    expect(sendEmailSource).toContain('PDF_DOCUMENT_OPTIONS');
   });
 
   it('is a single page with the calm message when nothing qualifies', () => {
@@ -643,12 +729,7 @@ describe('PDF rendering', () => {
   });
 
   it('paginates and prints Page X of Y footers', () => {
-    const entries = Array.from({ length: MAX_DETAIL_RECORDS }, (_, index) => ({
-      id: `r${index}`,
-      expiry: '2026-11-01',
-      data: { full_name: `Row ${index}` },
-    }));
-    const doc = renderWithRecording(model({ entries }));
+    const doc = renderWithRecording(model({ entries: manyRows(120) }));
     expect(doc.pages).toBeGreaterThan(1);
     const footers = doc.allText().split('\n').filter((line) => line.startsWith('Page '));
     expect(footers.length).toBeGreaterThan(1);
@@ -656,17 +737,15 @@ describe('PDF rendering', () => {
     expect(new Set(footers.map((line) => line.split(' of ')[1])).size).toBe(1);
   });
 
-  it('never splits a detail block across a page boundary', () => {
-    const entries = Array.from({ length: MAX_DETAIL_RECORDS }, (_, index) => ({
-      id: `r${index}`,
-      expiry: '2026-11-01',
-      data: { full_name: `Row ${index}`, notes: 'a reasonably long note that should wrap onto several lines' },
+  it('repeats the header row on every page', () => {
+    const doc = renderWithRecording(model({
+      entries: manyRows(120, { notes: 'a reasonably long note that should wrap onto several lines' }),
     }));
-    const doc = renderWithRecording(model({ entries }));
-    const lastIndex = doc.records.filter((record) => record.kind === 'text').length;
-    expect(lastIndex).toBeGreaterThan(0);
-    // The footer is drawn on the page it belongs to, and a new page was opened.
     expect(doc.pages).toBeGreaterThan(1);
+    const headerDraws = doc.records
+      .filter((record) => record.kind === 'text' && record.text === 'Full Name').length;
+    // One header row per page, including the pages that only continue rows.
+    expect(headerDraws).toBe(doc.pages);
     expect(doc.allText()).toContain('Generated by DKS');
   });
 
@@ -686,11 +765,10 @@ describe('PDF rendering', () => {
     const long = 'n'.repeat(300);
     const entries = [{ id: 'a', expiry: '2026-11-01', data: { full_name: long } }];
     const doc = renderWithRecording(model({ entries }));
-    const joined = doc.records
-      .filter((record) => record.kind === 'text')
-      .map((record) => String(record.text ?? ''))
-      .join(' ');
-    expect(joined).toContain('n'.repeat(200));
+    // The cell wraps (and hard-splits if needed), so every character survives.
+    const drawn = doc.allText().match(/n+/g) ?? [];
+    const total = drawn.reduce((sum, run) => sum + run.length, 0);
+    expect(total).toBeGreaterThanOrEqual(300);
   });
 
   it('reports characters the WinAnsi font cannot encode instead of garbling them', () => {
@@ -707,26 +785,35 @@ describe('PDF rendering', () => {
     expect(sanitizePdfText('Ali').text).toBe('Ali');
   });
 
-  it('says identifiers are masked and lists every active column in the detail blocks', () => {
+  it('says identifiers are masked and lists every active column as a header', () => {
     const entries = [{ id: 'a', expiry: '2026-11-01', data: { full_name: 'Ali', passport_no: 'P1234567' } }];
-    const doc = renderWithRecording(model({ entries }));
+    const doc = renderWithRecording(model({ entries, includeFullIds: false }));
     const text = doc.allText();
     expect(text).toContain('Passport and Civil ID values are masked');
-    // Detail block: label, then each active column in workspace order.
-    expect(text).toContain('Full Name');
-    expect(text).toContain('Passport No');
-    expect(text).toContain('Visa Expiry');
-    expect(text).toContain('Notes');
+    // Every active column is a grid header, in the sheet's saved order.
+    for (const header of ['Record', 'Full Name', 'Passport No', 'Civil ID', 'Visa Expiry', 'Fee', 'Active', 'Notes', 'Expiry', 'Days left', 'Status']) {
+      expect(text).toContain(header);
+    }
   });
 
-  it('truncates the detail blocks beyond the cap and says so', () => {
-    const entries = Array.from({ length: MAX_DETAIL_RECORDS + 5 }, (_, index) => ({
-      id: `r${index}`,
-      expiry: '2026-11-01',
-      data: { full_name: `Row ${index}` },
-    }));
+  it('states the 200-row cap on the last page instead of dropping rows silently', () => {
+    const doc = renderWithRecording(model({ entries: manyRows(205), totalQualifying: 230 }));
+    expect(doc.allText()).toContain('most urgent of 230');
+  });
+
+  it('notes a currency symbol the PDF font cannot encode', () => {
+    expect(currencyFallbackNote(model({ entries: bandEntries() })))
+      .toMatch(/amounts show the OMR code/);
+    const doc = renderWithRecording(model({ entries: bandEntries() }));
+    expect(doc.allText()).toContain('amounts show the OMR code');
+    expect(doc.allText()).toContain('OMR 12.500');
+    expect(doc.allText()).not.toContain('????');
+  });
+
+  it('notes characters the font had to replace', () => {
+    const entries = [{ id: 'a', expiry: '2026-11-01', data: { full_name: 'عمر' } }];
     const doc = renderWithRecording(model({ entries }));
-    expect(doc.allText()).toContain('Detail blocks are truncated to the first 100 records');
+    expect(doc.allText()).toContain("cannot be encoded by the PDF font and are shown as '?'");
   });
 });
 
@@ -760,6 +847,25 @@ describe('outbox email assembly', () => {
     expect(built.pdfFileName).toBe('DKS-expiry-report-2026-10-26.pdf');
     expect(built.subject).toBe('DKS Daily Expiry Report — 26/10/2026');
     expect(built.html).toContain('Ali');
+    expect(built.html).toContain(DIGEST_ATTACHMENT_SENTENCE);
+    expect(built.model?.includeFullIds).toBe(false);
+  });
+
+  it('defaults to FULL identifiers when the queued payload predates the flag', () => {
+    const legacy = buildOutboxEmail({
+      kind: 'expiry_digest',
+      payload: {
+        reportDate: '2026-10-26',
+        columns: makeColumns(),
+        entries: [{ id: 'a', expiry: '2026-11-01', data: { full_name: 'Ali', passport_no: 'P1234567' } }],
+      },
+    })!;
+    // No includeFullIds key at all → the Admin-only PDF still gets the numbers…
+    expect(legacy.model?.includeFullIds).toBe(true);
+    expect(renderWithRecording(legacy.model!).allText()).toContain('P1234567');
+    // …while the email body never does, whatever the flag says.
+    expect(legacy.html).not.toContain('P1234567');
+    expect(legacy.text).not.toContain('P1234567');
   });
 
   it('refuses an unknown row kind', () => {
@@ -781,6 +887,220 @@ describe('outbox email assembly', () => {
   });
 });
 
+describe('Excel-like landscape grid', () => {
+  it('has one row per record and every visible column in the saved order', () => {
+    const report = model({ entries: bandEntries() });
+    const columns = buildGridColumns(report);
+    // Record label, then each visible Visa Sheet column in `position` order.
+    expect(columns.map((column) => column.header)).toEqual([
+      'Record', 'Full Name', 'Passport No', 'Civil ID', 'Visa Expiry', 'Fee', 'Active', 'Notes',
+      'Expiry', 'Days left', 'Status',
+    ]);
+    const table = buildGridTable(report);
+    expect(table.rows).toHaveLength(4);
+    for (const row of table.rows) {
+      expect(row.cells).toHaveLength(columns.length);
+    }
+  });
+
+  it('prints DD/MM/YYYY expiry and sentence-form days left in separate columns', () => {
+    const report = model({ entries: bandEntries() });
+    const doc = renderWithRecording(report);
+    const text = doc.allText();
+    expect(text).toContain('Expiry');
+    expect(text).toContain('Days left');
+    expect(text).toContain('Status');
+    expect(text).toContain('23/10/2026');
+    expect(text).toContain('Expired 3 days ago');
+    expect(text).toContain('Expires today');
+    expect(text).toContain('5 days left');
+    expect(text).toContain('12 days left');
+  });
+
+  it('shades alternate rows', () => {
+    const doc = renderWithRecording(model({ entries: bandEntries() }));
+    const fills = doc.records.filter((record) => record.kind === 'rect' && record.style === 'F');
+    const rowBands = fills.filter((record) => String(record.fill) === String([249, 250, 251]));
+    // Rows 1 and 3 (0-based odd indexes) carry the alternate grey band.
+    expect(rowBands.length).toBe(2);
+    for (const band of rowBands) {
+      expect(Number(band.h)).toBeGreaterThan(8);
+    }
+  });
+
+  it('colours expired/today red, 1–7 amber and the rest neutral', () => {
+    const doc = renderWithRecording(model({ entries: bandEntries() }));
+    const red = doc.textsOfColor([179, 38, 30]).join(' | ');
+    const darkRed = doc.textsOfColor([138, 28, 28]).join(' | ');
+    const amber = doc.textsOfColor([138, 90, 0]).join(' | ');
+    expect(darkRed).toContain('Expired');
+    expect(red).toContain('Expires today');
+    expect(amber).toContain('Expires in 5 days');
+    // A 12-day row is neutral (the body text colour).
+    expect(doc.textsOfColor([52, 56, 62]).join(' | ')).toContain('Expires in 12 days');
+  });
+
+  it('splits wide sheets into column groups and repeats the record name per group', () => {
+    const wide = Array.from({ length: 26 }, (_, index) => ({
+      id: `field_${index}`,
+      name: `Field Number ${index}`,
+      type: 'text' as ReportColumnType,
+      position: index,
+      visible: true,
+    }));
+    const entries = [0, 1, 2].map((row) => ({
+      id: `r${row}`,
+      expiry: '2026-11-01',
+      data: { field_0: `Record ${row}` },
+    }));
+    const report = model({ columns: wide, entries });
+    const table = buildGridTable(report);
+    const groups = planGridGroups(new jsPDF(PDF_DOCUMENT_OPTIONS) as never, table);
+
+    expect(groups.length).toBeGreaterThan(1);
+    // Every group starts with the record-name column; continuations say so.
+    expect(groups[0].columns[0].header).toBe('Record');
+    for (const group of groups.slice(1)) {
+      expect(group.columns[0].header).toBe('Record (continued)');
+    }
+    // No visible column is ever dropped, and none is printed twice.
+    const printed = groups.flatMap((group) => group.columns.slice(1).map((column) => column.header));
+    expect(printed).toEqual(table.columns.slice(1).map((column) => column.header));
+
+    const doc = renderWithRecording(report);
+    expect(doc.allText()).toContain('Visa Sheet columns continued');
+    expect(doc.allText()).toContain('Record (continued)');
+    // Each group repeats the record name for its rows.
+    const labels = doc.records.filter((record) => record.kind === 'text' && record.text === 'Record 0');
+    expect(labels.length).toBeGreaterThanOrEqual(groups.length);
+  });
+
+  it('prints the summary counts above the table', () => {
+    const doc = renderWithRecording(model({ entries: bandEntries() }));
+    const text = doc.allText();
+    for (const label of ['Expired:', 'Today:', 'Next 7:', 'Next 30:', 'Total:']) {
+      expect(text).toContain(label);
+    }
+    expect(text).toContain('26/10/2026 14:05 (Asia/Muscat)');
+  });
+
+  it('keeps every group inside the landscape page width and wraps cells', () => {
+    const wide = Array.from({ length: 14 }, (_, index) => ({
+      id: `field_${index}`,
+      name: `Field ${index}`,
+      type: 'text' as ReportColumnType,
+      position: index,
+      visible: true,
+    }));
+    const report = model({
+      columns: wide,
+      entries: [{ id: 'r', expiry: '2026-11-01', data: { field_0: 'word '.repeat(40).trim() } }],
+    });
+    const table = buildGridTable(report);
+    for (const group of planGridGroups(new jsPDF(PDF_DOCUMENT_OPTIONS) as never, table)) {
+      const total = group.widths.reduce((sum, width) => sum + width, 0);
+      expect(total).toBeCloseTo(797.89, 1);
+      for (const width of group.widths) {
+        expect(width).toBeGreaterThan(10);
+      }
+    }
+  });
+});
+
+describe('days-left wording', () => {
+  it('spells each band out in words', () => {
+    expect(formatDaysLeft(-3)).toBe('Expired 3 days ago');
+    expect(formatDaysLeft(-1)).toBe('Expired 1 day ago');
+    expect(formatDaysLeft(0)).toBe('Expires today');
+    expect(formatDaysLeft(1)).toBe('1 day left');
+    expect(formatDaysLeft(12)).toBe('12 days left');
+  });
+
+  it('keeps the terse status text alongside it', () => {
+    const entries = [
+      { id: 'a', expiry: '2026-10-23', data: {} },
+      { id: 'b', expiry: '2026-10-26', data: {} },
+      { id: 'c', expiry: '2026-10-27', data: {} },
+      { id: 'd', expiry: '2026-11-07', data: {} },
+    ];
+    const selected = selectReportEntries(entries, makeColumns(), '2026-10-26');
+    expect(selected.map((entry) => entry.status)).toEqual([
+      'Expired', 'Expires today', 'Expires in 1 day', 'Expires in 12 days',
+    ]);
+    expect(selected.map((entry) => formatDaysLeft(entry.daysLeft))).toEqual([
+      'Expired 3 days ago', 'Expires today', '1 day left', '12 days left',
+    ]);
+  });
+});
+
+describe('attachment payload', () => {
+  it('names the attachment from the Muscat report date', () => {
+    const report = model({ entries: bandEntries() });
+    expect(report.pdfFileName).toBe('DKS-expiry-report-2026-10-26.pdf');
+    expect(pdfAttachmentFileName('2026-12-31')).toBe('DKS-expiry-report-2026-12-31.pdf');
+  });
+
+  it('base64-encodes the real PDF bytes (application/pdf shape)', () => {
+    const report = model({ entries: bandEntries() });
+    const { bytes } = renderToBytes(report);
+    const base64 = bytesToBase64(bytes);
+    expect(base64).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    expect(base64.length % 4).toBe(0);
+    const decoded = new TextDecoder('latin1').decode(
+      Uint8Array.from(Buffer.from(base64, 'base64')),
+    );
+    expect(decoded.slice(0, 4)).toBe('%PDF');
+    expect(decoded.length).toBe(bytes.length);
+    // The Edge Function sends exactly this shape through Resend.
+    expect(sendEmailSource).toContain('content_type: \'application/pdf\'');
+    expect(sendEmailSource).toContain('content: bytesToBase64(bytes)');
+  });
+});
+
+describe('full-identifier defaults in SQL and repo hygiene', () => {
+  const schema = readFileSync(resolve(__dirname, '../supabase/schema.sql'), 'utf8');
+  const migrationPath = resolve(__dirname, '../ARENA/sql/digest-full-columns.sql');
+  const migration = readFileSync(migrationPath, 'utf8');
+
+  it('defaults include_full_ids to true in the fresh-install schema', () => {
+    expect(schema).toMatch(/'include_full_ids', true/);
+    expect(schema).not.toMatch(/'include_full_ids', false/);
+    // The builder also defaults to the "full" read of the preference.
+    expect(schema).toMatch(/coalesce\(\(v_prefs ->> 'include_full_ids'\)::boolean, true\)/);
+  });
+
+  it('ships an idempotent migration that turns the live preference on', () => {
+    expect(migration).toContain('begin;');
+    expect(migration).toContain('commit;');
+    expect(migration).toMatch(/update public\.settings[\s\S]*?'include_full_ids', true/);
+    expect(migration).toContain('on conflict (key) do nothing');
+    expect(migration).toMatch(/coalesce\(\(v_prefs ->> 'include_full_ids'\)::boolean, true\)/);
+    // Additive only: no policy, trigger, cron or table change.
+    const statements = migration
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('--'))
+      .join('\n')
+      .toLowerCase();
+    expect(statements).not.toMatch(/create policy|drop policy|alter policy/);
+    expect(statements).not.toMatch(/create trigger|drop trigger|cron\.schedule|cron\.unschedule/);
+    expect(statements).not.toMatch(/create table|alter table|drop table/);
+  });
+
+  it('ignores the temporary deploy copy of the edge functions', () => {
+    const gitignore = readFileSync(resolve(__dirname, '../.gitignore'), 'utf8');
+    expect(gitignore).toMatch(/^supabase\/functions\/$/m);
+  });
+
+  it('keeps the .ts extension on the digest module imports (deploy guard)', () => {
+    for (const file of ['_shared/digest-report.ts', '_shared/digest-pdf.ts', '_shared/outbox-email.ts', 'send-email/index.ts']) {
+      const source = readFileSync(join(edgeFunctionsDir, file), 'utf8');
+      for (const match of source.matchAll(/from\s+'(\.[^']+)'/g)) {
+        expect(match[1], `${file} import ${match[1]}`).toMatch(/\.ts$/);
+      }
+    }
+  });
+});
+
 describe('privacy and persistence guardrails', () => {
   function walk(dir: string): string[] {
     if (!existsSync(dir)) {
@@ -797,8 +1117,6 @@ describe('privacy and persistence guardrails', () => {
     }
     return out;
   }
-
-  const edgeFunctionsDir = resolve(__dirname, '../supabase/edge-functions');
 
   it('never writes to disk, Storage or the database from the edge functions', () => {
     const files = walk(edgeFunctionsDir);
