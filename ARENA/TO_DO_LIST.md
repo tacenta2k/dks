@@ -66,6 +66,28 @@ retried or cleared; coordinate resolution with the administrator.
 
 ---
 
+## Live Visa Sheet — two PCs, same sheet (2026-10-27)
+
+Owner's decision: **change notification only.** No keystroke/cell streaming.
+The server publishes the two data tables; a client treats every event as
+"something changed", coalesces for ~1 s and runs the EXISTING pull/reconcile,
+which refreshes the mounted pages quietly. Payloads are never applied, so
+last-write-wins and the outbox keep their current semantics.
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| LIVE-01 | `public.entries` and `public.app_columns` are added to the `supabase_realtime` publication idempotently: fresh install in `supabase/schema.sql`, existing projects via `ARENA/sql/realtime-live-sheet.sql` (read-only preflight + transaction + read-only verification). **No policy, grant or RLS change** — Realtime `postgres_changes` is filtered by the existing SELECT policies, so Office never receives a row it cannot read and a pending/revoked session receives nothing. The migration aborts if RLS is disabled on either table, if there is no authenticated SELECT policy, or if an anonymous read policy exists. | IMPLEMENTED_AWAITING_CONFIRMATION (owner must run `ARENA/sql/realtime-live-sheet.sql`) |
+| LIVE-02 | Renderer: ONE Realtime channel per signed-in client on `entries` + `app_columns` (INSERT/UPDATE/DELETE). Events are wake-ups only → coalesced for ~1 s → the existing reconcile → quiet refresh of Sheet/Dashboard/Recycle Bin through `refreshToken` (no remount, no loading overlay). Subscription only while authenticated and (Office) approved for the current session; disposed on sign-out, revocation and the clearance-pending gate. | IMPLEMENTED_AWAITING_CONFIRMATION |
+| LIVE-03 | Push semantics unchanged: the 1.5 s debounce after a local write is kept (never per keystroke) and the 60 s timer sync remains the fallback. `CLOSED`/`CHANNEL_ERROR`/`TIMED_OUT` reconnect with exponential backoff + jitter (1 s → 30 s) and run exactly ONE catch-up sync on re-subscribe. Wake-ups arriving while this device's own sync runs are skipped as an echo hint (best effort; correctness never depends on it). | IMPLEMENTED_AWAITING_CONFIRMATION |
+| LIVE-04 | No editing regression: a Realtime-triggered refresh uses the same quiet path as every other background sync, so an open cell editor, its typed text, dialogs and focus survive; draft row, reorder and keyboard contracts are untouched. Sync pill wording, colours and popover are unchanged (nothing noisy added). | IMPLEMENTED_AWAITING_CONFIRMATION |
+
+Owner steps: run the preflight, the transaction and the verification in
+`ARENA/sql/realtime-live-sheet.sql` (in the Supabase SQL editor), then perform
+the 2-PC test described in `ARENA/ARENA_PROGRESS.md` §36. Nothing here is
+verified against the live project by the agent.
+
+---
+
 ## 1. Critical blockers
 
 | ID | Source | Requirement | Type | Status |
