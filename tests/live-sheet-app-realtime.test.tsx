@@ -122,7 +122,7 @@ function installLocalBridge() {
   const syncState = { status: 'offline' as const, lastSyncAt: null, lastError: null, pendingCount: 0 };
   const snapshot = { rows: [], deletedRows: [], columns: [], syncStatus: syncState };
   const local = {
-    setSessionClearance: vi.fn(async (next: string) => next),
+    setSessionClearance: vi.fn(async (next: string | { state: string }) => (typeof next === 'string' ? next : next.state)),
     getSnapshot: vi.fn(async () => snapshot),
     applyRemoteSnapshot: vi.fn(async () => snapshot),
     setSyncStatus: vi.fn(async (state: object) => ({ ...syncState, ...state })),

@@ -108,6 +108,14 @@
   justify-content: flex-end;
 }
 
+/* OW-04: Office 3-day visibility note (Admin UI unchanged). */
+.sheet-toolbar__window-note {
+  flex: 1 0 100%;
+  margin: 0;
+  font-size: 11px;
+  color: var(--color-text-muted);
+}
+
 .sheet-column-manager__header {
   display: flex;
   align-items: center;

@@ -88,6 +88,35 @@ verified against the live project by the agent.
 
 ---
 
+## Office 3-day visibility window (2026-10-27)
+
+Owner decision (exact): **Office may see and work with only records CREATED in
+the last 3 calendar days (Asia/Muscat), today included. Admin sees everything
+(unchanged).** Office-visible iff `deleted = false` AND
+`(created_at AT TIME ZONE 'Asia/Muscat')::date >= (now() AT TIME ZONE 'Asia/Muscat')::date - 3`.
+Acceptance example: created Mon(2), Tue(3), Wed(3), Thu(3), Fri(3) = 14 rows;
+on Friday Office sees Tue+Wed+Thu+Fri = 12 (Mon's 2 hidden), Admin sees all 14.
+Creation date only — an Admin edit to Monday's record does NOT bring it back.
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| OW-01 | RLS layer: the shared visibility helper `office_entry_is_visible()` gains the window predicate above (soft-delete marker allowance kept); Office entries SELECT + `entry_visibility()` still use it. Office entries UPDATE (USING + WITH CHECK) gets the same predicate, keeping the soft-delete allowance and `guard_office_restore`. INSERT for Office gets NO window (an offline create from 4 days ago must still sync) plus a trigger clamp (Office inserts cannot set `created_at` in the future → `now()`; `created_by`/`created_at` stay immutable on update). `renew_entry()` and `column_is_empty()` (Office-callable RPCs touching entries) use the same predicate for Office; renewals SELECT for Office only for Office-visible entries. Admin policies unchanged. `supabase/schema.sql` + idempotent `ARENA/sql/office-3-day-window.sql` (preflight + transaction + verification; run AFTER `entry-visibility.sql`). | IMPLEMENTED_AWAITING_CONFIRMATION (owner must run `ARENA/sql/office-3-day-window.sql`) |
+| OW-02 | Local SQLite (Office devices): a VISIBILITY PURGE removes out-of-window rows from the local cache (no outbox item, no audit, no server effect) when a remote snapshot is applied, at launch and when the Muscat date changes. Locally created, still-unsynced rows (any non-synced outbox work) are never purged until pushed. Local reads for the Office role filter by the same window + `deleted = false` (defense in depth), except rows with unsynced outbox work which stay readable until pushed ("fall out of view naturally" afterwards). Role/scope comes from the existing session-clearance/role mechanisms only (no new renderer flags for Admin scope; Admin reads unchanged). | IMPLEMENTED_AWAITING_CONFIRMATION |
+| OW-03 | Sync unchanged where it matters: rows missing from the Office remote fetch are never treated as server-deleted and never re-INSERTed (outbox-driven INSERT/UPDATE from the sync fix). Pending outbox changes to rows that left the window follow the existing terminal-state path (`entry_visibility` → `hidden` → clear message, no retry loop, no server-side data loss). Realtime unchanged (RLS filters events). | IMPLEMENTED_AWAITING_CONFIRMATION (behaviour covered by OW-01 SQL + existing sync fix) |
+| OW-04 | Renderer: Office Sheet, Dashboard counts, bell alerts, duplicate passport/Civil ID warnings and search all consume the local (already-scoped) snapshot — no extra filtering needed. Office Sheet toolbar shows "Showing records from the last 3 days." Admin UI unchanged. | IMPLEMENTED_AWAITING_CONFIRMATION |
+
+Owner steps: run `ARENA/sql/office-3-day-window.sql` in the Supabase SQL editor
+(section 0 preflight first; it aborts on unexpected policies or a missing
+prerequisite helper), then the section 1 transaction and section 2 verification.
+SQL order on an existing project: `entry-visibility.sql` →
+`realtime-office-approval.sql` → `realtime-live-sheet.sql` →
+`office-3-day-window.sql` LAST (it must be the final word on the shared
+helper). Install a build of this branch on the Office PC; see the manual
+script in `ARENA/ARENA_PROGRESS.md` §37. Nothing here is verified against the
+live project by the agent.
+
+---
+
 ## 1. Critical blockers
 
 | ID | Source | Requirement | Type | Status |

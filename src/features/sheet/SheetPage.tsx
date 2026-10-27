@@ -922,6 +922,13 @@ export function SheetPage({
             <div className="sheet-toolbar__actions">
               {toolsMenu}
             </div>
+            {/* OW-04: Office sees only records created in the last 3 calendar
+                days (Asia/Muscat). Admin UI is unchanged. */}
+            {role === 'office' ? (
+              <p className="sheet-toolbar__window-note" role="note">
+                Showing records from the last 3 days.
+              </p>
+            ) : null}
           </div>
 
           {duplicatePassportValues.size > 0 ? (

@@ -283,17 +283,23 @@ export function App({
     && (profile?.role !== 'office' || (officeSnapshotReady && officePreparation?.phase === 'ready'));
   const syncAllowed = profile?.role === 'office' ? officeSnapshotReady : isWorkspaceVisible;
 
-  const pushClearance = useCallback((state: 'office-pending' | 'allowed'): Promise<void> => {
-    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
-    const next = clearanceQueue.current.catch(() => undefined).then(async () => {
-      if (!local) return; // browser/demo tests without the desktop bridge
-      if (!local.setSessionClearance) throw new Error('Local session clearance is unavailable.');
-      const actual = await local.setSessionClearance(state);
-      if (actual !== state) throw new Error('Local session clearance could not be changed.');
-    });
-    clearanceQueue.current = next.catch(() => undefined);
-    return next;
-  }, []);
+  const pushClearance = useCallback(
+    (state: 'office-pending' | 'allowed', role?: 'admin' | 'office' | null): Promise<void> => {
+      const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
+      const next = clearanceQueue.current.catch(() => undefined).then(async () => {
+        if (!local) return; // browser/demo tests without the desktop bridge
+        if (!local.setSessionClearance) throw new Error('Local session clearance is unavailable.');
+        // The object form reports the session role through the EXISTING
+        // clearance mechanism, so the local store can scope Office reads to
+        // the 3-day creation window (Admin reads stay unfiltered).
+        const actual = await local.setSessionClearance(role === undefined ? state : { state, role });
+        if (actual !== state) throw new Error('Local session clearance could not be changed.');
+      });
+      clearanceQueue.current = next.catch(() => undefined);
+      return next;
+    },
+    [],
+  );
 
   // Preload notifies on every successful customer-data IPC operation. Neither
   // a clearance change nor close counts as a successful database operation.
@@ -308,8 +314,13 @@ export function App({
     if (!officeSignedIn && !decisionBlocked) {
       setOfficePreparation(null);
       setPreparationError(null);
-      // Admin/demo/sign-out must release a prior Office fence as well.
-      void pushClearance('allowed').catch(() => undefined);
+      // Admin/demo/sign-out must release a prior Office fence as well. The
+      // reported role scopes local reads: Admin = unfiltered, sign-out/demo =
+      // unreported (legacy reads; the purge never runs without an Office role).
+      void pushClearance(
+        'allowed',
+        authStatus === 'authenticated' && profile?.role === 'admin' ? 'admin' : null,
+      ).catch(() => undefined);
       return () => { cancelled = true; };
     }
     if (!officeApproved) {
@@ -317,7 +328,7 @@ export function App({
       setPreparationError(null);
       void (async () => {
         try {
-          await pushClearance('office-pending');
+          await pushClearance('office-pending', 'office');
         } catch (error) {
           if (!cancelled) setPreparationError(localStoreErrorMessage(error));
         } finally {
@@ -331,10 +342,10 @@ export function App({
 
     void (async () => {
       try {
-        await pushClearance('allowed');
+        await pushClearance('allowed', 'office');
         if (cancelled || appStore.getState().sessionApproval !== 'approved') return;
         if (local?.getSnapshot) {
-          const snapshot = await local.getSnapshot();
+          const snapshot = await local.getSnapshot({ role: 'office' });
           if (cancelled || appStore.getState().sessionApproval !== 'approved') return;
           setLocalStoreError(null);
           if (snapshot.syncStatus) setSyncStatus(snapshot.syncStatus);
@@ -350,7 +361,7 @@ export function App({
       }
     })();
     return () => { cancelled = true; };
-  }, [appStore, officeSignedIn, decisionBlocked, officeApproved, pushClearance, requestId, preparationAttempt]);
+  }, [appStore, authStatus, profile?.role, officeSignedIn, decisionBlocked, officeApproved, pushClearance, requestId, preparationAttempt]);
 
   // One approval channel per signed-in client. Payloads are deliberately
   // ignored: only my_office_signin() can change the approval state. Polling
@@ -669,13 +680,20 @@ export function App({
     let running = false;
     let runStartedAt = 0;
     const syncLocal: SupabaseSyncLocal = {
-      getSnapshot: () => local.getSnapshot(),
+      // The sync engine reads the SAME scoped snapshot as the UI: Office reads
+      // are filtered to the 3-day window except rows with unsynced outbox work
+      // (which the engine must see to push). Role is read at call time so a
+      // session change can never leak a stale scope into a sync run.
+      getSnapshot: () => local.getSnapshot({ role: appStore.getState().profile?.role ?? undefined }),
       setSyncStatus: async (state) => {
         const next = await local.setSyncStatus(state as Parameters<typeof local.setSyncStatus>[0]);
         setSyncStatus(next);
         return next;
       },
-      applyRemoteSnapshot: (input) => local.applyRemoteSnapshot?.(input)
+      applyRemoteSnapshot: (input) => local.applyRemoteSnapshot?.({
+        ...input,
+        role: appStore.getState().profile?.role ?? undefined,
+      })
         ?? Promise.reject(new Error('Remote snapshot application is unavailable')),
       acknowledgeOutbox: async () => {
         const next = await local.acknowledgeOutbox?.() ?? {
@@ -837,7 +855,7 @@ export function App({
     }
     let cancelled = false;
     void local
-      .getSnapshot()
+      .getSnapshot({ role: appStore.getState().profile?.role ?? undefined })
       .then((snapshot) => {
         if (cancelled) {
           return;

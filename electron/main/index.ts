@@ -168,6 +168,8 @@ let localStore: SqliteStore | undefined;
 let unregisterLocalIpc: (() => void) | undefined;
 let unregisterLocalClearance: (() => void) | undefined;
 const localSessionClearance = createLocalSessionClearance('allowed');
+/** Office 3-day window: purge check at Muscat-midnight rollover (and launch). */
+let localPurgeTimer: ReturnType<typeof setInterval> | undefined;
 /** R7: why the local store is unavailable, shared with the failure stubs. */
 let localStoreFailure: LocalStoreFailure | null = null;
 let unregisterLocalStoreFailureIpc: (() => void) | undefined;
@@ -418,6 +420,10 @@ export function requestQuit(): void {
 }
 
 function closeLocalStore(): void {
+  if (localPurgeTimer) {
+    clearInterval(localPurgeTimer);
+    localPurgeTimer = undefined;
+  }
   if (unregisterLocalIpc) {
     safeInvoke(() => unregisterLocalIpc?.());
     unregisterLocalIpc = undefined;
@@ -496,7 +502,25 @@ function openLocalStore(): void {
       ipcMain: ipcMain as unknown as LocalIpcMain,
       store: localStore,
       sessionClearance: localSessionClearance.get,
+      sessionRole: localSessionClearance.getRole,
     });
+    // Office 3-day window: the visibility purge runs "at launch and when the
+    // Muscat date changes" for the Office session scope reported through the
+    // existing clearance mechanism (Admin/unknown never purge). Office reads
+    // run the same date-guarded purge; this timer keeps it honest while the
+    // renderer is idle across a Muscat midnight.
+    const purgeIfDue = (): void => {
+      try {
+        if (localStore && localSessionClearance.getRole() === 'office') {
+          localStore.purgeOutOfWindowOfficeEntries({ onlyIfDateChanged: true });
+        }
+      } catch {
+        // Best effort: the next Office read retries the purge.
+      }
+    };
+    purgeIfDue();
+    if (localPurgeTimer) clearInterval(localPurgeTimer);
+    localPurgeTimer = setInterval(purgeIfDue, 60_000);
     log.info('[dks] local SQLite store opened and IPC handlers registered');
   } catch (error) {
     // The shell and cloud features can still start when local storage is not

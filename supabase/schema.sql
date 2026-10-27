@@ -162,6 +162,9 @@ $$;
 
 -- Both accounts may edit live rows.  The creator must not change afterwards,
 -- and Office must never be able to restore a deleted row through an UPDATE.
+-- Office inserts additionally clamp a future created_at to now(): the Office
+-- 3-day visibility window keys off the CREATION date, so a future timestamp
+-- must never smuggle a record into Office view (Admin inserts are untouched).
 create or replace function public.entries_keep_created_by()
 returns trigger
 language plpgsql
@@ -169,6 +172,12 @@ security definer
 set search_path = public
 as $$
 begin
+  if tg_op = 'INSERT' then
+    if public.is_office() and new.created_at > now() then
+      new.created_at := now();
+    end if;
+    return new;
+  end if;
   new.created_by := old.created_by;
   new.created_at := old.created_at;
   return new;
@@ -498,11 +507,15 @@ begin
     raise exception 'Column does not exist' using errcode = '22023';
   end if;
 
+  -- Office-callable RPC touching entries: Office may only "see" entries inside
+  -- its 3-day creation window, so only those rows can keep a column alive for
+  -- an Office delete. Admin keeps counting every live row (unchanged).
   return not exists (
     select 1
-      from public.entries
-     where not deleted
-       and nullif(trim(data ->> column_name), '') is not null
+      from public.entries e
+     where not e.deleted
+       and (not public.is_office() or public.office_entry_is_visible(e))
+       and nullif(trim(e.data ->> column_name), '') is not null
   );
 end;
 $$;
@@ -632,6 +645,14 @@ begin
 
   if not found then
     raise exception 'Entry does not exist or is deleted' using errcode = '22023';
+  end if;
+
+  -- Office-callable RPC touching entries: Office may only renew entries it can
+  -- see (live and inside the 3-day creation window). Admin is unchanged. The
+  -- shared helper carries the same predicate as the entries SELECT policy.
+  if not public.is_admin() and not public.office_entry_is_visible(entry_row) then
+    raise exception 'This record can no longer be changed from the Office account'
+      using errcode = '42501';
   end if;
 
   select name
@@ -805,6 +826,10 @@ execute function dks_private.end_office_entry_soft_delete();
 -- This is the ONE Office visibility predicate shared by RLS and the RPC. The
 -- private marker is an execution-only allowance, not a persisted visibility
 -- change; ordinary SELECT and RPC calls see deleted records as hidden.
+-- Owner decision: Office may see and work with only records CREATED in the
+-- last 3 calendar days (Asia/Muscat), today included — the created_at Muscat
+-- date must be on or after the current Muscat date minus 3. Creation date
+-- only: an Admin edit to an older record does NOT bring it back for Office.
 create or replace function public.office_entry_is_visible(p_entry public.entries)
 returns boolean
 language sql
@@ -812,8 +837,13 @@ stable
 security definer
 set search_path = pg_catalog, public
 as $$
-  select (p_entry).deleted is false
-      or dks_private.entry_is_being_soft_deleted((p_entry).id);
+  select (
+      (p_entry).deleted is false
+      and (p_entry).created_at is not null
+      and ((p_entry).created_at at time zone 'Asia/Muscat')::date
+ >= (now() at time zone 'Asia/Muscat')::date - 3
+    )
+    or dks_private.entry_is_being_soft_deleted((p_entry).id);
 $$;
 
 -- Exposes only visibility, never row data. Pending/revoked Office sessions
@@ -1205,7 +1235,7 @@ for each row execute function public.guard_primary_expiry_column();
 
 drop trigger if exists entries_keep_created_by on public.entries;
 create trigger entries_keep_created_by
-before update on public.entries
+before insert or update on public.entries
 for each row execute function public.entries_keep_created_by();
 
 drop trigger if exists entries_stamp_updated_by on public.entries;
@@ -1503,19 +1533,25 @@ with check (
 -- delete) any live row, including rows created by the other account.  Office
 -- cannot see or update an already-deleted row, so restoring stays an
 -- administrator-only operation (restore_entry).  created_by is kept immutable
--- by the entries_keep_created_by trigger.
+-- by the entries_keep_created_by trigger.  Office additionally requires the
+-- SAME 3-day creation window in USING and WITH CHECK (soft-delete allowance
+-- kept), so an out-of-window record cannot be edited or deleted from Office.
 drop policy if exists entries_update_authenticated on public.entries;
 create policy entries_update_authenticated
 on public.entries for update to authenticated
 using (
   public.is_admin()
-  or (public.is_office() and public.office_session_is_approved() and deleted is false)
+  or (
+    public.is_office() and public.office_session_is_approved() and deleted is false
+    and ((created_at at time zone 'Asia/Muscat')::date >= (now() at time zone 'Asia/Muscat')::date - 3)
+  )
 )
 with check (
   public.is_admin()
   or (
     public.is_office()
     and public.office_session_is_approved()
+    and ((created_at at time zone 'Asia/Muscat')::date >= (now() at time zone 'Asia/Muscat')::date - 3)
     and (
       (
         deleted is false
@@ -1548,7 +1584,7 @@ using (
       select 1
         from public.entries e
        where e.id = entry_id
-         and not e.deleted
+         and public.office_entry_is_visible(e)
     )
   )
 );

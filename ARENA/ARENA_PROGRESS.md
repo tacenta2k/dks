@@ -2,6 +2,7 @@
 
 Session branch: `arena/cce2ff33-dks` (round 2; PR #1 merged into `main`).
 Current Office approval/sync repair session: `arena/b28e239b-dks`; see §34.
+Current Office 3-day visibility window session: `arena/b402cc8f-dks`; see §37.
 Round-2 work is listed in section 8 onwards. Nothing in this file is
 "CONFIRMED" unless the user verified it on Windows.
 Companion file: `ARENA/TO_DO_LIST.md` (single implementation checklist).
@@ -2970,4 +2971,200 @@ windows on one PC.
    once approved (and after revoke → sign-out) the channel must be gone
    (Network tab: no Realtime websocket messages for entries/app_columns).
 7. Record what was observed. Until then this stays
+   IMPLEMENTED_AWAITING_CONFIRMATION.
+
+---
+
+## §37 Office 3-day visibility window — 2026-10-27 (LLM agent)
+
+**Owner decision (exact).** "Office sees only records created in the last 3
+days. Records older than 3 days must disappear from the Office view and cannot
+be edited or deleted from Office. Admin sees all records. The filter is based
+on the record creation date, not the update date." Later the same day the
+window was stated precisely: **Office may see and work with ONLY records
+CREATED in the last 3 calendar days (Asia/Muscat), today included.**
+
+**Exact predicate.** Office-visible iff `deleted = false` AND
+`(created_at AT TIME ZONE 'Asia/Muscat')::date >= (now() AT TIME ZONE 'Asia/Muscat')::date - 3`.
+Creation date only — an Admin edit to an older record does NOT bring it back.
+
+**Acceptance example (covered by tests).** Records created Mon(2 rows),
+Tue(3), Wed(3), Thu(3), Fri(3) = 14 rows. On Friday Office sees Tue+Wed+Thu+
+Fri = **12** rows (Mon's 2 are hidden); Admin sees all **14**. Muscat day
+boundary: a record created 23:59 on the last hidden day is hidden; one created
+00:01 on the first visible day is visible (Asia/Muscat, fixed UTC+4).
+
+**Enforcement = 3 layers** (plus RLS already filtering Realtime events and
+remote fetches — no publication change needed).
+
+### Layer A — RLS / RPCs (`supabase/schema.sql` + `ARENA/sql/office-3-day-window.sql`)
+
+1. **The shared visibility helper** `public.office_entry_is_visible(p_entry)`
+   (used by the Office entries SELECT policy and `entry_visibility()`, both
+   still using it) now returns
+   `((p_entry).deleted is false AND created_at's Muscat date >= now()'s Muscat date − 3)
+   OR dks_private.entry_is_being_soft_deleted((p_entry).id)` — same soft-delete
+   marker allowance as the sync fix (§34), so the marker only ever preserves
+   already-readable rows.
+2. **entries UPDATE for Office (USING + WITH CHECK)** gets the same predicate;
+   the soft-delete allowance (`deleted_at`/`deleted_by` arms) and
+   `guard_office_restore` are kept unchanged. **INSERT for Office gets NO
+   window** — a row created offline 4 days ago must still sync — and a
+   `entries_keep_created_by` trigger extension (`before insert or update`)
+   clamps a future Office `created_at` to `now()`; `created_by`/`created_at`
+   remain immutable on UPDATE. Admin policies unchanged.
+3. **`renew_entry()`** (SECURITY DEFINER, bypasses RLS) checks the same
+   predicate for Office after locking the entry and raises `42501`
+   "This record can no longer be changed from the Office account" for
+   out-of-window records; Admin renewal unchanged. **`column_is_empty()`**
+   (Office-callable RPC touching entries) counts only entries Office can see,
+   so only in-window rows keep a column alive for an Office empty-column
+   delete (Admin counts every live row; deletions stay soft/recoverable — this
+   follows "any Office-callable RPC touching entries: same predicate").
+   `restore_entry`/`permanently_delete_entry` are already admin-only (no
+   change). **renewals SELECT for Office** now uses
+   `office_entry_is_visible(e)` (was `not e.deleted`).
+4. **`ARENA/sql/office-3-day-window.sql`** — idempotent, transactional
+   (BEGIN/COMMIT, guard DO-block aborts atomically), read-only preflight +
+   verification. It refuses to install on unexpected permissive entry policies
+   or without the sync-fix prerequisites (`entry-visibility.sql`), and its
+   verification proves the INSERT policy carries no window, the UPDATE policy
+   does, and the SELECT policy + `entry_visibility()` still use the helper.
+   **ORDER MATTERS on the live project: run `entry-visibility.sql` (and the
+   Realtime migrations) FIRST and `office-3-day-window.sql` LAST** —
+   `entry-visibility.sql` recreates the shared helper and must not be the
+   final word. Owner applies it manually in the Supabase SQL editor; the agent
+   never touches the live project and claims no live verification.
+
+### Layer B — local SQLite purge + scoped reads (defense in depth)
+
+5. **Role/scope plumbing — existing mechanisms only.** The store learns the
+   role from (a) the validated per-call `role` parameter on
+   `getSnapshot`/`applyRemoteSnapshot` (identical to `deleteColumn`'s
+   `roleFrom` handling: invalid/missing-as-string is DENIED) and (b) the
+   session-clearance channel, which now also carries `{ state, role }` for the
+   signed-in profile's role (`LocalSessionClearanceApi.getRole/setRole`).
+   There is NO new renderer-supplied flag that widens the scope; `role:
+   'admin'` (existing role mechanism) is the only Admin-scope claim. An
+   unreported role keeps the legacy unfiltered reads and **never authorises
+   the purge** (purging is Office-scope only), so Admin behaviour cannot
+   regress through omission.
+6. **Office read scope** (`storeSnapshot` for `role==='office'`): a row is
+   readable iff it is Office-visible (`deleted = false` AND in-window) OR it
+   has outbox work with status ≠ `synced` (pending/failed/terminal). The
+   exemption is required so the sync engine can still SEE rows to push —
+   "locally created, still-unsynced Office rows are never purged until pushed
+   (they then fall out of view naturally)" = after the push they lose the
+   exemption and leave Office view. Admin reads are byte-for-byte unchanged.
+7. **Visibility purge** (`SqliteStore.purgeOutOfWindowOfficeEntries`): deletes
+   cached rows outside the window **except rows referenced by non-synced
+   outbox items** (retains the §34 terminal row too). It is a VISIBILITY
+   purge: **no outbox item, no audit 'delete', no server effect**. Runs when a
+   remote snapshot is applied for an Office session, "at launch and when the
+   Muscat date changes" (first Office read of a process run + a 60 s
+   main-process timer keyed on `lastPurgeMuscatDate` + the Muscat date, both
+   gated on the clearance role being 'office'). A row can only leave the
+   window at Muscat midnight, so once per (process, Muscat date) is complete.
+8. **Sync engine unchanged** (verified structurally + one new regression
+   test): rows missing from the Office remote fetch (RLS-hidden) are never
+   treated as server-deleted and never re-INSERTed (only queued creates
+   INSERT — §34's INSERT/UPDATE rule). Pending outbox changes to rows that
+   left the window follow the EXISTING terminal-state path unchanged: the
+   push hits UPDATE count 0 → `entry_visibility()` now answers `hidden` for
+   out-of-window → `markOutboxTerminal` with the clear message "This record
+   can no longer be changed from the Office account", no retry loop, local row
+   retained, no server-side data loss. Realtime unchanged (RLS filters events).
+
+### Layer C — renderer
+
+9. The Office Sheet toolbar shows the note **"Showing records from the last 3
+   days."** (`role==='office'` only; Admin UI unchanged). Sheet rows, Dashboard
+   counts (`selectors.ts`), bell alerts (`alert-service` — expiry alerts derive
+   from the repository snapshot; the office-delete bell cards are Admin-only),
+   duplicate passport/Civil-ID warnings and search all consume the local
+   snapshot, so they are scoped automatically — no per-view filtering added.
+
+### Tests + gate
+
+10. **Added:** `tests/office-3-day-window-postgres.test.ts` (PGlite: Friday
+    12-of-14 example, Muscat 23:59 vs 00:01 boundary, UPDATE/soft-delete
+    window, INSERT no-window + future clamp for Office + Admin unclamped,
+    `entry_visibility` 'hidden' out-of-window, `renew_entry` 42501 for Office,
+    renewals SELECT scoping, `column_is_empty` scoping, Admin sees everything,
+    Admin edit does not bring a row back, migration idempotency ×2 + both
+    abort guards); `tests/office-window-local-store.test.ts` (14 tests: date
+    helpers + boundary, purge keeps unsynced/terminal rows with zero
+    outbox/audit growth, launch + Muscat-date-change purge, Office reads
+    filtered / Admin + legacy unfiltered, invalid role denied, snapshot-apply
+    purge, clearance-channel `{state, role}` contract);
+    `tests/office-window-note.test.tsx` (note present for Office, absent for
+    Admin); one new `tests/supabase-sync.test.ts` case (missing-from-fetch ≠
+    server-deleted, never re-INSERT). Existing terminal-state coverage lives
+    in `tests/entry-sync-idempotency.test.ts` (unchanged, still green).
+    Three test fakes updated for the `{ state, role }` clearance contract
+    (office-approval ×2, live-sheet-app-realtime ×1).
+11. **Gate (`npm rebuild better-sqlite3 && npm test && npm run typecheck &&
+    npm run build`) — ALL GREEN.** Tests: **85 files / 752 passed / 3 skipped
+    (pre-existing) / 0 failed**. Typecheck clean; build clean (only the
+    pre-existing >500 kB chunk warning). Environment disclosure: the sandbox
+    runs **Node 22.22.3** (the pinned Node 20.19.0 is unavailable here);
+    better-sqlite3 was compiled against the local Node 22 headers. Nothing is
+    verified against the live project.
+
+### Files changed
+
+- `supabase/schema.sql` — helper window, UPDATE policy window, renewals policy
+  via helper, `renew_entry` + `column_is_empty` Office guards,
+  `entries_keep_created_by` insert clamp (`before insert or update`).
+- `ARENA/sql/office-3-day-window.sql` — NEW idempotent migration (preflight /
+  transaction / verification) mirroring the schema changes.
+- `electron/main/sqlite.ts` — Muscat window helpers (`muscatDateOf`,
+  `officeWindowCutoffDate`, `isWithinOfficeWindow`, `filterRowsForOfficeScope`),
+  `unsyncedEntryIds()`, `purgeOutOfWindowOfficeEntries()` (visibility purge).
+- `electron/main/local-ipc.ts` — session role on the clearance API/channel,
+  `resolveReadScope` (per-call `role` via `roleFrom`, else session role),
+  Office filtering in `storeSnapshot`, purge hooks in getSnapshot /
+  applyRemoteSnapshot.
+- `electron/main/index.ts` — `sessionRole` wiring + 60 s launch/Muscat-rollover
+  purge timer (Office clearance role only).
+- `electron/preload/index.ts`, `src/lib/types.ts` — optional `role` payloads
+  for `getSnapshot`/`applyRemoteSnapshot`, `{ state, role }` clearance form.
+- `src/features/sheet/electron-repository.ts`, `src/renderer/App.tsx` — role
+  passed at every read/sync boundary; clearance pushes carry the role.
+- `src/features/sheet/SheetPage.tsx`, `sheet.css` — Office toolbar note.
+- `ARENA/TO_DO_LIST.md` — OW-01..OW-04 round entry.
+
+### Owner steps (manual; agent cannot run these)
+
+1. **SQL (Supabase SQL editor), in this order on an existing project:**
+   `entry-visibility.sql` → `realtime-office-approval.sql` →
+   `realtime-live-sheet.sql` → **`office-3-day-window.sql` LAST**. Run its
+   SECTION 0 preflight first (read-only); SECTION 1 is transactional and
+   aborts atomically on any guard; SECTION 2 (read-only) verifies the INSERT
+   policy has no window, the UPDATE policy does, and the shared helper is the
+   final word. Re-running the file is safe.
+2. **Office-PC manual script (records older than 3 days must disappear on the
+   first sync after the SQL is applied, with no error banner):**
+   a. Before applying the SQL, on the Office PC create (or keep) at least one
+      record whose creation date is 5–6 days old and note its name.
+   b. Apply the SQL, then install a build of this branch on the Office PC and
+      sign in as Office (approved session).
+   c. Observe the Sheet: the old record is GONE from the Office view (also
+      from search and duplicate warnings), the Dashboard counts reflect only
+      the visible rows, and the toolbar note "Showing records from the last 3
+      days." is shown. There must be **no error banner, no "Some changes have
+      not synchronised yet", no stuck sync** — the outbox is empty/healthy.
+   d. Edit a visible record and soft-delete another; both must sync normally
+      (Admin sees the changes).
+   e. Sign in as Admin on the other PC: ALL records are visible, including the
+      old ones; editing an old record does NOT make it reappear for Office.
+   f. Boundary spot-check: create a record at 23:59 Muscat and one at 00:01
+      Muscat across a midnight; the day after the 00:01 record's date leaves
+      the window it disappears for Office while the Admin keeps both.
+   g. Offline case: create a record on Office while offline, note its row;
+      after reconnect the sync pushes it with its original creation date and
+      the row falls out of Office view if that date is outside the window —
+      never a duplicate, never an error banner.
+3. Record the observations here and flip the OW-01..OW-04 rows in
+   `ARENA/TO_DO_LIST.md` to confirmed. Until then everything stays
    IMPLEMENTED_AWAITING_CONFIRMATION.
