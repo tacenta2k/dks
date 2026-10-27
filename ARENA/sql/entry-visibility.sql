@@ -11,13 +11,42 @@ select to_regclass('public.entries') is not null as entries_exists,
        to_regprocedure('public.office_session_is_approved()') is not null as approval_helper_exists;
 select schemaname, tablename, rowsecurity
   from pg_tables where schemaname = 'public' and tablename = 'entries';
-select policyname, cmd, qual
+select policyname, cmd, permissive, roles, qual, with_check
   from pg_policies where schemaname = 'public' and tablename = 'entries'
   order by policyname;
 select to_regclass('dks_private.office_entry_soft_delete_context') is not null as context_exists;
 
 -- 1. INSTALL ---------------------------------------------------------------
 begin;
+
+-- Permissive policies are OR-ed. Refuse to install a visibility classifier if
+-- any unknown rule could make its answer disagree with actual Office SELECTs.
+do $$
+declare
+  v_unexpected text;
+begin
+  if not exists (
+    select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'entries' and c.relrowsecurity
+  ) then
+    raise exception 'DKS entry visibility migration aborted: entries RLS is not enabled' using errcode = '42501';
+  end if;
+  select string_agg(format('%s (%s)', policyname, cmd), ', ' order by policyname)
+    into v_unexpected
+    from pg_policies
+   where schemaname = 'public' and tablename = 'entries' and permissive = 'PERMISSIVE'
+     and (policyname, cmd) not in (
+       ('entries_select_authenticated', 'SELECT'),
+       ('entries_insert_authenticated', 'INSERT'),
+       ('entries_update_authenticated', 'UPDATE'),
+       ('entries_delete_admin', 'DELETE')
+     );
+  if v_unexpected is not null then
+    raise exception 'DKS entry visibility migration aborted: unexpected permissive policies: %', v_unexpected
+      using errcode = '42501', hint = 'Review the read-only preflight and resolve unexpected policies before installing.';
+  end if;
+end;
+$$;
 
 -- PostgreSQL applies the SELECT policy to a new row when UPDATE reads an id
 -- in its WHERE clause, even with no RETURNING. While an approved Office user
@@ -163,7 +192,7 @@ commit;
 -- the RPC is stable/security-definer, and anon/PUBLIC lack execute.
 select schemaname, tablename, rowsecurity
   from pg_tables where schemaname = 'public' and tablename = 'entries';
-select policyname, cmd, qual
+select policyname, cmd, permissive, roles, qual, with_check
   from pg_policies
  where schemaname = 'public' and tablename = 'entries'
    and policyname = 'entries_select_authenticated';

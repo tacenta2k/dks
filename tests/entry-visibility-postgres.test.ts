@@ -42,6 +42,14 @@ describe('entry visibility against local PostgreSQL', () => {
       `);
       for (const id of seedIds) await db.query('insert into auth.users (id) values ($1)', [id]);
       await db.exec(schema);
+      // Permissive policies are OR-ed: the manual scripts must refuse an
+      // unexpected broad rule, not silently claim the new policy protects it.
+      await db.exec('create policy unexpected_entry_read on public.entries for select to authenticated using (true)');
+      await expect(db.exec(visibility)).rejects.toMatchObject({ code: '42501' });
+      await db.exec('rollback; drop policy unexpected_entry_read on public.entries');
+      await db.exec('create policy unexpected_request_read on public.office_signin_requests for select to authenticated using (true)');
+      await expect(db.exec(realtime)).rejects.toMatchObject({ code: '42501' });
+      await db.exec('rollback; drop policy unexpected_request_read on public.office_signin_requests');
       // Exercise manual migration idempotency after a fresh schema install.
       for (let i = 0; i < 2; i += 1) { await db.exec(visibility); await db.exec(realtime); }
       await db.exec(`

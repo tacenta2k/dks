@@ -14,7 +14,7 @@ select to_regclass('public.office_signin_requests') is not null as requests_exis
        exists (select 1 from pg_publication where pubname = 'supabase_realtime') as realtime_publication_exists;
 select schemaname, tablename, rowsecurity
   from pg_tables where schemaname = 'public' and tablename = 'office_signin_requests';
-select policyname, cmd, qual
+select policyname, cmd, permissive, roles, qual, with_check
   from pg_policies where schemaname = 'public' and tablename = 'office_signin_requests';
 select pubname, schemaname, tablename from pg_publication_tables
  where pubname = 'supabase_realtime' and schemaname = 'public'
@@ -22,6 +22,30 @@ select pubname, schemaname, tablename from pg_publication_tables
 
 -- 1. INSTALL ---------------------------------------------------------------
 begin;
+
+-- A second permissive policy could expose another device's request over
+-- Realtime. Do not silently install over an unknown policy or disabled RLS.
+do $$
+declare
+  v_unexpected text;
+begin
+  if not exists (
+    select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'office_signin_requests' and c.relrowsecurity
+  ) then
+    raise exception 'DKS approval Realtime migration aborted: request RLS is not enabled' using errcode = '42501';
+  end if;
+  select string_agg(format('%s (%s)', policyname, cmd), ', ' order by policyname)
+    into v_unexpected
+    from pg_policies
+   where schemaname = 'public' and tablename = 'office_signin_requests' and permissive = 'PERMISSIVE'
+     and (policyname, cmd) <> ('office_signin_requests_select_own_or_admin', 'SELECT');
+  if v_unexpected is not null then
+    raise exception 'DKS approval Realtime migration aborted: unexpected permissive policies: %', v_unexpected
+      using errcode = '42501', hint = 'Review the read-only preflight and resolve unexpected policies before installing.';
+  end if;
+end;
+$$;
 
 -- Keep bulk sign-out administrator-only through its internal check; do not
 -- expose this SECURITY DEFINER RPC to unauthenticated roles.
@@ -63,7 +87,7 @@ commit;
 -- 2. READ-ONLY VERIFICATION -------------------------------------------------
 select schemaname, tablename, rowsecurity
   from pg_tables where schemaname = 'public' and tablename = 'office_signin_requests';
-select policyname, cmd, qual
+select policyname, cmd, permissive, roles, qual, with_check
   from pg_policies where schemaname = 'public' and tablename = 'office_signin_requests';
 select pubname, schemaname, tablename from pg_publication_tables
  where pubname = 'supabase_realtime' and schemaname = 'public'

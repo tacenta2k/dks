@@ -1371,6 +1371,30 @@ create policy profiles_admin_delete
 on public.profiles for delete to authenticated
 using (public.is_admin());
 
+-- A second permissive policy could expose another device's request over
+-- Realtime. Do not silently install over an unknown policy or disabled RLS.
+do $$
+declare
+  v_unexpected text;
+begin
+  if not exists (
+    select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'office_signin_requests' and c.relrowsecurity
+  ) then
+    raise exception 'DKS approval Realtime migration aborted: request RLS is not enabled' using errcode = '42501';
+  end if;
+  select string_agg(format('%s (%s)', policyname, cmd), ', ' order by policyname)
+    into v_unexpected
+    from pg_policies
+   where schemaname = 'public' and tablename = 'office_signin_requests' and permissive = 'PERMISSIVE'
+     and (policyname, cmd) <> ('office_signin_requests_select_own_or_admin', 'SELECT');
+  if v_unexpected is not null then
+    raise exception 'DKS approval Realtime migration aborted: unexpected permissive policies: %', v_unexpected
+      using errcode = '42501', hint = 'Review the read-only preflight and resolve unexpected policies before installing.';
+  end if;
+end;
+$$;
+
 -- Office's account is shared: only this JWT's own request is visible,
 -- including while pending/revoked, so Realtime can deliver its decisions.
 -- Admin sees all requests. Writes remain SECURITY DEFINER RPCs only.
@@ -1422,6 +1446,35 @@ drop policy if exists app_columns_delete_admin on public.app_columns;
 create policy app_columns_delete_admin
 on public.app_columns for delete to authenticated
 using (public.is_admin());
+
+-- Permissive policies are OR-ed. Refuse to install a visibility classifier if
+-- any unknown rule could make its answer disagree with actual Office SELECTs.
+do $$
+declare
+  v_unexpected text;
+begin
+  if not exists (
+    select 1 from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'entries' and c.relrowsecurity
+  ) then
+    raise exception 'DKS entry visibility migration aborted: entries RLS is not enabled' using errcode = '42501';
+  end if;
+  select string_agg(format('%s (%s)', policyname, cmd), ', ' order by policyname)
+    into v_unexpected
+    from pg_policies
+   where schemaname = 'public' and tablename = 'entries' and permissive = 'PERMISSIVE'
+     and (policyname, cmd) not in (
+       ('entries_select_authenticated', 'SELECT'),
+       ('entries_insert_authenticated', 'INSERT'),
+       ('entries_update_authenticated', 'UPDATE'),
+       ('entries_delete_admin', 'DELETE')
+     );
+  if v_unexpected is not null then
+    raise exception 'DKS entry visibility migration aborted: unexpected permissive policies: %', v_unexpected
+      using errcode = '42501', hint = 'Review the read-only preflight and resolve unexpected policies before installing.';
+  end if;
+end;
+$$;
 
 -- Office users can create/edit active rows and mark an active row deleted.
 -- The policy has no path from a deleted row back to active, and there is no
