@@ -499,3 +499,152 @@ describe('email notifications migration — jsonb seeds and digest typing', () =
     expect(body).toMatch(/day_value\.value ~ '\^\[0-9\]\{1,4\}\$'/);
   });
 });
+
+const migrationSqlPath = resolve(process.cwd(), 'ARENA/sql/expiry-digest-report.sql');
+
+/** The executable text of one `create or replace function public.<name>` body. */
+function functionBody(sql: string, name: string): string {
+  const start = sql.indexOf(`create or replace function public.${name}`);
+  const end = sql.indexOf('$$;', start);
+  if (start < 0 || end < 0) {
+    throw new Error(`Missing function definition for public.${name}`);
+  }
+  return sql.slice(start, end + 3);
+}
+
+/** PL/pgSQL text with line comments and blank lines removed. */
+function stripSqlComments(sql: string): string {
+  return sql
+    .split('\n')
+    .map((line) => line.split('--')[0])
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join('\n');
+}
+
+/** Variable names declared in a PL/pgSQL DECLARE block. */
+function plpgsqlDeclaredNames(body: string): string[] {
+  const sql = stripSqlComments(body);
+  const declare = sql.indexOf('declare');
+  if (declare < 0) return [];
+  const begin = sql.indexOf('begin', declare + 1);
+  if (begin < 0) return [];
+  return sql
+    .slice(declare, begin)
+    .split('\n')
+    .slice(1)
+    .map((line) => line.split(/\s+/)[0] ?? '')
+    .filter((name) => name.length > 0);
+}
+
+/** Words that may follow a table reference but are never a table alias. */
+const SQL_NON_ALIASES = new Set([
+  'where', 'group', 'order', 'limit', 'having', 'union', 'returning', 'on', 'join', 'inner',
+  'left', 'right', 'full', 'cross', 'as', 'set', 'values', 'select', 'and', 'or', 'not', 'using',
+  'window', 'qualify', 'fetch', 'for', 'with', 'interval', 'is', 'in', 'between', 'like', 'case',
+  'when', 'then', 'else', 'end', 'asc', 'desc', 'nulls', 'first', 'last', 'only', 'lateral',
+  'natural', 'table', 'tablesample', 'exists', 'any', 'all', 'some', 'language', 'plpgsql',
+  'begin', 'declare', 'loop', 'if', 'endif', 'array', 'unnest', 'cast', 'null', 'true', 'false',
+  'return', 'perform', 'into',
+]);
+
+/**
+ * Candidate table aliases in a PL/pgSQL body (`from public.x a`, `join public.x a`, ...).
+ * Sub-queries (`from (`) and set-returning function calls
+ * (`from jsonb_array_elements(...)`) carry no alias of this shape.
+ */
+function sqlTableAliases(body: string): string[] {
+  const aliases: string[] = [];
+  const re = /\b(?:from|join)\s+(?:(?:only|lateral)\s+)?(?:\w+\.)?\w+\s+(?:as\s+)?(\w+)/gi;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(body)) !== null) {
+    const alias = (match[1] ?? '').toLowerCase();
+    if (alias && !SQL_NON_ALIASES.has(alias)) aliases.push(alias);
+  }
+  return aliases;
+}
+
+describe('expiry digest function — PL/pgSQL variable/table-alias collisions', () => {
+  const migrationSql = readFileSync(migrationSqlPath, 'utf8');
+  const schemaSql = readFileSync(schemaPath, 'utf8');
+
+  it('defines enqueue_expiry_digest identically in the migration and the schema mirror', () => {
+    // The two files legitimately carry different explanatory comments (the
+    // migration's refer to its own section numbering), so compare the
+    // executable text: the definitions must never drift apart.
+    const migration = stripSqlComments(functionBody(migrationSql, 'enqueue_expiry_digest'));
+    const mirror = stripSqlComments(functionBody(schemaSql, 'enqueue_expiry_digest'));
+
+    expect(migration).toBe(mirror);
+  });
+
+  it('defines dks_parse_iso_date identically in the migration and the schema mirror', () => {
+    const migration = stripSqlComments(functionBody(migrationSql, 'dks_parse_iso_date'));
+    const mirror = stripSqlComments(functionBody(schemaSql, 'dks_parse_iso_date'));
+
+    expect(migration).toBe(mirror);
+  });
+
+  it('never uses a declared PL/pgSQL variable as a SQL table alias', () => {
+    const offenders: string[] = [];
+    for (const [file, sql] of [
+      ['ARENA/sql/expiry-digest-report.sql', migrationSql],
+      ['supabase/schema.sql', schemaSql],
+    ] as const) {
+      const signatures: string[] =
+        sql.match(/create\s+(?:or\s+replace\s+)?function\s+public\.\w+/g) ?? [];
+      for (const signature of signatures) {
+        const name = signature.split('public.')[1] ?? '';
+        const body = stripSqlComments(functionBody(sql, name));
+        const declared = new Set(plpgsqlDeclaredNames(body).map((n) => n.toLowerCase()));
+        if (declared.size === 0) continue;
+        for (const alias of sqlTableAliases(body)) {
+          if (declared.has(alias)) offenders.push(`${file}: ${name} aliases "${alias}"`);
+        }
+      }
+    }
+
+    // A declared `c record;` reused as `from public.app_columns c` makes
+    // PL/pgSQL resolve `c.id` against the unassigned record and fail at runtime
+    // with `ERROR: record "c" is not assigned yet`.
+    expect(offenders).toEqual([]);
+  });
+
+  it('declares no single-letter record variable for enqueue_expiry_digest', () => {
+    const body = stripSqlComments(functionBody(migrationSql, 'enqueue_expiry_digest'));
+
+    expect(body).not.toMatch(/\b[a-z]\s+record\s*;/i);
+    expect(body).not.toContain('c record;');
+    expect(body).toContain('v_entry record;');
+    expect(body).toContain('for v_entry in');
+  });
+
+  it('binds every qualifying-row loop reference to v_entry', () => {
+    const body = stripSqlComments(functionBody(migrationSql, 'enqueue_expiry_digest'));
+
+    expect(body).toContain("'id', v_entry.id::text,");
+    expect(body).toContain("'expiry', to_char(v_entry.expiry_date, 'YYYY-MM-DD'),");
+    expect(body).toContain("'daysLeft', v_entry.expiry_date - v_muscat_today,");
+    expect(body).toContain("'data', v_entry.data");
+  });
+
+  it('keeps the digest window, cap and outbox contract unchanged', () => {
+    const body = stripSqlComments(functionBody(migrationSql, 'enqueue_expiry_digest'));
+
+    expect(body).toContain("v_muscat_today := (now() at time zone 'Asia/Muscat')::date;");
+    expect(body).toContain('eligible.expiry_date - v_muscat_today <= 30');
+    expect(body).toContain('v_max integer := 200;');
+    expect(body).toContain("'truncated', v_total > v_max");
+    expect(body).toContain(
+      'coalesce(en.data ->> v_primary_id, en.data ->> v_primary_name)',
+    );
+    expect(body).toContain(
+      "(ac.type = 'civil_id' or ac.is_passport or ac.name ~* 'passport')",
+    );
+    expect(body).toMatch(/on conflict \(kind, dedupe_key\) do nothing/);
+    expect(body).toContain("'expiry_digest'");
+    expect(body).toContain("'reportDate', to_char(v_muscat_today, 'YYYY-MM-DD'),");
+    expect(body).toContain("'entries', v_items,");
+    expect(body).toContain("'totalQualifying', v_total,");
+  });
+});

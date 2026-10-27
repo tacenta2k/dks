@@ -105,7 +105,11 @@ declare
   v_total integer := 0;
   v_rows integer := 0;
   v_max integer := 200;
-  c record;
+  -- One record variable for the qualifying-rows loop. Named `v_entry`, never
+  -- a bare single letter: a single-letter name here collides with SQL table
+  -- aliases (`from public.app_columns c`) and PL/pgSQL then resolves the
+  -- alias reference against this unassigned record.
+  v_entry record;
 begin
   select value into v_prefs from public.settings where key = 'email_notifications';
 
@@ -124,10 +128,10 @@ begin
 
   -- The LIVE primary expiry column. Read by id first (the app's keying), with
   -- the column name as a legacy fallback.
-  select c.id::text, c.name
+  select ac.id::text, ac.name
     into v_primary_id, v_primary_name
-    from public.app_columns c
-   where c.is_primary_expiry and not c.deleted and c.visible
+    from public.app_columns ac
+   where ac.is_primary_expiry and not ac.deleted and ac.visible
    limit 1;
 
   if v_primary_id is null then
@@ -140,18 +144,18 @@ begin
   -- Active, visible user columns in the workspace's saved order, with the
   -- sensitive flag computed from the REAL column metadata.
   select jsonb_agg(jsonb_build_object(
-           'id', c.id::text,
-           'name', c.name,
-           'type', c.type,
-           'position', c.position,
-           'visible', c.visible,
-           'isPrimaryExpiry', c.is_primary_expiry,
-           'isPassport', c.is_passport,
-           'sensitive', (c.type = 'civil_id' or c.is_passport or c.name ~* 'passport')
-         ) order by c.position, c.id)
+           'id', ac.id::text,
+           'name', ac.name,
+           'type', ac.type,
+           'position', ac.position,
+           'visible', ac.visible,
+           'isPrimaryExpiry', ac.is_primary_expiry,
+           'isPassport', ac.is_passport,
+           'sensitive', (ac.type = 'civil_id' or ac.is_passport or ac.name ~* 'passport')
+         ) order by ac.position, ac.id)
     into v_columns
-    from public.app_columns c
-   where not c.deleted and c.visible;
+    from public.app_columns ac
+   where not ac.deleted and ac.visible;
 
   select value into v_currency from public.settings where key = 'currency';
   if v_currency is null or jsonb_typeof(v_currency) <> 'object' then
@@ -161,28 +165,28 @@ begin
   -- Qualifying records: active, primary expiry present and a real calendar
   -- date, and daysLeft <= 30 (expired, today, or expiring soon). Ordered
   -- expired-first (oldest expiry) → today → upcoming 1..30 ascending.
-  for c in
+  for v_entry in
     select *
       from (
-        select e.id,
-               e.data,
+        select en.id,
+               en.data,
                public.dks_parse_iso_date(
-                 coalesce(e.data ->> v_primary_id, e.data ->> v_primary_name)
+                 coalesce(en.data ->> v_primary_id, en.data ->> v_primary_name)
                ) as expiry_date
-          from public.entries e
-         where not e.deleted
-       ) candidate
-     where candidate.expiry_date is not null
-       and candidate.expiry_date - v_muscat_today <= 30
-     order by candidate.expiry_date asc, candidate.id asc
+          from public.entries en
+         where not en.deleted
+       ) eligible
+     where eligible.expiry_date is not null
+       and eligible.expiry_date - v_muscat_today <= 30
+     order by eligible.expiry_date asc, eligible.id asc
   loop
     v_rows := v_rows + 1;
     if v_rows <= v_max then
       v_items := v_items || jsonb_build_array(jsonb_build_object(
-        'id', c.id::text,
-        'expiry', to_char(c.expiry_date, 'YYYY-MM-DD'),
-        'daysLeft', c.expiry_date - v_muscat_today,
-        'data', c.data
+        'id', v_entry.id::text,
+        'expiry', to_char(v_entry.expiry_date, 'YYYY-MM-DD'),
+        'daysLeft', v_entry.expiry_date - v_muscat_today,
+        'data', v_entry.data
       ));
     end if;
   end loop;
@@ -190,9 +194,9 @@ begin
   v_total := v_rows;
 
   for v_recipient in
-    select trim(both '"' from recipient::text)
-      from jsonb_array_elements(v_recipients) as recipient
-     where jsonb_typeof(recipient) = 'string'
+    select trim(both '"' from rcpt::text)
+      from jsonb_array_elements(v_recipients) as rcpt
+     where jsonb_typeof(rcpt) = 'string'
   loop
     insert into public.email_outbox (kind, dedupe_key, recipient, payload)
     values (
