@@ -7,11 +7,16 @@
  * Edge Function at deploy time. The PDF renderer lives in ./digest-pdf.ts.
  *
  * Business rules implemented here (and mirrored by
- * ARENA/sql/expiry-digest-report.sql):
+ * ARENA/sql/expiry-digest-report.sql + ARENA/sql/digest-full-columns.sql):
  *   - 30-day window for THIS report only (expired + today + 1..30).
  *   - daysLeft recomputed from the Asia/Muscat business calendar on every run.
  *   - ordering: expired (most overdue first) → today → upcoming 1..30 asc.
- *   - passport / Civil ID masked by default unless an Admin opted in.
+ *   - FULL passport / Civil ID values are the default: the PDF is addressed to
+ *     the Admin mailbox only, and the Admin must be able to phone the customer
+ *     from the email alone. Setting `email_notifications.include_full_ids` to
+ *     false is an explicit opt-out (values are then masked).
+ *   - the email body stays short; the attached landscape grid PDF carries the
+ *     per-column detail.
  */
 
 import { escapeHtml } from './email.ts';
@@ -20,14 +25,24 @@ import { formatDisplayDate, isValidIsoDate } from '../../../src/lib/date.ts';
 /** Window for the email/PDF report. Deliberately NOT the workspace setting. */
 export const EXPIRY_REPORT_WINDOW_DAYS = 30;
 
-/** Hard cap on records carried in one report (email summary + PDF summary). */
+/** Hard cap on records carried in one report (email list + PDF grid rows). */
 export const MAX_REPORT_RECORDS = 200;
-
-/** Hard cap on records that get a full per-column detail block in the PDF. */
-export const MAX_DETAIL_RECORDS = 100;
 
 export const EMPTY_VALUE = '—';
 export const UNNAMED_LABEL = 'Unnamed record';
+
+/** One-line body sentence. The table lives in the attachment, never inline. */
+export const DIGEST_ATTACHMENT_SENTENCE = 'Your DKS daily expiry summary is attached.';
+/** Calm one-pager headline when nothing qualifies. */
+export const DIGEST_EMPTY_HEADLINE = 'No expiries to flag today';
+/**
+ * The HTML/text body may list record names + days left, but it stays short:
+ * the full grid is only ever in the PDF attachment.
+ */
+export const MAX_INLINE_LIST_ITEMS = 15;
+
+/** Landscape A4 — the grid needs the width, not the height. */
+export const PDF_PAGE_ORIENTATION = 'landscape' as const;
 
 /** Supabase primary keys are UUIDs — never use one as a display label. */
 const UUID_LIKE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -53,7 +68,11 @@ export type ReportColumnType =
  * Status text is shown (not only coloured) in both media. The 1..30 band
  * carries its own countdown so a reader never has to guess how urgent a row is.
  */
-export type ReportEntryStatus = 'Expired' | 'Expires today' | `Expires in ${number} days`;
+export type ReportEntryStatus =
+  | 'Expired'
+  | 'Expires today'
+  | `Expires in ${number} day`
+  | `Expires in ${number} days`;
 
 export interface ReportColumn {
   id: string;
@@ -94,6 +113,10 @@ export interface CurrencySettings {
 export interface DigestReportModel {
   reportDate: string;
   reportDateDisplay: string;
+  /** ISO instant the report was rendered; shown as Asia/Muscat date + time. */
+  reportGeneratedAt: string;
+  /** `DD/MM/YYYY HH:mm` in Asia/Muscat, e.g. `26/10/2026 14:05`. */
+  reportDateTimeDisplay: string;
   columns: ReportColumn[];
   currency: CurrencySettings;
   includeFullIds: boolean;
@@ -394,6 +417,32 @@ export function muscatTodayIso(value?: string | Date): string {
   return parts ? `${parts.year}-${pad2(parts.month)}-${pad2(parts.day)}` : '';
 }
 
+/**
+ * `DD/MM/YYYY HH:mm` in Asia/Muscat. This is the report "date and time" printed
+ * on the PDF header and footer; the day boundary itself still comes from
+ * `muscatTodayIso`, never from UTC.
+ */
+export function muscatDateTimeDisplay(value?: string | Date): string {
+  const date = value instanceof Date
+    ? value
+    : new Date(value === undefined ? Date.now() : String(value));
+  if (Number.isNaN(date.getTime())) {
+    return '';
+  }
+  const parts = new Intl.DateTimeFormat('en-GB', {
+    timeZone: DKS_BUSINESS_TIME_ZONE,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(date);
+  const pick = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
+  const display = `${pick('day')}/${pick('month')}/${pick('year')} ${pick('hour')}:${pick('minute')}`;
+  return /^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/.test(display) ? display : '';
+}
+
 /** A stored ISO date rendered as the user-facing DD/MM/YYYY text. */
 export function isoToDisplayDate(iso: string): string {
   return formatDisplayDate(iso);
@@ -513,7 +562,37 @@ export function statusForDaysLeft(daysLeft: number): ReportEntryStatus {
   }
   // The countdown is part of the status, so it is text (not colour) in both
   // the HTML summary and the PDF.
-  return `Expires in ${daysLeft} days`;
+  return `Expires in ${daysLeft} day${daysLeft === 1 ? '' : 's'}`;
+}
+
+/**
+ * The "Days left" grid column is written as a sentence, not a bare integer:
+ *   -3 → "Expired 3 days ago" · 0 → "Expires today" · 12 → "12 days left".
+ * Status stays the terse band label (`Expired`, `Expires today`,
+ * `Expires in 12 days`); both are text, so neither relies on colour.
+ */
+export function formatDaysLeft(daysLeft: number): string {
+  if (!Number.isFinite(daysLeft)) {
+    return EMPTY_VALUE;
+  }
+  const days = Math.trunc(daysLeft);
+  if (days < 0) {
+    const ago = Math.abs(days);
+    return `Expired ${ago} day${ago === 1 ? '' : 's'} ago`;
+  }
+  if (days === 0) {
+    return 'Expires today';
+  }
+  return `${days} day${days === 1 ? '' : 's'} left`;
+}
+
+/** True for the two red bands (expired / today); 1..7 is amber. */
+export function isCriticalDaysLeft(daysLeft: number): boolean {
+  return daysLeft <= 0;
+}
+
+export function isSoonDaysLeft(daysLeft: number): boolean {
+  return daysLeft >= 1 && daysLeft <= 7;
 }
 
 function isoDayNumber(iso: string): number {
@@ -607,7 +686,13 @@ export interface BuildDigestReportModelInput {
   reportDateIso: string;
   columns: readonly unknown[];
   currency?: unknown;
+  /** Omitted → FULL values (the product default). Only an explicit false masks. */
   includeFullIds?: boolean;
+  /**
+   * ISO instant the model is built at. Defaults to `Date.now()`; tests pass a
+   * fixed value so the printed date/time is deterministic.
+   */
+  generatedAt?: string | Date;
   entries: readonly RawReportEntry[];
   totalQualifying?: number;
 }
@@ -615,19 +700,27 @@ export interface BuildDigestReportModelInput {
 export function buildDigestReportModel(input: BuildDigestReportModelInput): DigestReportModel {
   const columns = normalizeReportColumns(input.columns);
   const currency = normalizeCurrency(input.currency ?? null);
-  const includeFullIds = input.includeFullIds === true;
+  // Admin-only PDF: full identifiers are the default. `false` is the explicit
+  // opt-out (Settings → Notifications) and the only way to mask them.
+  const includeFullIds = input.includeFullIds !== false;
   const qualifying = selectReportEntries(input.entries, columns, input.reportDateIso);
   const totalQualifying = Number.isFinite(input.totalQualifying)
     ? Math.max(0, Math.trunc(input.totalQualifying ?? 0))
     : qualifying.length;
-  // The summary table is capped; the full qualifying count is carried
-  // separately so truncation is always visible to the reader.
+  // The grid is capped; the full qualifying count is carried separately so
+  // truncation is always visible to the reader.
   const entries = qualifying.slice(0, MAX_REPORT_RECORDS);
   const truncated = totalQualifying > entries.length;
+  const generatedAt = input.generatedAt === undefined
+    ? new Date()
+    : (input.generatedAt instanceof Date ? input.generatedAt : new Date(input.generatedAt));
+  const safeGeneratedAt = Number.isNaN(generatedAt.getTime()) ? new Date() : generatedAt;
 
   return {
     reportDate: input.reportDateIso,
     reportDateDisplay: isoToDisplayDate(input.reportDateIso),
+    reportGeneratedAt: safeGeneratedAt.toISOString(),
+    reportDateTimeDisplay: muscatDateTimeDisplay(safeGeneratedAt),
     columns,
     currency,
     includeFullIds,
@@ -640,86 +733,143 @@ export function buildDigestReportModel(input: BuildDigestReportModelInput): Dige
 }
 
 // ---------------------------------------------------------------------------
-// HTML + plain-text rendering
+// Summary strip + email body (HTML + plain text)
 // ---------------------------------------------------------------------------
 
 export function pdfAttachmentFileName(reportDateIso: string): string {
   return `DKS-expiry-report-${reportDateIso}.pdf`;
 }
 
-function statusColor(status: ReportEntryStatus): string {
-  if (status === 'Expired') {
-    return '#8a1c1c';
+export interface SummaryCountItem {
+  label: 'Expired' | 'Today' | 'Next 7' | 'Next 30' | 'Total';
+  value: number;
+}
+
+/**
+ * Summary counts in the order printed on the PDF strip and in the email body:
+ * Expired → Today → Next 7 → Next 30 → Total.
+ */
+export function summaryCountItems(model: DigestReportModel): SummaryCountItem[] {
+  return [
+    { label: 'Expired', value: model.summary.expired },
+    { label: 'Today', value: model.summary.today },
+    { label: 'Next 7', value: model.summary.within7 },
+    { label: 'Next 30', value: model.summary.within30 },
+    { label: 'Total', value: model.summary.total },
+  ];
+}
+
+export function summaryLine(model: DigestReportModel): string {
+  return summaryCountItems(model).map((item) => `${item.label}: ${item.value}`).join(' · ');
+}
+
+/** `26/10/2026 14:05 (Asia/Muscat)` — the report date AND time. */
+export function reportDateTimeLabel(model: DigestReportModel): string {
+  const stamp = model.reportDateTimeDisplay || model.reportDateDisplay;
+  return `${stamp} (${DKS_BUSINESS_TIME_ZONE})`;
+}
+
+/** Shown on the last page (and in the body) whenever the 200-row cap bites. */
+export function truncationNote(model: DigestReportModel): string | null {
+  if (!model.truncated) {
+    return null;
   }
-  if (status === 'Expires today') {
+  return `This report shows the ${model.entries.length} most urgent of ${model.totalQualifying} `
+    + 'records expiring within 30 days.';
+}
+
+/** Honest note when the Admin opted out of full identifiers. */
+export function maskingNote(model: DigestReportModel): string | null {
+  if (model.includeFullIds || !model.columns.some((column) => column.sensitive)) {
+    return null;
+  }
+  return 'Passport and Civil ID values are masked in the attached PDF.';
+}
+
+export const EMPTY_DAY_NOTE = 'All clear — nothing expiring within the next 30 days.';
+
+/**
+ * Amounts fall back to the ISO currency code when the configured symbol cannot
+ * be encoded by the PDF font (e.g. the Arabic OMR symbol). The report says so
+ * instead of printing `???`.
+ */
+export function currencyFallbackNote(model: DigestReportModel): string | null {
+  const hasPriceColumn = model.columns.some((column) => column.type === 'price');
+  if (!hasPriceColumn || isWinAnsiEncodable(model.currency.symbol)) {
+    return null;
+  }
+  return `The currency symbol cannot be encoded by the PDF font, so amounts show the `
+    + `${model.currency.code} code instead.`;
+}
+
+function daysLeftColorHex(daysLeft: number): string {
+  if (isCriticalDaysLeft(daysLeft)) {
     return '#b3261e';
   }
-  return '#8a5a00';
+  return isSoonDaysLeft(daysLeft) ? '#8a5a00' : '#1f2328';
 }
 
-function daysLeftText(daysLeft: number): string {
-  return String(daysLeft);
+function inlineListEntries(model: DigestReportModel): ReportEntry[] {
+  return model.entries.slice(0, MAX_INLINE_LIST_ITEMS);
 }
 
-function summaryLine(model: DigestReportModel): string {
-  const { summary } = model;
-  return [
-    `Total listed: ${summary.total}`,
-    `Expired: ${summary.expired}`,
-    `Expires today: ${summary.today}`,
-    `Within 7 days: ${summary.within7}`,
-    `Within 30 days: ${summary.within30}`,
-  ].join(' · ');
-}
-
-function summaryTableRowsHtml(model: DigestReportModel): string {
-  return model.entries.map((entry, index) => {
-    const color = statusColor(entry.status);
-    return [
-      '<tr>',
-      `<td style="padding:7px 8px;border-bottom:1px solid #e6e6e6;color:#666;">${index + 1}</td>`,
-      `<td style="padding:7px 8px;border-bottom:1px solid #e6e6e6;">${escapeHtml(entry.label)}</td>`,
-      `<td style="padding:7px 8px;border-bottom:1px solid #e6e6e6;">${escapeHtml(isoToDisplayDate(entry.expiry))}</td>`,
-      `<td style="padding:7px 8px;border-bottom:1px solid #e6e6e6;">${escapeHtml(daysLeftText(entry.daysLeft))}</td>`,
-      `<td style="padding:7px 8px;border-bottom:1px solid #e6e6e6;color:${color};font-weight:700;">${escapeHtml(entry.status)}</td>`,
-      '</tr>',
-    ].join('');
-  }).join('');
-}
-
-function noticesHtml(model: DigestReportModel): string {
+function bodyNotes(model: DigestReportModel): string[] {
   const notes: string[] = [];
-  if (model.truncated) {
-    notes.push(
-      `This report shows the ${model.entries.length} most urgent of ${model.totalQualifying} records `
-      + 'expiring within 30 days.',
-    );
-  }
   if (model.entries.length === 0) {
-    notes.push('All clear — nothing expiring within the next 30 days.');
+    notes.push(EMPTY_DAY_NOTE);
   }
-  if (!model.includeFullIds && model.columns.some((column) => column.sensitive)) {
-    notes.push('Passport and Civil ID values are masked in the attached PDF.');
+  const truncation = truncationNote(model);
+  if (truncation) {
+    notes.push(truncation);
   }
-  return notes.map((note) => `<p style="margin:10px 0 0;color:#555;font-size:13px;">${escapeHtml(note)}</p>`).join('');
+  const masked = maskingNote(model);
+  if (masked) {
+    notes.push(masked);
+  }
+  if (
+    model.includeFullIds
+    && model.entries.length > 0
+    && model.columns.some((column) => column.sensitive)
+  ) {
+    notes.push('Full Passport and Civil ID values are included in the attached PDF.');
+  }
+  return notes;
 }
 
+function listHtml(model: DigestReportModel): string {
+  if (model.entries.length === 0) {
+    return '';
+  }
+  const items = inlineListEntries(model).map((entry) => [
+    '<li style="margin:0 0 4px;font-size:13px;">',
+    `${escapeHtml(entry.label)} — `,
+    `<span style="color:${daysLeftColorHex(entry.daysLeft)};font-weight:600;">`,
+    `${escapeHtml(formatDaysLeft(entry.daysLeft))}</span>`,
+    '</li>',
+  ].join('')).join('');
+  const remaining = model.entries.length - inlineListEntries(model).length;
+  const more = remaining > 0
+    ? `<p style="margin:6px 0 0;color:#57606a;font-size:13px;">+${remaining} more in the attached PDF.</p>`
+    : '';
+  const total = model.totalQualifying - model.entries.length;
+  const truncatedMore = total > 0
+    ? `<p style="margin:6px 0 0;color:#57606a;font-size:13px;">${total} further records are not listed in this report.</p>`
+    : '';
+  return `<ul style="margin:10px 0 0;padding-left:18px;">${items}</ul>${more}${truncatedMore}`;
+}
+
+/**
+ * The email body is deliberately short: a headline, the date/time, the five
+ * counts, the "attached" sentence and (optionally) record names + days left.
+ * It never carries a full Passport / Civil ID value — not even when the PDF
+ * does — so the body can never become a second copy of the table.
+ */
 export function renderDigestHtml(model: DigestReportModel): string {
   const empty = model.entries.length === 0;
-  const rows = empty
-    ? ''
-    : `<table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;font-size:13px;">
-      <thead>
-        <tr style="background:#f4f5f7;text-align:left;">
-          <th style="padding:8px;border-bottom:1px solid #d0d0d0;width:28px;">#</th>
-          <th style="padding:8px;border-bottom:1px solid #d0d0d0;">Record</th>
-          <th style="padding:8px;border-bottom:1px solid #d0d0d0;width:90px;">Expiry</th>
-          <th style="padding:8px;border-bottom:1px solid #d0d0d0;width:70px;">Days left</th>
-          <th style="padding:8px;border-bottom:1px solid #d0d0d0;width:110px;">Status</th>
-        </tr>
-      </thead>
-      <tbody>${summaryTableRowsHtml(model)}</tbody>
-    </table>`;
+  const headline = empty ? DIGEST_EMPTY_HEADLINE : 'DKS Daily Expiry Report';
+  const notes = bodyNotes(model)
+    .map((note) => `<p style="margin:10px 0 0;color:#555;font-size:13px;">${escapeHtml(note)}</p>`)
+    .join('');
 
   return [
     '<!doctype html>',
@@ -730,49 +880,44 @@ export function renderDigestHtml(model: DigestReportModel): string {
     'font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;color:#1f2328;">',
     '<div style="max-width:600px;margin:0 auto;background:#ffffff;border:1px solid #e2e4e8;',
     'border-radius:10px;padding:20px;">',
-    `<h1 style="margin:0 0 4px;font-size:20px;">DKS Daily Expiry Report</h1>`,
-    `<p style="margin:0 0 12px;color:#57606a;font-size:13px;">Report date: ${escapeHtml(model.reportDateDisplay)}</p>`,
-    `<p style="margin:0 0 6px;font-size:13px;"><strong>Summary</strong></p>`,
-    `<p style="margin:0 0 14px;color:#3d444d;font-size:13px;">${escapeHtml(summaryLine(model))}</p>`,
-    noticesHtml(model),
-    rows,
+    `<h1 style="margin:0 0 4px;font-size:20px;">${escapeHtml(headline)}</h1>`,
+    `<p style="margin:0 0 10px;color:#57606a;font-size:13px;">Report date: `
+    + `${escapeHtml(reportDateTimeLabel(model))}</p>`,
+    `<p style="margin:0 0 12px;color:#3d444d;font-size:13px;">${escapeHtml(summaryLine(model))}</p>`,
+    `<p style="margin:0;color:#1f2328;font-size:14px;font-weight:600;">${DIGEST_ATTACHMENT_SENTENCE}</p>`,
+    listHtml(model),
+    notes,
     '<hr style="border:none;border-top:1px solid #e2e4e8;margin:18px 0 10px;">',
-    `<p style="margin:0;font-size:13px;color:#3d444d;">A PDF with the full Visa Sheet columns is attached: `
-    + `<strong>${escapeHtml(model.pdfFileName)}</strong>.</p>`,
+    `<p style="margin:0;font-size:13px;color:#3d444d;">Attachment: `
+    + `<strong>${escapeHtml(model.pdfFileName)}</strong> `
+    + '(landscape A4 grid, one row per record, every visible Visa Sheet column).</p>',
     '</div></body></html>',
   ].join('');
 }
 
 export function renderDigestText(model: DigestReportModel): string {
+  const empty = model.entries.length === 0;
   const lines = [
-    'DKS Daily Expiry Report',
-    `Report date: ${model.reportDateDisplay}`,
-    '',
-    'Summary',
+    empty ? DIGEST_EMPTY_HEADLINE : 'DKS Daily Expiry Report',
+    `Report date: ${reportDateTimeLabel(model)}`,
     summaryLine(model),
     '',
+    DIGEST_ATTACHMENT_SENTENCE,
   ];
-  if (model.truncated) {
-    lines.push(
-      `This report shows the ${model.entries.length} most urgent of ${model.totalQualifying} `
-      + 'records expiring within 30 days.',
-      '',
-    );
-  }
-  if (model.entries.length === 0) {
-    lines.push('All clear — nothing expiring within the next 30 days.', '');
-  } else {
-    lines.push(
-      '# Record Expiry Days left Status',
-      ...model.entries.map((entry, index) =>
-        `${index + 1} ${entry.label} ${isoToDisplayDate(entry.expiry)} ${entry.daysLeft} ${entry.status}`,
-      ),
-    );
+  if (!empty) {
     lines.push('');
+    for (const entry of inlineListEntries(model)) {
+      lines.push(`- ${entry.label} — ${formatDaysLeft(entry.daysLeft)}`);
+    }
+    const remaining = model.entries.length - inlineListEntries(model).length;
+    if (remaining > 0) {
+      lines.push(`+${remaining} more in the attached PDF.`);
+    }
   }
-  if (!model.includeFullIds && model.columns.some((column) => column.sensitive)) {
-    lines.push('Passport and Civil ID values are masked in the attached PDF.', '');
+  const notes = bodyNotes(model);
+  if (notes.length > 0) {
+    lines.push('', ...notes);
   }
-  lines.push(`A PDF with the full Visa Sheet columns is attached: ${model.pdfFileName}`);
+  lines.push('', `Attachment: ${model.pdfFileName}`);
   return lines.join('\n');
 }

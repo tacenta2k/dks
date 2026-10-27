@@ -33,9 +33,12 @@ export interface EmailPrefsClient {
  *   adminEmail           — ONE recipient for pending Office sign-in requests.
  *   expiryDigestEnabled  — daily batch switch.
  *   expiryRecipients     — explicit list of digest recipients.
- *   includeFullIds       — ADMIN opt-in to put full Passport / Civil ID values
- *                          in the emailed PDF. Default OFF; sensitive
- *                          identifiers are masked everywhere otherwise.
+ *   includeFullIds       — put FULL Passport / Civil ID values in the emailed
+ *                          PDF. Default ON: the digest is addressed to the
+ *                          Admin mailbox only and the Admin must be able to
+ *                          call the customer from the email alone. Turning it
+ *                          OFF masks the identifiers in the PDF; the HTML /
+ *                          text body never carries them in either case.
  */
 
 export const EMAIL_PREFS_SETTINGS_KEY = 'email_notifications';
@@ -53,15 +56,23 @@ export const EMPTY_EMAIL_PREFS: EmailNotificationPrefs = {
   adminEmail: null,
   expiryDigestEnabled: false,
   expiryRecipients: [],
-  includeFullIds: false,
+  // Full identifiers are the product default (owner decision, 2026-10-27).
+  includeFullIds: true,
 };
 
 function toError(message: string, code?: string, cause?: unknown): AuthError {
   return { message, code, cause };
 }
 
-function parseBoolean(value: unknown): boolean {
-  return value === true;
+function parseBoolean(value: unknown, fallback = false): boolean {
+  // Only an explicit JSON false opts out; a missing key keeps the default.
+  if (value === true) {
+    return true;
+  }
+  if (value === false) {
+    return false;
+  }
+  return fallback;
 }
 
 function parseEmail(value: unknown): string | null {
@@ -101,7 +112,7 @@ export function parseEmailPrefs(value: unknown): EmailNotificationPrefs {
     adminEmail: parseEmail(record.admin_email) ?? null,
     expiryDigestEnabled: parseBoolean(record.expiry_digest_enabled),
     expiryRecipients: parseRecipients(record.expiry_recipients),
-    includeFullIds: parseBoolean(record.include_full_ids),
+    includeFullIds: parseBoolean(record.include_full_ids, true),
   };
 }
 

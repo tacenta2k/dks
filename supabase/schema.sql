@@ -1860,9 +1860,14 @@ $$;
 -- script. Everything below is additive and idempotent; no existing object is
 -- dropped. The Resend API key lives only in Edge Function secrets.
 --
--- Privacy: the digest payload carries only column metadata + record data; the
--- Edge Function masks passport / Civil ID values by default and never logs
--- raw values. The PDF is generated in memory and never persisted.
+-- Privacy: the digest payload carries only column metadata + record data and
+-- never logs raw values. The PDF is generated in memory and never persisted.
+-- FULL Passport / Civil ID values are the DEFAULT inside the PDF: the digest is
+-- addressed to the administrator mailbox only, and the administrator must be
+-- able to call the customer from the email alone. Setting
+-- include_full_ids = false (Settings -> Notifications) is the explicit opt-out
+-- that masks them. The HTML/plain-text body never carries identifiers either
+-- way.
 -- ============================================================================
 
 create table if not exists public.email_outbox (
@@ -1920,7 +1925,7 @@ values ('email_notifications', jsonb_build_object(
   'admin_email', null,
   'expiry_digest_enabled', false,
   'expiry_recipients', jsonb_build_array(),
-  'include_full_ids', false
+  'include_full_ids', true
 ))
 on conflict (key) do nothing;
 
@@ -2119,7 +2124,9 @@ begin
     return 0;
   end if;
 
-  v_include_full := coalesce((v_prefs ->> 'include_full_ids')::boolean, false);
+  -- Full identifiers are the default (Admin-only PDF); only an explicit
+  -- false in Settings -> Notifications masks them.
+  v_include_full := coalesce((v_prefs ->> 'include_full_ids')::boolean, true);
 
   select ac.id::text, ac.name
     into v_primary_id, v_primary_name

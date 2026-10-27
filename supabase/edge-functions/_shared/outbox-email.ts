@@ -5,6 +5,9 @@
  * Keeping this out of the Edge Function file means the email CONTENT (subject,
  * HTML, plain text, attachment decision) is unit tested without pulling the
  * Deno-only `npm:jspdf` import into the test program.
+ *
+ * The digest body stays short (one sentence + counts + record names/days left);
+ * the per-column table only ever exists in the in-memory PDF attachment.
  */
 
 import {
@@ -58,7 +61,8 @@ export function buildOutboxEmail(
         : muscatTodayIso(),
       columns: Array.isArray(payload.columns) ? payload.columns : [],
       currency: payload.currency,
-      includeFullIds: payload.includeFullIds === true,
+      // Admin-only PDF: full identifiers unless the row explicitly opted out.
+      includeFullIds: payload.includeFullIds !== false,
       entries: Array.isArray(payload.entries) ? payload.entries : [],
       totalQualifying: typeof payload.totalQualifying === 'number' ? payload.totalQualifying : undefined,
     });

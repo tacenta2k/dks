@@ -221,12 +221,13 @@ describe('settings page', () => {
         admin_email: 'new-admin@example.com',
         expiry_digest_enabled: true,
         expiry_recipients: ['one@example.com', 'two@example.com'],
-        include_full_ids: false,
+        // Full identifiers are the default; this row never stored the key.
+        include_full_ids: true,
       },
     }], { onConflict: 'key' });
   });
 
-  it('keeps full-identifier sharing OFF by default and forces it off for Office', async () => {
+  it('keeps full-identifier sharing ON by default and lets the Admin opt out', async () => {
     const upsert = vi.fn(async () => ({ data: [], error: null }));
     const emailPrefsClient = {
       from: vi.fn(() => ({
@@ -250,10 +251,11 @@ describe('settings page', () => {
     const includeFullIds = await screen.findByLabelText(
       'Include full Passport / Civil ID values in the emailed PDF',
     );
-    // Default OFF.
-    expect(includeFullIds).not.toBeChecked();
+    // Default ON: the PDF goes to the Admin mailbox, who may need to call the
+    // customer from the email alone.
+    expect(includeFullIds).toBeChecked();
 
-    // Toggling it on is recorded in the save payload.
+    // Opting out is recorded in the save payload.
     fireEvent.click(includeFullIds);
     fireEvent.click(screen.getByRole('button', { name: 'Save email preferences' }));
     expect(await screen.findByText('Email preferences saved.')).toBeInTheDocument();
@@ -264,15 +266,16 @@ describe('settings page', () => {
         admin_email: null,
         expiry_digest_enabled: false,
         expiry_recipients: [],
-        include_full_ids: true,
+        include_full_ids: false,
       },
     }], { onConflict: 'key' });
 
-    // The warning is visible so the administrator knows what they are opting in to.
-    expect(screen.getByText(/Warning: enabling this sends sensitive/i)).toBeInTheDocument();
+    // The warning is visible so the administrator knows what the PDF carries.
+    expect(screen.getByText(/sends sensitive passport and Civil ID numbers/i)).toBeInTheDocument();
+    expect(screen.getByText(/on by default/i)).toBeInTheDocument();
 
-    // Turning it back on is reflected in the UI state as well.
-    expect(includeFullIds).toBeChecked();
+    // The opt-out is reflected in the UI state as well.
+    expect(includeFullIds).not.toBeChecked();
   });
 
   it('does not render email preferences for Office at all', async () => {

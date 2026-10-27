@@ -501,6 +501,7 @@ describe('email notifications migration — jsonb seeds and digest typing', () =
 });
 
 const migrationSqlPath = resolve(process.cwd(), 'ARENA/sql/expiry-digest-report.sql');
+const fullColumnsMigrationPath = resolve(process.cwd(), 'ARENA/sql/digest-full-columns.sql');
 
 /** The executable text of one `create or replace function public.<name>` body. */
 function functionBody(sql: string, name: string): string {
@@ -566,16 +567,24 @@ function sqlTableAliases(body: string): string[] {
 
 describe('expiry digest function — PL/pgSQL variable/table-alias collisions', () => {
   const migrationSql = readFileSync(migrationSqlPath, 'utf8');
+  const fullColumnsSql = readFileSync(fullColumnsMigrationPath, 'utf8');
   const schemaSql = readFileSync(schemaPath, 'utf8');
 
-  it('defines enqueue_expiry_digest identically in the migration and the schema mirror', () => {
-    // The two files legitimately carry different explanatory comments (the
+  it('defines enqueue_expiry_digest identically in both migrations and the schema mirror', () => {
+    // The files legitimately carry different explanatory comments (each
     // migration's refer to its own section numbering), so compare the
-    // executable text: the definitions must never drift apart.
-    const migration = stripSqlComments(functionBody(migrationSql, 'enqueue_expiry_digest'));
+    // executable text: the definitions must never drift apart. Full Passport /
+    // Civil ID values are the default in all three (owner decision
+    // 2026-10-27), so the same body must appear everywhere.
     const mirror = stripSqlComments(functionBody(schemaSql, 'enqueue_expiry_digest'));
-
-    expect(migration).toBe(mirror);
+    for (const [file, sql] of [
+      ['ARENA/sql/expiry-digest-report.sql', migrationSql],
+      ['ARENA/sql/digest-full-columns.sql', fullColumnsSql],
+    ] as const) {
+      const body = stripSqlComments(functionBody(sql, 'enqueue_expiry_digest'));
+      expect(body, file).toBe(mirror);
+      expect(body, file).toMatch(/include_full_ids'\)::boolean, true/);
+    }
   });
 
   it('defines dks_parse_iso_date identically in the migration and the schema mirror', () => {

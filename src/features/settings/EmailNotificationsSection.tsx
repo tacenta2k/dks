@@ -166,8 +166,10 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
       </label>
 
       <p className="settings-help settings-help--warning" role="note">
-        Warning: enabling this sends sensitive passport and Civil ID numbers in
-        the daily PDF. Keep it off unless it is required.
+        Warning: this sends sensitive passport and Civil ID numbers in the
+        daily PDF. It is on by default because that PDF goes only to the
+        administrator mailbox, who may need to call the customer from the email
+        alone. Turn it off to mask them.
       </p>
 
       <p className="settings-help" role="note">

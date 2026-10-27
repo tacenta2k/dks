@@ -21,8 +21,10 @@
 --          app writes entries.data keyed by column id — see report §3);
 --        * payload carries columns + currency + includeFullIds + entries
 --          (id/expiry/daysLeft/data) + totalQualifying + truncated.
---   3. settings.email_notifications gains 'include_full_ids' (default false).
---      An existing true value is PRESERVED — no preference is reset.
+--   3. settings.email_notifications gains 'include_full_ids'. The DIGEST PDF is
+--      addressed to the Admin mailbox only, so the default is TRUE (full
+--      Passport / Civil ID values) — see ARENA/sql/digest-full-columns.sql.
+--      The column itself is additive; an existing value is PRESERVED.
 --   4. Revised service-role grants for the new/changed helpers.
 --
 -- WHAT DOES NOT CHANGE
@@ -122,9 +124,10 @@ begin
     return 0;
   end if;
 
-  -- Admin opt-in for full Passport / Civil ID values in the emailed PDF.
-  -- Default OFF; an existing true is preserved by §3.
-  v_include_full := coalesce((v_prefs ->> 'include_full_ids')::boolean, false);
+  -- Full Passport / Civil ID values in the emailed PDF. The PDF goes only to
+  -- the Admin mailbox, so full values are the DEFAULT; setting the preference
+  -- to false (Settings -> Notifications) is the explicit mask opt-out.
+  v_include_full := coalesce((v_prefs ->> 'include_full_ids')::boolean, true);
 
   -- The LIVE primary expiry column. Read by id first (the app's keying), with
   -- the column name as a legacy fallback.
@@ -227,14 +230,14 @@ revoke execute on function public.enqueue_expiry_digest() from public, anon, aut
 grant execute on function public.enqueue_expiry_digest() to service_role;
 
 -- ---------------------------------------------------------------------------
--- §3 — Admin opt-in flag (additive; an existing true value is preserved)
+-- §3 — Admin-only PDF preference (additive; an existing value is preserved)
 -- ---------------------------------------------------------------------------
 update public.settings
    set value = case
      when jsonb_typeof(value) = 'object' and value ? 'include_full_ids' then value
      when jsonb_typeof(value) = 'object'
-       then value || jsonb_build_object('include_full_ids', false)
-     else jsonb_build_object('include_full_ids', false)
+       then value || jsonb_build_object('include_full_ids', true)
+     else jsonb_build_object('include_full_ids', true)
    end,
        updated_at = now()
  where key = 'email_notifications';
@@ -245,7 +248,7 @@ values ('email_notifications', jsonb_build_object(
   'admin_email', null,
   'expiry_digest_enabled', false,
   'expiry_recipients', jsonb_build_array(),
-  'include_full_ids', false
+  'include_full_ids', true
 ))
 on conflict (key) do nothing;
 
@@ -263,8 +266,8 @@ commit;
 --   pg_get_functiondef(p.oid) ~* 'notification_days' as no_dynamic_window
 --   from pg_proc p join pg_namespace n on n.oid = p.pronamespace
 --  where n.nspname='public' and p.proname='enqueue_expiry_digest';
--- select 'include_full_ids_default' as check_,
---   coalesce((value ->> 'include_full_ids')::boolean, false) as off_by_default
+-- select 'include_full_ids' as check_,
+--   coalesce((value ->> 'include_full_ids')::boolean, true) as full_by_default
 --   from public.settings where key='email_notifications';
 -- select 'pending_outbox_preserved' as check_, count(*)
 --   from public.email_outbox where status = 'pending';
