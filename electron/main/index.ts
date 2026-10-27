@@ -20,6 +20,7 @@ import {
   UPDATER_RESTART_CHANNEL,
   UPDATER_STATUS_CHANNEL,
   type UpdateState,
+  type UpdateTransition,
   type UpdaterService,
   createUpdaterScheduler,
   type UpdaterScheduler,
@@ -191,6 +192,20 @@ function getAppVersion(): string {
   } catch {
     return '0.0.0';
   }
+}
+
+/** Status metadata only: no updater Error text, release URLs or local paths. */
+function logUpdaterTransition(transition: UpdateTransition): void {
+  const version = transition.version
+    ?.replace(/[\u0000-\u001f\u007f]/g, '')
+    .trim()
+    .slice(0, 80);
+  log.info('[dks] updater transition', {
+    from: transition.from,
+    to: transition.to,
+    ...(version ? { version } : {}),
+    ...(typeof transition.progress === 'number' ? { progress: transition.progress } : {}),
+  });
 }
 
 function isUsableWindow(window: BrowserWindow | null): window is BrowserWindow {
@@ -639,7 +654,10 @@ export async function startMainProcess(): Promise<boolean> {
 
   openLocalStore();
   notificationService = createNotificationService();
-  updaterService = createUpdaterService({ enabled: Boolean(app.isPackaged) });
+  updaterService = createUpdaterService({
+    enabled: Boolean(app.isPackaged),
+    onTransition: logUpdaterTransition,
+  });
   updaterService.onStatus((state) => {
     sendToRenderer(UPDATER_STATUS_CHANNEL, state);
   });

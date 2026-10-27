@@ -255,11 +255,15 @@ export type DksUpdateStatus =
   | 'error'
   | 'disabled';
 
+export type DksUpdateErrorKind = 'check' | 'download';
+
 export interface DksUpdateState {
   status: DksUpdateStatus;
   version?: string;
   /** Download completion 0–100 while downloading (when reported). */
   progress?: number;
+  /** Distinguishes a failed release check from a failed installer download. */
+  errorKind?: DksUpdateErrorKind;
 }
 
 export interface DksUpdaterApi {

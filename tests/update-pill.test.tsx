@@ -44,6 +44,7 @@ describe('top-bar update-ready pill', () => {
     );
 
     expect(container.querySelector('.topbar-update')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Later' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Restart to install' })).not.toBeInTheDocument();
   });
 
@@ -60,6 +61,7 @@ describe('top-bar update-ready pill', () => {
       );
 
       expect(screen.getByText('Update 0.1.1 ready')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Later' })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: 'Restart to install' })).toBeInTheDocument();
       if (role === 'office') {
         expect(screen.queryByRole('button', { name: 'Settings' })).not.toBeInTheDocument();
@@ -69,6 +71,36 @@ describe('top-bar update-ready pill', () => {
       expect(onStatus).not.toHaveBeenCalled();
     },
   );
+
+  it('Later hides only the session pill while Settings keeps the restart action', async () => {
+    const ready: DksUpdateState = { status: 'downloaded', version: '0.1.1' };
+    const { bridge } = fakeUpdater(ready);
+    const ui = (
+      <AppShell
+        activeView={'settings' as never}
+        profile={profileFor('admin')}
+        updateState={ready}
+        updater={bridge}
+      />
+    );
+    const { container, rerender, unmount } = render(ui);
+
+    fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
+    expect(await screen.findByText('Update 0.1.1 is ready to install.')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Later' }));
+
+    expect(container.querySelector('.topbar-update')).toBeNull();
+    expect(screen.getByRole('button', { name: 'Restart to install' })).toBeInTheDocument();
+    rerender(ui);
+    expect(container.querySelector('.topbar-update')).toBeNull();
+
+    // A fresh renderer/app launch has fresh in-memory state; nothing was
+    // persisted to suppress the prompt on the next launch.
+    unmount();
+    render(ui);
+    expect(screen.getByText('Update 0.1.1 ready')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Later' })).toBeInTheDocument();
+  });
 
   it('requires ConfirmDialog approval before calling the restart bridge exactly once', async () => {
     const { bridge, restartToUpdate } = fakeUpdater();

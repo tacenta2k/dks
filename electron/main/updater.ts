@@ -15,11 +15,15 @@ export type UpdateStatus =
    */
   | 'disabled';
 
+export type UpdateErrorKind = 'check' | 'download';
+
 export interface UpdateState {
   status: UpdateStatus;
   version?: string;
   /** Download completion 0–100 while status is 'downloading' (when reported). */
   progress?: number;
+  /** Which operation definitively failed; used for truthful, retryable copy. */
+  errorKind?: UpdateErrorKind;
 }
 
 export interface UpdateCheckResult {
@@ -41,12 +45,28 @@ export interface UpdaterAdapter {
   quitAndInstall?: () => void;
   /** Register a download-progress listener (percent 0–100), when supported. */
   onDownloadProgress?: (listener: (percent: number) => void) => void;
+  /** The authoritative completion signal, emitted before final cache cleanup. */
+  onUpdateDownloaded?: (listener: (version?: string) => void) => void;
+  /**
+   * Error events are diagnostic only. electron-updater can recover internally;
+   * the operation promise or update-downloaded event determines the outcome.
+   */
+  onError?: (listener: () => void) => void;
+}
+
+export interface UpdateTransition {
+  from: UpdateStatus;
+  to: UpdateStatus;
+  version?: string;
+  progress?: number;
 }
 
 export interface UpdaterServiceOptions {
   adapter?: UpdaterAdapter;
   enabled?: boolean;
   downloadInBackground?: boolean;
+  /** Receives state metadata only — never Error objects, URLs or file paths. */
+  onTransition?: (transition: UpdateTransition) => void;
 }
 
 export interface UpdaterService {
@@ -80,11 +100,21 @@ function createDefaultAdapter(): UpdaterAdapter {
     autoUpdater.autoInstallOnAppQuit = false;
 
     let progressListener: ((percent: number) => void) | undefined;
+    let downloadedListener: ((version?: string) => void) | undefined;
+    let errorListener: (() => void) | undefined;
     autoUpdater.on('download-progress', (info) => {
       const percent = typeof info?.percent === 'number' ? info.percent : NaN;
       if (Number.isFinite(percent)) {
         progressListener?.(percent);
       }
+    });
+    autoUpdater.on('update-downloaded', (info) => {
+      downloadedListener?.(typeof info?.version === 'string' ? info.version : undefined);
+    });
+    autoUpdater.on('error', () => {
+      // Do not forward Error objects or treat this event as final. In
+      // particular, downloadUpdate() still owns the final download verdict.
+      errorListener?.();
     });
 
     return {
@@ -98,6 +128,12 @@ function createDefaultAdapter(): UpdaterAdapter {
       quitAndInstall: () => autoUpdater.quitAndInstall(),
       onDownloadProgress: (listener) => {
         progressListener = listener;
+      },
+      onUpdateDownloaded: (listener) => {
+        downloadedListener = listener;
+      },
+      onError: (listener) => {
+        errorListener = listener;
       },
     };
   } catch {
@@ -114,6 +150,9 @@ function cloneState(state: UpdateState): UpdateState {
   }
   if (typeof state.progress === 'number' && Number.isFinite(state.progress)) {
     clone.progress = Math.max(0, Math.min(100, Math.round(state.progress)));
+  }
+  if (state.status === 'error' && (state.errorKind === 'check' || state.errorKind === 'download')) {
+    clone.errorKind = state.errorKind;
   }
   return clone;
 }
@@ -137,10 +176,32 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
 
   let state: UpdateState = { status: 'idle' };
   let checkPromise: Promise<UpdateState> | undefined;
+  let activeDownloadVersion: string | undefined;
 
   const setState = (nextState: UpdateState): UpdateState => {
+    // A completed installer remains usable until this process quits. Later
+    // launch/hourly/manual checks must never hide the only install action or
+    // replace the version of the installer that is actually on disk.
+    if (state.status === 'downloaded') {
+      return cloneState(state);
+    }
+
+    const previous = state;
     state = cloneState(nextState);
     const snapshot = cloneState(state);
+
+    if (previous.status !== state.status || previous.version !== state.version) {
+      try {
+        options.onTransition?.({
+          from: previous.status,
+          to: state.status,
+          ...(state.version ? { version: state.version } : {}),
+          ...(typeof state.progress === 'number' ? { progress: state.progress } : {}),
+        });
+      } catch {
+        // Diagnostics must never affect update handling.
+      }
+    }
 
     for (const listener of listeners) {
       try {
@@ -153,6 +214,13 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     return cloneState(state);
   };
 
+  const markDownloaded = (eventVersion?: string): UpdateState => {
+    const version = updateVersion({ updateInfo: { version: eventVersion } })
+      ?? activeDownloadVersion
+      ?? state.version;
+    return setState({ status: 'downloaded', ...(version ? { version } : {}) });
+  };
+
   // Download progress is meaningful only mid-download; stale events after a
   // completed/failed download are ignored rather than resurrecting the state.
   try {
@@ -161,8 +229,18 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
         setState({ status: 'downloading', version: state.version, progress: percent });
       }
     });
+    adapter.onUpdateDownloaded?.((version) => {
+      // This is electron-updater's authoritative completion event. It can
+      // precede final cache cleanup and resolution of downloadUpdate().
+      markDownloaded(version);
+    });
+    adapter.onError?.(() => {
+      // Error events are not final outcomes. The corresponding operation
+      // promise rejects on definitive failure; a recovered differential
+      // download instead reaches update-downloaded and must never show error.
+    });
   } catch {
-    // Progress is cosmetic; never let it break the state machine.
+    // Event hooks are supplemental; promise-based completion still works.
   }
 
   const checkForUpdates = async (): Promise<UpdateState> => {
@@ -172,6 +250,13 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       return setState({ status: 'disabled' });
     }
 
+    // Do not even start a new network operation after completion. Besides
+    // preserving stickiness, this lets repeated Settings/scheduler checks
+    // return the installer version that is ready right now.
+    if (state.status === 'downloaded') {
+      return cloneState(state);
+    }
+
     if (checkPromise) {
       return checkPromise;
     }
@@ -179,29 +264,44 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     checkPromise = (async () => {
       setState({ status: 'checking' });
 
+      let result: UpdateCheckResult | null | undefined;
       try {
-        const result = await adapter.checkForUpdates();
-        const version = updateVersion(result);
-
-        // electron-updater reports the latest version even when it equals
-        // the running one; `isUpdateAvailable === false` means UP TO DATE,
-        // not a download candidate.
-        if (!version || result?.isUpdateAvailable === false) {
-          return setState({ status: 'not-available' });
-        }
-
-        setState({ status: 'available', version });
-
-        if (downloadInBackground && adapter.downloadUpdate) {
-          setState({ status: 'downloading', version });
-          await adapter.downloadUpdate();
-          return setState({ status: 'downloaded', version });
-        }
-
-        return cloneState(state);
+        result = await adapter.checkForUpdates();
       } catch {
-        return setState({ status: 'error' });
+        return setState({ status: 'error', errorKind: 'check' });
       }
+
+      if (state.status === 'downloaded') {
+        return cloneState(state);
+      }
+
+      const version = updateVersion(result);
+
+      // electron-updater reports the latest version even when it equals
+      // the running one; `isUpdateAvailable === false` means UP TO DATE,
+      // not a download candidate.
+      if (!version || result?.isUpdateAvailable === false) {
+        return setState({ status: 'not-available' });
+      }
+
+      setState({ status: 'available', version });
+
+      if (downloadInBackground && adapter.downloadUpdate) {
+        activeDownloadVersion = version;
+        setState({ status: 'downloading', version });
+        try {
+          await adapter.downloadUpdate();
+        } catch {
+          // If update-downloaded already fired, setState preserves that
+          // completed installer instead of misreporting a later cleanup error.
+          return setState({ status: 'error', version, errorKind: 'download' });
+        } finally {
+          activeDownloadVersion = undefined;
+        }
+        return markDownloaded(version);
+      }
+
+      return cloneState(state);
     })();
 
     try {
@@ -220,7 +320,8 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
       adapter.quitAndInstall();
       return true;
     } catch {
-      setState({ status: 'error' });
+      // A failed restart does not delete the downloaded installer. Keep the
+      // ready state so the user can retry instead of losing the only action.
       return false;
     }
   };

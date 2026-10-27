@@ -40,8 +40,8 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error' });
-    expect(service.getState()).toEqual({ status: 'error' });
+    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error', errorKind: 'check' });
+    expect(service.getState()).toEqual({ status: 'error', errorKind: 'check' });
   });
 
   it('downloads releases in the background and exposes restart-to-update state', async () => {
@@ -147,9 +147,136 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error' });
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      version: '2.0.0',
+      errorKind: 'download',
+    });
     await expect(service.restartToUpdate()).resolves.toBe(false);
     expect(quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('keeps the downloaded version sticky across later errors and repeated checks', async () => {
+    let emitError: (() => void) | undefined;
+    const check = vi.fn(async () => ({
+      isUpdateAvailable: true,
+      updateInfo: { version: '2.0.0' },
+    }));
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: check,
+        downloadUpdate: vi.fn(async () => undefined),
+        onError: (listener) => {
+          emitError = listener;
+        },
+      }),
+      enabled: true,
+    });
+
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'downloaded',
+      version: '2.0.0',
+    });
+    emitError?.();
+    expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
+
+    // Settings-mount and hourly checks return the completed installer rather
+    // than starting work that could overwrite it with error/not-available.
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'downloaded',
+      version: '2.0.0',
+    });
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'downloaded',
+      version: '2.0.0',
+    });
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
+  });
+
+  it('does not surface a transient download error when update-downloaded follows', async () => {
+    let emitError: (() => void) | undefined;
+    let emitDownloaded: ((version?: string) => void) | undefined;
+    let finishDownload: (() => void) | undefined;
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({
+          isUpdateAvailable: true,
+          updateInfo: { version: '2.0.0' },
+        })),
+        downloadUpdate: vi.fn(() => new Promise<void>((resolve) => {
+          finishDownload = resolve;
+        })),
+        onError: (listener) => {
+          emitError = listener;
+        },
+        onUpdateDownloaded: (listener) => {
+          emitDownloaded = listener;
+        },
+      }),
+      enabled: true,
+    });
+    const statuses: string[] = [];
+    service.onStatus((state) => statuses.push(state.status));
+
+    const pending = service.checkForUpdates();
+    await vi.waitFor(() => expect(service.getState().status).toBe('downloading'));
+    emitError?.();
+    expect(service.getState().status).toBe('downloading');
+    expect(statuses).not.toContain('error');
+
+    emitDownloaded?.('2.0.0');
+    expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
+    finishDownload?.();
+    await expect(pending).resolves.toEqual({ status: 'downloaded', version: '2.0.0' });
+    expect(statuses).not.toContain('error');
+  });
+
+  it('keeps downloaded when final promise cleanup rejects after the completion event', async () => {
+    let emitDownloaded: ((version?: string) => void) | undefined;
+    let failDownload: ((error: Error) => void) | undefined;
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({
+          isUpdateAvailable: true,
+          updateInfo: { version: '2.0.0' },
+        })),
+        downloadUpdate: vi.fn(() => new Promise<void>((_resolve, reject) => {
+          failDownload = reject;
+        })),
+        onUpdateDownloaded: (listener) => {
+          emitDownloaded = listener;
+        },
+      }),
+      enabled: true,
+    });
+
+    const pending = service.checkForUpdates();
+    await vi.waitFor(() => expect(service.getState().status).toBe('downloading'));
+    emitDownloaded?.('2.0.0');
+    failDownload?.(new Error('cache cleanup failed'));
+    await expect(pending).resolves.toEqual({ status: 'downloaded', version: '2.0.0' });
+    expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
+  });
+
+  it('reports sanitized transition metadata and never the underlying error', async () => {
+    const onTransition = vi.fn();
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => {
+          throw new Error('secret release URL and local path');
+        }),
+      }),
+      enabled: true,
+      onTransition,
+    });
+
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      errorKind: 'check',
+    });
+    expect(onTransition).toHaveBeenLastCalledWith({ from: 'checking', to: 'error' });
+    expect(JSON.stringify(onTransition.mock.calls)).not.toContain('secret');
   });
 
   it('runs a launch check and schedules hourly checks through injectable timers', async () => {

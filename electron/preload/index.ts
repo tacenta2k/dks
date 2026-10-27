@@ -673,7 +673,12 @@ function normaliseUpdateState(value: unknown): UpdateState {
     return { status: 'error' };
   }
 
-  const record = value as { status?: unknown; version?: unknown; progress?: unknown };
+  const record = value as {
+    status?: unknown;
+    version?: unknown;
+    progress?: unknown;
+    errorKind?: unknown;
+  };
   const statuses: UpdateState['status'][] = [
     'idle',
     'checking',
@@ -695,6 +700,9 @@ function normaliseUpdateState(value: unknown): UpdateState {
   }
   if (typeof record.progress === 'number' && Number.isFinite(record.progress)) {
     state.progress = Math.max(0, Math.min(100, Math.round(record.progress)));
+  }
+  if (state.status === 'error' && (record.errorKind === 'check' || record.errorKind === 'download')) {
+    state.errorKind = record.errorKind;
   }
   return state;
 }
