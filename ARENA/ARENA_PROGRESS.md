@@ -2805,3 +2805,169 @@ fix. Do not interpret an old install's failure as a regression in this branch.
 
 All Windows results above remain **USER-ONLY / not yet confirmed** until the
 owner performs them on installations containing this fix.
+
+---
+
+## 36. Live Visa Sheet — two PCs see each other's saved changes (2026-10-27)
+
+Session branch: `arena/b053bb3a-dks` (from `main` @ `f324223`).
+Status: **IMPLEMENTED_AWAITING_CONFIRMATION** — implemented, tests pass, SQL
+must be run by the owner, and nothing here was verified against the live
+Supabase project or on Windows by the agent.
+
+### 36.1 What was built (owner's design decision: change notification only)
+
+Two users editing the Visa Sheet from different PCs must see each other's
+**saved** changes within a few seconds, inside the Supabase free tier. The
+owner chose notification-only sync: no keystroke/cell streaming, a debounced
+pull of the existing reconcile path, RLS-respecting, with the existing timer
+sync as the fallback.
+
+1. **SQL — publish the two data tables (no security change).**
+   `public.entries` and `public.app_columns` are added to the
+   `supabase_realtime` publication if absent, in two places:
+   * `supabase/schema.sql` (fresh installs, same `do $$ … $$` guard block as
+     `settings` / `admin_notifications` / `office_signin_requests`);
+   * `ARENA/sql/realtime-live-sheet.sql` (existing projects; the owner runs it
+     manually in the Supabase SQL editor).
+   The migration is read-only preflight → one transaction → read-only
+   verification, and is idempotent. It creates, drops and alters **nothing**
+   else: no policy, grant, trigger, table or column. Realtime
+   `postgres_changes` is filtered by the table's existing RLS SELECT policies,
+   so Office only ever receives a change for a row it may already SELECT and a
+   pending/revoked session receives none. The script refuses to install and
+   raises `42501` if (a) the publication is missing, (b) RLS is disabled on
+   either table, (c) there is no `authenticated` SELECT policy (silently no
+   events), or (d) an anonymous SELECT policy exists (leak).
+
+2. **Renderer — one channel per client, events are only "something changed".**
+   `src/features/sync/live-sheet-realtime.ts` (new) owns the subscription and
+   `src/renderer/App.tsx` wires it into the existing sync effect:
+   * one channel (`dks-live-sheet`) with two `postgres_changes` filters,
+     `event: '*'`, tables `entries` and `app_columns`;
+   * any number of events inside a **1 s** window → exactly ONE wake-up, which
+     calls the existing debounced `runSupabaseSync` pull/reconcile; the result
+     bumps `repositoryRevision`, so Sheet / Dashboard / Recycle Bin refresh
+     quietly through `refreshToken` (no remount, no loading overlay);
+   * payloads are **never** read for values — LWW, the outbox and the guard
+     checks of `runSupabaseSync` are unchanged;
+   * the 1.5 s push debounce after a local write is kept (never per keystroke)
+     and the 60 s timer sync remains the fallback;
+   * `CLOSED` / `CHANNEL_ERROR` / `TIMED_OUT` reconnect with exponential
+     backoff + jitter (base 1 s, cap 30 s, 0–30 % positive jitter) and exactly
+     one catch-up sync on re-`SUBSCRIBED`; late status callbacks from a
+     replaced channel are ignored and `dispose()` is safe to call twice;
+   * echo hint (best effort): a wake-up arriving while this device's own sync
+     run is in flight is dropped, because that same run refreshes the page.
+     Correctness never depends on it — the timer sync catches anything missed;
+   * the subscription lives only inside the sync effect's allowed state
+     (authenticated; for Office approved with the current request id), so
+     sign-out, revocation and the clearance-pending gate dispose the watcher
+     and call `removeChannel`. It never exists in the Office gate state.
+
+3. **No editing regression.** A Realtime-triggered refresh is the same quiet
+   `refreshToken` path the 60 s timer already uses, so an open cell editor,
+   its typed text, dialogs and input focus survive. Draft row, drag-reorder and
+   the keyboard contract are untouched, and no sync-pill wording, colour entry
+   or popover row was added.
+
+### 36.2 Expected quota (free tier) — far under the limits
+
+* **1 Realtime connection per signed-in DKS client** (one data channel; the
+  pre-existing approval channel is a separate, short-lived channel for the
+  Office gate only). Two PCs = 2 connections of the free 200 concurrent.
+* **~1 message per saved change per OTHER connected client.** A row save is one
+  `entries` UPDATE; a column add is one `app_columns` INSERT. Bursts are
+  coalesced client-side, so messages never multiply per keystroke or per sync.
+* Example worst case: 2 PCs × 200 saved changes/day × 22 days ≈ 8,800
+  messages/month — 0.44 % of the 2,000,000 monthly free messages.
+* Reconnects are exponential with jitter (1 s → 30 s), so a paused project or
+  a lost network cannot create a reconnect storm.
+
+### 36.3 Files changed (this increment)
+
+Added: `src/features/sync/live-sheet-realtime.ts`,
+`ARENA/sql/realtime-live-sheet.sql`, `tests/live-sheet-realtime.test.ts`,
+`tests/live-sheet-app-realtime.test.tsx`,
+`tests/live-sheet-editor-refresh.test.tsx`,
+`tests/realtime-live-sheet-schema.test.ts`.
+Changed: `src/renderer/App.tsx` (subscription replaced by the watcher; dispose
+on teardown), `supabase/schema.sql` (publication block + comment),
+`ARENA/TO_DO_LIST.md` (LIVE-01..04), this file.
+
+### 36.4 Tests added (24)
+
+* `live-sheet-realtime` (11): one channel + two filters; **burst of 10 events →
+  exactly 1 sync**; a later burst is one more sync; payload treated as opaque;
+  busy/echo skip; `CHANNEL_ERROR` → backoff → re-subscribe → **exactly one
+  catch-up sync**; exponential delays with bounded jitter and the 30 s cap;
+  stale-channel callbacks ignored; dispose unsubscribes and stops everything;
+  a throwing registration retries instead of crashing.
+* `live-sheet-app-realtime` (5): **no channel while the Office session is
+  pending**; no channel when signed out; exactly one channel with both table
+  filters for an approved session; `removeChannel` on **revocation**; 
+  `removeChannel` on **sign-out**.
+* `live-sheet-editor-refresh` (1): on the REAL AG Grid, an open cell editor
+  keeps its DOM input and typed text across a Realtime-style `refreshToken`
+  refresh that also brings in a newly pulled record.
+* `realtime-live-sheet-schema` (7): static contract (both tables published
+  idempotently in `schema.sql` and in the migration; no policy/grant/trigger/
+  DDL; quota documented) plus three real-PostgreSQL (PGlite) runs: idempotent
+  install with RLS and the policy list unchanged, and aborts (`42501`) for a
+  table without RLS and for an anonymous SELECT policy.
+
+### 36.5 Local gate (not Windows / not live Supabase verification)
+
+Sandbox runtime was Node 22.22.3, not the repository's pinned Node 20.19.0.
+`npm ci --ignore-scripts` plus a local `node-gyp rebuild --nodedir=/usr/local`
+of `better-sqlite3` was used only to execute this Linux suite; no dependency,
+version or lockfile change is included in the commit.
+
+* Focused run (sync, sheet, approval, schema suites): **10 files, 124/124
+  passed**.
+* `npm test`: **82 files passed; 734 passed / 3 skipped / 0 failed (737
+  total)** in 272.67 s — the 24 new tests plus the previous 710. The three
+  skips are the pre-existing real-Electron packaging probes.
+* `npm run typecheck`: **PASS** (renderer/tests and Electron configs).
+* `npm run build`: **PASS** (renderer 2,737.70 kB bundle + Electron build).
+  Existing Vite chunk-size and AG Grid Community warnings remain.
+
+### 36.6 Owner steps
+
+1. In the Supabase SQL editor, run the read-only preflight in
+   `ARENA/sql/realtime-live-sheet.sql`; confirm `entries` and `app_columns`
+   have RLS enabled, an `authenticated` SELECT policy, and no anonymous read
+   policy, and that `authenticated` has SELECT on both tables.
+2. Run the transaction, then the read-only verification. Expect both tables to
+   appear once in `pg_publication_tables`, RLS still `true`, and the policy
+   list identical to the preflight. Running the file a second time must not
+   duplicate rows.
+3. Do not change any RLS policy. If the preflight shows something unexpected,
+   stop and resolve it first — the script will refuse to install.
+
+### 36.7 The 2-PC manual test (the acceptance test)
+
+Prerequisites: two PCs signed in to the two shared accounts, both online, the
+branch build installed on both, and the SQL in §36.6 applied. Do not use two
+windows on one PC.
+
+1. **A → B.** On PC A, edit a Visa Sheet cell and wait for the sync pill to
+   stop showing pending. Within ~3 s PC B shows the new value **without** being
+   clicked or refreshed, and without a page remount (scroll position, filters
+   and selection stay put).
+2. **B → A.** Repeat in the other direction.
+3. **No noisy side effects.** On the receiving PC: no editor closes mid-typing
+   if the user is editing another cell, no dialogs close, no extra pill text,
+   no spinner, no full-grid flash. The sheet does not jump to the top.
+4. **Column changes.** Add a column on one PC; the other sees the new column.
+5. **Offline catch-up.** Take PC B offline (disable the NIC / quit the Wi-Fi).
+   Edit a row on PC A. Confirm PC B keeps working locally and its pill becomes
+   "Offline — saved locally" (or shows the pending count it actually has).
+   Reconnect PC B: within a few seconds it reconnects (one catch-up sync) and
+   shows PC A's change; PC B's own offline edits then reach the cloud.
+6. **Gate safety.** Sign the Office account out and back in so the session is
+   pending approval. While the gate is on screen there must be no data sync;
+   once approved (and after revoke → sign-out) the channel must be gone
+   (Network tab: no Realtime websocket messages for entries/app_columns).
+7. Record what was observed. Until then this stays
+   IMPLEMENTED_AWAITING_CONFIRMATION.
