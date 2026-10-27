@@ -396,6 +396,79 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 /**
+ * Office 3-day visibility window (owner decision, 2026-10-27): Office may see
+ * and work with only records CREATED in the last 3 calendar days (Asia/Muscat,
+ * today included). Admin sees everything. Creation date only — an Admin edit
+ * to an older record does NOT bring it back for Office.
+ *
+ * `created_at` values are stored as ISO timestamps (UTC instants); the window
+ * boundary is the Muscat calendar date, so 23:59 and 00:01 Asia/Muscat fall on
+ * different sides of a midnight even though they are minutes apart.
+ */
+export const DKS_BUSINESS_TIME_ZONE = 'Asia/Muscat';
+export const OFFICE_WINDOW_DAYS = 3;
+
+const muscatDateFormatter = new Intl.DateTimeFormat('en-CA', {
+  timeZone: DKS_BUSINESS_TIME_ZONE,
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+});
+
+/** The Muscat calendar date (YYYY-MM-DD) of a stored timestamp. */
+export function muscatDateOf(value: string | number | Date): string {
+  const parsed = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(parsed.getTime())) {
+    // An unusable timestamp must never qualify for the Office window.
+    return '';
+  }
+  return muscatDateFormatter.format(parsed);
+}
+
+/** The first Muscat date still visible to Office (today minus 3, inclusive). */
+export function officeWindowCutoffDate(muscatToday: string): string {
+  const parsed = Date.parse(`${muscatToday}T12:00:00Z`);
+  if (Number.isNaN(parsed)) return '';
+  return new Date(parsed - OFFICE_WINDOW_DAYS * 86_400_000).toISOString().slice(0, 10);
+}
+
+/** True when `createdAt`'s Muscat date is on/after the Muscat cutoff for `at`. */
+export function isWithinOfficeWindow(
+  createdAt: string | number | Date | null | undefined,
+  at: string | number | Date = new Date(),
+): boolean {
+  if (createdAt === null || createdAt === undefined || createdAt === '') return false;
+  const created = muscatDateOf(createdAt);
+  const cutoff = officeWindowCutoffDate(muscatDateOf(at));
+  return created !== '' && cutoff !== '' && created >= cutoff;
+}
+
+export interface OfficeScopeRow {
+  id: string;
+  deleted?: boolean;
+  created_at?: string;
+  createdAt?: string;
+}
+
+/**
+ * Defense-in-depth read scope for the Office role: a row is readable iff it is
+ * Office-visible (`deleted = false` AND inside the 3-day creation window) OR it
+ * still has unsynced outbox work (a locally created/edited row is never hidden
+ * or purged until pushed — after that it "falls out of view naturally"). The
+ * sync engine needs those pending rows in the snapshot to push them.
+ */
+export function filterRowsForOfficeScope<T extends OfficeScopeRow>(
+  rows: readonly T[],
+  unsyncedEntryIds: ReadonlySet<string>,
+  at: string | number | Date = new Date(),
+): T[] {
+  return rows.filter((row) => (
+    unsyncedEntryIds.has(row.id)
+    || (row.deleted !== true && isWithinOfficeWindow(row.created_at ?? row.createdAt, at))
+  ));
+}
+
+/**
  * The generated "Days Left" system column is protected by ID only
  * (`col.id === 'daysLeft'`), never by name: a legacy persisted user column
  * NAMED "Days Left" (e.g. id `days_left`) must remain deletable.
@@ -449,6 +522,7 @@ export class SqliteStore {
   private readonly now: () => string;
   private readonly idFactory: () => string;
   private closed = false;
+  private lastOfficePurgeMuscatDate: string | null = null;
 
   public constructor(options: SqliteStoreOptions | string = {}) {
     const normalizedOptions: SqliteStoreOptions = typeof options === 'string'
@@ -1749,6 +1823,62 @@ export class SqliteStore {
       createdAt: String(row.created_at),
       updatedAt: String(row.updated_at),
     }));
+  }
+
+  /**
+   * Entry ids whose outbox work has not reached 'synced': queued creates and
+   * edits still to push, plus retained terminal items ("the local change stays
+   * present"). Those rows are never hidden by the Office read scope and never
+   * removed by the visibility purge until they have been pushed.
+   */
+  public unsyncedEntryIds(): Set<string> {
+    this.ensureOpen();
+    const rows = this.database.prepare(
+      "SELECT DISTINCT entity_id AS id FROM outbox WHERE entity_type = 'entry' AND status <> 'synced'",
+    ).all() as { id?: unknown }[];
+    return new Set(rows.map((row) => String(row.id)));
+  }
+
+  /**
+   * VISIBILITY PURGE (Office devices): remove cached rows outside the 3-day
+   * creation window. This is not a deletion — no outbox item, no audit
+   * 'delete', no server effect — the cache simply stops mirroring rows Office
+   * cannot see (RLS hides them remotely). Rows with unsynced outbox work are
+   * kept until pushed. Callers gate this on the Office role/scope; Admin must
+   * never purge.
+   *
+   * `onlyIfDateChanged` runs the purge at launch and then at most once per
+   * Muscat date (a row can only leave the window at Muscat midnight).
+   */
+  public purgeOutOfWindowOfficeEntries(options?: { onlyIfDateChanged?: boolean; at?: string }): number {
+    this.ensureOpen();
+    const nowValue = options?.at ?? this.now();
+    const today = muscatDateOf(nowValue);
+    if (options?.onlyIfDateChanged && this.lastOfficePurgeMuscatDate === today) {
+      return 0;
+    }
+    this.lastOfficePurgeMuscatDate = today;
+    const cutoff = officeWindowCutoffDate(today);
+    if (!cutoff) return 0;
+    const unsynced = this.unsyncedEntryIds();
+    const rows = this.database.prepare('SELECT id, created_at FROM entries').all() as {
+      id?: unknown;
+      created_at?: unknown;
+    }[];
+    const doomed = rows.filter((row) => {
+      const id = String(row.id);
+      if (unsynced.has(id)) return false;
+      const created = muscatDateOf(String(row.created_at ?? ''));
+      return created !== '' && created < cutoff;
+    });
+    if (doomed.length > 0) {
+      const remove = this.database.prepare('DELETE FROM entries WHERE id = ?');
+      const execute = this.database.transaction(() => {
+        for (const row of doomed) remove.run(String(row.id));
+      });
+      execute();
+    }
+    return doomed.length;
   }
 
   public async flush(): Promise<void> {

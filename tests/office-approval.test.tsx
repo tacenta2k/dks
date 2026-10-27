@@ -859,7 +859,8 @@ describe('immediate approval and revocation', () => {
     const syncState = { status: 'offline' as const, lastSyncAt: null, lastError: null, pendingCount: 0 };
     const snapshot = { rows: [], deletedRows: [], columns: [], syncStatus: syncState };
     const local = {
-      setSessionClearance: vi.fn(async (next: 'allowed' | 'office-pending') => {
+      setSessionClearance: vi.fn(async (payload: 'allowed' | 'office-pending' | { state: 'allowed' | 'office-pending' }) => {
+        const next = typeof payload === 'string' ? payload : payload.state;
         order.push(`clearance:${next}:start`);
         if (next === 'office-pending') fenced = true;
         if (next === 'allowed' && fenced) await allowed;
@@ -920,7 +921,7 @@ describe('immediate approval and revocation', () => {
     let notify: (() => void) | undefined;
     const snapshot = { rows: [], deletedRows: [], columns: [], syncStatus: { status: 'offline', lastSyncAt: null, lastError: null, pendingCount: 0 } };
     const local = {
-      setSessionClearance: vi.fn(async (next: string) => next),
+      setSessionClearance: vi.fn(async (next: string | { state: string }) => (typeof next === 'string' ? next : next.state)),
       onOperationSuccess: (callback: () => void) => { notify = callback; return () => { notify = undefined; }; },
       getSnapshot: vi.fn(async () => {
         attempts += 1;

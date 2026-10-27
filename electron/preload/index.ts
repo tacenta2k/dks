@@ -193,12 +193,24 @@ export interface DksLocalOutboxItem {
 }
 
 export interface DksLocalApi {
-  getSnapshot: () => Promise<DksLocalSnapshot>;
+  /**
+   * Local cache snapshot. The optional `role` is the authenticated profile's
+   * role, validated in the main process exactly like every other role
+   * parameter ('admin' | 'office'); 'office' reads are scoped to the 3-day
+   * creation window, 'admin' reads are unfiltered. Absent keeps the legacy
+   * unfiltered reads — there is no flag that widens the scope.
+   */
+  getSnapshot: (input?: { role?: 'admin' | 'office' | string | null }) => Promise<DksLocalSnapshot>;
   /**
    * Office sign-in approval: push the current session clearance
-   * ('office-pending' while waiting for admin approval).
+   * ('office-pending' while waiting for admin approval). The object form
+   * additionally reports the signed-in profile's role so the local store can
+   * scope Office reads to the 3-day window via the existing clearance
+   * mechanism.
    */
-  setSessionClearance: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
+  setSessionClearance: (
+    state: 'office-pending' | 'allowed' | { state: 'office-pending' | 'allowed'; role?: 'admin' | 'office' | null },
+  ) => Promise<'office-pending' | 'allowed'>;
   onOperationSuccess: (listener: () => void) => () => void;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
@@ -468,11 +480,18 @@ function validateAddNotification(value: unknown): void {
   }
 }
 
+function validateOptionalRole(input: Record<string, unknown>, label: string): void {
+  if (input.role !== undefined && input.role !== null && typeof input.role !== 'string') {
+    throw new TypeError(`${label} role must be a string`);
+  }
+}
+
 function validateRemoteSnapshot(value: unknown): void {
   const input = requireRecord(value, 'remote snapshot input');
   if (!Array.isArray(input.rows) || !Array.isArray(input.columns)) {
     throw new TypeError('remote snapshot rows and columns must be arrays');
   }
+  validateOptionalRole(input, 'remote snapshot input');
   input.rows.forEach((row, index) => {
     const item = requireRecord(row, `remote rows[${index}]`);
     requireId(item.id, `remote rows[${index}].id`);
@@ -484,6 +503,28 @@ function validateRemoteSnapshot(value: unknown): void {
     requireId(item.name, `remote columns[${index}].name`);
     requireId(item.type, `remote columns[${index}].type`);
   });
+}
+
+function validateScopeInput(value: unknown): void {
+  if (value === undefined || value === null) return;
+  const input = requireRecord(value, 'scope input');
+  validateOptionalRole(input, 'scope input');
+}
+
+function validateSessionClearance(value: unknown): void {
+  if (typeof value === 'string') {
+    if (value !== 'office-pending' && value !== 'allowed') {
+      throw new TypeError('session clearance state must be office-pending or allowed');
+    }
+    return;
+  }
+  const input = requireRecord(value, 'session clearance input');
+  if (input.state !== 'office-pending' && input.state !== 'allowed') {
+    throw new TypeError('session clearance state must be office-pending or allowed');
+  }
+  if (input.role !== undefined && input.role !== null && input.role !== 'admin' && input.role !== 'office') {
+    throw new TypeError('session clearance role must be admin or office');
+  }
 }
 
 function validateSettingsInput(value: unknown): void {
@@ -597,7 +638,8 @@ async function invokeLocal<T>(
 }
 
 const localApi: DksLocalApi = Object.freeze({
-  getSnapshot: () => invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.getSnapshot, undefined),
+  getSnapshot: (input?: { role?: 'admin' | 'office' | string | null }) =>
+    invokeLocal<DksLocalSnapshot>(LOCAL_CHANNELS.getSnapshot, input, validateScopeInput),
   onOperationSuccess: (listener: () => void) => {
     if (typeof listener !== 'function') throw new TypeError('listener must be a function');
     localSuccessListeners.add(listener);
@@ -653,10 +695,12 @@ const localApi: DksLocalApi = Object.freeze({
   /**
    * Office sign-in approval: 'office-pending' while an Office session awaits
    * admin approval (customer-data channels refuse in the main process);
-   * 'allowed' for Admin/demo/sign-out.
+   * 'allowed' for Admin/demo/sign-out. The object form `{ state, role }` also
+   * reports the signed-in profile's role (existing clearance mechanism).
    */
-  setSessionClearance: (state: 'office-pending' | 'allowed') =>
-    invokeLocal<'office-pending' | 'allowed'>(LOCAL_CHANNELS.setSessionClearance, state, undefined),
+  setSessionClearance: (
+    state: 'office-pending' | 'allowed' | { state: 'office-pending' | 'allowed'; role?: 'admin' | 'office' | null },
+  ) => invokeLocal<'office-pending' | 'allowed'>(LOCAL_CHANNELS.setSessionClearance, state, validateSessionClearance),
 });
 
 function getAppVersion(): string {

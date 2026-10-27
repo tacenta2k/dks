@@ -10,7 +10,9 @@ import type {
   ConflictRecord,
   RemoteColumnInput,
   RemoteEntryInput,
+  OfficeScopeRow,
 } from './sqlite';
+import { filterRowsForOfficeScope } from './sqlite';
 import type { SyncState, SyncStatus } from './sync';
 import {
   localStoreUnavailableMessage,
@@ -69,6 +71,17 @@ export type LocalIpcChannel = (typeof LOCAL_IPC_CHANNELS)[keyof typeof LOCAL_IPC
  */
 export type LocalSessionClearance = 'allowed' | 'office-pending';
 
+/**
+ * The role of the CURRENT signed-in session, reported through the existing
+ * session-clearance channel alongside the clearance state. This is one of the
+ * two established mechanisms (session clearance + the validated per-call
+ * `role` parameter) through which the local store learns its read scope —
+ * never a new renderer-supplied flag. 'admin' reads are unfiltered; 'office'
+ * reads follow the 3-day creation window; `null` (never reported) keeps the
+ * legacy unfiltered reads and NEVER authorises the visibility purge.
+ */
+export type LocalSessionRole = 'admin' | 'office';
+
 /** Channels still allowed from a pending Office session (no customer data). */
 const CLEARANCE_EXEMPT_CHANNELS: ReadonlySet<string> = new Set([
   LOCAL_IPC_CHANNELS.close,
@@ -79,16 +92,23 @@ export const LOCAL_CLEARANCE_CHANNEL = 'dks:local:set-session-clearance';
 export interface LocalSessionClearanceApi {
   get: () => LocalSessionClearance;
   set: (next: LocalSessionClearance) => void;
+  getRole: () => LocalSessionRole | null;
+  setRole: (role: LocalSessionRole | null) => void;
 }
 
 export function createLocalSessionClearance(
   initial: LocalSessionClearance = 'allowed',
 ): LocalSessionClearanceApi {
   let current: LocalSessionClearance = initial;
+  let role: LocalSessionRole | null = null;
   return {
     get: () => current,
     set: (next) => {
       current = next === 'office-pending' ? 'office-pending' : 'allowed';
+    },
+    getRole: () => role,
+    setRole: (next) => {
+      role = next === 'admin' || next === 'office' ? next : null;
     },
   };
 }
@@ -142,6 +162,8 @@ export interface LocalIpcStore {
   markOutboxFailed?: (id: number | string, message: string) => void;
   markOutboxTerminal?: (id: number | string, message: string) => void;
   retryFailedOutbox?: () => number;
+  /** Office-only visibility purge (see SqliteStore.purgeOutOfWindowOfficeEntries). */
+  purgeOutOfWindowOfficeEntries?: (options?: { onlyIfDateChanged?: boolean; at?: string }) => number;
   sync?: () => Promise<void> | void;
   flush: () => Promise<void> | void;
   close: () => CloseSyncResult;
@@ -160,6 +182,14 @@ export interface LocalIpcDependencies {
    * customer-data handler refuses (see LocalSessionClearance docs).
    */
   sessionClearance?: () => LocalSessionClearance;
+  /**
+   * Role of the current session, established through the existing clearance
+   * channel (see LocalSessionRole). Read handlers use it to choose the Office
+   * 3-day window scope; `null` keeps legacy unfiltered reads and never
+   * authorises the visibility purge. A per-call `role` in the payload takes
+   * precedence and is validated exactly like every other role parameter.
+   */
+  sessionRole?: () => LocalSessionRole | null;
 }
 
 export type LocalIpcHandler = (payload?: unknown, event?: unknown) => unknown;
@@ -246,6 +276,11 @@ function roleFrom(value: unknown): string {
   return role;
 }
 
+/** `roleFrom` narrowed to the session-role union it already validates. */
+function sessionRoleFrom(value: unknown): LocalSessionRole {
+  return roleFrom(value) as LocalSessionRole;
+}
+
 function generatedColumnId(name: string): string {
   const id = name.trim().toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '');
   return id || 'column';
@@ -268,6 +303,44 @@ function getRows(store: LocalIpcStore, includeDeleted: boolean): readonly unknow
     return store.listRows(includeDeleted);
   }
   return store.listEntries?.(includeDeleted) ?? [];
+}
+
+/** Resolved read scope for one call: 'office' filters, anything else is legacy. */
+type LocalReadScope = LocalSessionRole | null;
+
+/**
+ * Entry ids with outbox work that has not been pushed ('synced'), including
+ * retained terminal items. The Office read scope keeps exactly these rows
+ * visible even when they left the 3-day window, so the sync engine can still
+ * push them (or run the terminal-state path) before they fall out of view.
+ */
+function unsyncedEntryIds(store: LocalIpcStore): Set<string> {
+  const ids = new Set<string>();
+  for (const item of store.listOutbox?.('all') ?? []) {
+    const record = asRecord(item, 'outbox item');
+    const entityType = String(record.entityType ?? record.entity_type ?? '');
+    const entityId = String(record.entityId ?? record.entity_id ?? '');
+    const status = String(record.status ?? 'pending');
+    if (entityType === 'entry' && entityId && status !== 'synced') {
+      ids.add(entityId);
+    }
+  }
+  return ids;
+}
+
+/**
+ * The read scope comes from the EXISTING role mechanisms only: the validated
+ * per-call `role` parameter (identical to `deleteColumn`'s role handling — a
+ * missing/invalid role is denied, never assumed to be admin) takes precedence,
+ * then the session-clearance role. There is deliberately no flag that widens
+ * the scope; an unreported role keeps the legacy unfiltered reads and never
+ * authorises the visibility purge (purging is Office-only).
+ */
+function resolveReadScope(payload: unknown, sessionRole: (() => LocalSessionRole | null) | undefined): LocalReadScope {
+  if (isRecord(payload) && payload.role !== undefined && payload.role !== null) {
+    return sessionRoleFrom(payload.role);
+  }
+  return sessionRole?.() ?? null;
 }
 
 function getRow(store: LocalIpcStore, id: string): unknown | null {
@@ -398,7 +471,7 @@ function permanentDeleteRow(
   return current;
 }
 
-function storeSnapshot(store: LocalIpcStore): {
+function storeSnapshot(store: LocalIpcStore, scope: LocalReadScope = null, at: () => string = () => new Date().toISOString()): {
   rows: Record<string, unknown>[];
   activeRows: Record<string, unknown>[];
   deletedRows: Record<string, unknown>[];
@@ -407,9 +480,19 @@ function storeSnapshot(store: LocalIpcStore): {
   settings: Record<string, unknown>;
   syncStatus: SyncState;
 } {
-  const rows = getRows(store, true)
+  let rows = getRows(store, true)
     .map((row) => rowFromUnknown(row))
     .filter((row): row is Record<string, unknown> => row !== null);
+  if (scope === 'office') {
+    // Defense in depth: Office reads follow the same 3-day window as RLS, but
+    // rows with unsynced outbox work stay readable until pushed (the sync
+    // engine must see them to push; afterwards they fall out of view).
+    rows = filterRowsForOfficeScope(
+      rows as unknown as OfficeScopeRow[],
+      unsyncedEntryIds(store),
+      at(),
+    ) as unknown as Record<string, unknown>[];
+  }
   const activeRows = rows.filter((row) => row.deleted !== true);
   const deletedRows = rows.filter((row) => row.deleted === true);
   const columns = store.listColumns(false)
@@ -451,7 +534,16 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
   const now = dependencies.now ?? (() => new Date().toISOString());
 
   const handlers: Record<LocalIpcChannel, LocalIpcHandler> = {
-    [LOCAL_IPC_CHANNELS.getSnapshot]: () => cloneSerializable(storeSnapshot(store)),
+    [LOCAL_IPC_CHANNELS.getSnapshot]: (payload) => {
+      const scope = resolveReadScope(payload, dependencies.sessionRole);
+      if (scope === 'office') {
+        // "At launch and when the Muscat date changes": the first Office read
+        // of a process run purges, then once per Muscat date (a row can only
+        // leave the window at Muscat midnight).
+        store.purgeOutOfWindowOfficeEntries?.({ onlyIfDateChanged: true, at: now() });
+      }
+      return cloneSerializable(storeSnapshot(store, scope, now));
+    },
 
     [LOCAL_IPC_CHANNELS.createRow]: (payload) => {
       const input = asRecord(payload, 'create row input');
@@ -817,7 +909,15 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         requiredString(column.type, `remote columns[${index}].type`);
         store.applyRemoteColumn?.(column as unknown as RemoteColumnInput);
       });
-      return cloneSerializable(storeSnapshot(store));
+      const scope = resolveReadScope(input, dependencies.sessionRole);
+      if (scope === 'office') {
+        // Applying a remote snapshot for an Office session runs the VISIBILITY
+        // PURGE: rows outside the 3-day window leave the local cache (no
+        // outbox item, no audit 'delete', no server effect). Rows with
+        // unsynced outbox work stay until pushed.
+        store.purgeOutOfWindowOfficeEntries?.({ at: now() });
+      }
+      return cloneSerializable(storeSnapshot(store, scope, now));
     },
 
     [LOCAL_IPC_CHANNELS.acknowledgeOutbox]: () => {
@@ -1020,17 +1120,34 @@ export function registerLocalIpcHandlers(
   };
 }
 
-/** Push channel: the renderer reports clearance transitions here. */
+/**
+ * Push channel: the renderer reports clearance transitions here. The payload
+ * is the legacy state string, or `{ state, role }` where `role` is the signed-
+ * in profile's role ('admin' | 'office'; validated like every other role
+ * parameter, absent/`null` = unreported). The role rides the EXISTING
+ * clearance mechanism so the store can scope Office reads to the 3-day window
+ * without trusting any new renderer-supplied flag for Admin scope.
+ */
 export function registerLocalSessionClearanceChannel(
   ipcMain: LocalIpcMain,
   clearance: LocalSessionClearanceApi,
 ): () => void {
   ipcMain.handle(LOCAL_CLEARANCE_CHANNEL, (_event: unknown, payload: unknown) => {
+    if (isRecord(payload)) {
+      const state = payload.state === 'office-pending' ? 'office-pending' : 'allowed';
+      clearance.set(state);
+      if (payload.role === undefined) {
+        return clearance.get();
+      }
+      clearance.setRole(payload.role === null ? null : sessionRoleFrom(payload.role));
+      return clearance.get();
+    }
     clearance.set(payload === 'office-pending' ? 'office-pending' : 'allowed');
     return clearance.get();
   });
   return () => {
     clearance.set('allowed');
+    clearance.setRole(null);
     ipcMain.removeHandler?.(LOCAL_CLEARANCE_CHANNEL);
   };
 }

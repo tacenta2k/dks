@@ -267,7 +267,9 @@ export class ElectronSheetRepository implements SheetRepository {
   private async snapshot(): Promise<DksLocalSnapshot> {
     return this.use<DksLocalSnapshot>(
       'getSnapshot',
-      (local) => local.getSnapshot(),
+      // The validated role parameter (existing role mechanism) scopes Office
+      // reads to the 3-day creation window inside the local store.
+      (local) => local.getSnapshot({ role: this.role }),
       async () => {
         const rows = (await this.fallback.getRows()) as DksLocalRow[];
         const activeRows = rows.filter((row) => row.deleted !== true);

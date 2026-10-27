@@ -384,6 +384,40 @@ describe('pending outbox synchronisation (B3)', () => {
     expect(state.synced).toContain(7);
   });
 
+  it('does not treat rows missing from the remote fetch as deleted and never re-INSERTs them', async () => {
+    // Office 3-day window: RLS hides out-of-window rows from the remote fetch.
+    // A cached local row with no queued changes that is missing from that
+    // fetch is NOT a server-side deletion: it stays untouched locally and is
+    // never re-INSERTed (only a queued create may INSERT).
+    const state = fakeOutbox([]);
+    const writes: RecordedWrite[] = [];
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({ data: [], error: null }),
+        ...recordExplicitWrite(writes)(table),
+      }),
+    };
+    const base = snapshot();
+    const local = outboxLocal(state, {
+      ...base,
+      rows: [{
+        id: LOCAL_ID,
+        data: { name: 'Cached out-of-window row' },
+        category: 'Employee',
+        deleted: false,
+        updated_at: '2026-01-03T00:00:00.000Z',
+      }],
+      deletedRows: [],
+    });
+
+    const result = await runSupabaseSync({ client, local, userId: USER_ID });
+
+    expect(result.status).toBe('healthy');
+    expect(writes.filter((write) => write.table === 'entries')).toEqual([]);
+    const after = await local.getSnapshot();
+    expect(after.rows.map((row) => row.id)).toEqual([LOCAL_ID]);
+  });
+
   it('propagates queued permanent deletes and never resurrects the remote row', async () => {
     const state = fakeOutbox([
       {

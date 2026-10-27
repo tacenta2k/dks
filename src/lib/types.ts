@@ -170,6 +170,8 @@ export interface DksLocalNotificationInput {
 export interface DksLocalRemoteSnapshot {
   rows: readonly Record<string, unknown>[];
   columns: readonly Record<string, unknown>[];
+  /** Authenticated profile's role; drives the Office visibility purge on apply. */
+  role?: 'admin' | 'office' | string | null;
 }
 
 export interface DksLocalCloseResult {
@@ -196,12 +198,22 @@ export interface DksLocalOutboxItem {
 }
 
 export interface DksLocalApi {
-  getSnapshot: () => Promise<DksLocalSnapshot>;
+  /**
+   * Local cache snapshot. The optional `role` is the authenticated profile's
+   * role, validated in the main process exactly like every other role
+   * parameter ('admin' | 'office'); 'office' reads are scoped to the 3-day
+   * creation window, 'admin' reads are unfiltered.
+   */
+  getSnapshot: (input?: { role?: 'admin' | 'office' | string | null }) => Promise<DksLocalSnapshot>;
   /**
    * Office sign-in approval: push the current session clearance into the main
    * process ('office-pending' while an Office session awaits admin approval).
+   * The object form `{ state, role }` also reports the signed-in profile's
+   * role so Office reads can be scoped to the 3-day creation window.
    */
-  setSessionClearance?: (state: 'office-pending' | 'allowed') => Promise<'office-pending' | 'allowed'>;
+  setSessionClearance?: (
+    state: 'office-pending' | 'allowed' | { state: 'office-pending' | 'allowed'; role?: 'admin' | 'office' | null },
+  ) => Promise<'office-pending' | 'allowed'>;
   /** A successful data IPC call clears any stale local-store error banner. */
   onOperationSuccess?: (listener: () => void) => () => void;
   createRow: (input: DksLocalCreateRowInput) => Promise<DksLocalRow>;
