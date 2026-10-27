@@ -704,7 +704,10 @@ export function App({
 
     let activeRun: Promise<SupabaseSyncResult | null> | null = null;
     const run = (): Promise<SupabaseSyncResult | null> => {
-      if (stopped) {
+      const current = appStore.getState();
+      if (stopped || current.authStatus !== 'authenticated'
+        || (current.profile?.role === 'office'
+          && (current.sessionApproval !== 'approved' || current.sessionApprovalRequest?.id !== requestId))) {
         return Promise.resolve(null);
       }
       if (activeRun) {
@@ -717,6 +720,15 @@ export function App({
           client: syncClient,
           local: syncLocal,
           userId: profile?.id ?? null,
+          // Read the store at each async boundary, not a stale render value:
+          // a Realtime revocation must stop an already-running sync too.
+          isSessionAllowed: () => {
+            if (stopped) return false;
+            const current = appStore.getState();
+            return current.authStatus === 'authenticated'
+              && (current.profile?.role !== 'office'
+                || (current.sessionApproval === 'approved' && current.sessionApprovalRequest?.id === requestId));
+          },
         });
         if (!stopped && result.status === 'healthy') {
           setRepositoryRevision((revision) => revision + 1);

@@ -8,11 +8,14 @@ import type {
 
 export interface SupabaseQueryError {
   message: string;
+  code?: string;
 }
 
 export interface SupabaseQueryResult {
   data: readonly unknown[] | null;
   error: SupabaseQueryError | null;
+  /** PostgREST exact affected-row count; no returned row data is required. */
+  count?: number | null;
 }
 
 export interface SupabaseTableQuery {
@@ -38,7 +41,7 @@ export interface SupabaseTableQuery {
    * policy for table entries" error for edits and soft deletes of rows created
    * by another account.
    */
-  update?: (values: Record<string, unknown>) => {
+  update?: (values: Record<string, unknown>, options?: { count: 'exact' }) => {
     eq: (column: string, value: string) => Promise<SupabaseQueryResult>;
   };
   delete?: () => {
@@ -112,6 +115,8 @@ export interface SupabaseSyncOptions {
    * remote row-level policy (`deleted_by = auth.uid()`) accepts the write.
    */
   userId?: string | null;
+  /** Rechecked after every await so revocation stops further writes/acks. */
+  isSessionAllowed?: () => boolean;
 }
 
 export interface SupabaseSyncResult {
@@ -472,49 +477,69 @@ async function upsertRow(
   }
 }
 
+class SyncClearanceError extends Error {
+  constructor() { super('Waiting for admin approval — sync is paused.'); }
+}
+
+function requireClearance(options: SupabaseSyncOptions): void {
+  if (options.isSessionAllowed && !options.isSessionAllowed()) throw new SyncClearanceError();
+}
+
+class RemoteWriteError extends Error {
+  readonly code?: string;
+  constructor(error: SupabaseQueryError, fallback: string) {
+    super(error.message || fallback);
+    this.code = error.code;
+  }
+}
+
 /**
- * Write one row with the operation that matches its state:
- *   'insert' — the remote has never seen this row (INSERT policy applies);
- *   'update' — the remote already has it (UPDATE policies apply).
- *
- * There is deliberately NO `INSERT … ON CONFLICT DO UPDATE` fallback. An
- * upsert makes PostgreSQL evaluate the INSERT policy for rows that already
- * exist, so authorisation would depend on which half of the statement the
- * planner chose — the exact loophole that produced Office's "new row violates
- * row-level security policy for table entries". A client that cannot express a
- * plain INSERT or UPDATE is refused instead of silently widening the path.
+ * Plain INSERT/UPDATE only. Office UPDATE requests an exact affected-row
+ * count with return=minimal; it must never chain .select() because a
+ * soft-deleted row may no longer satisfy the Office SELECT policy (RLS-09).
  */
 async function writeRow(
   client: SupabaseDataClient,
   table: string,
   value: Record<string, unknown>,
   mode: 'insert' | 'update',
-): Promise<void> {
+): Promise<number | null> {
   const query = client.from(table);
   const id = value.id;
 
   if (mode === 'update') {
     if (typeof query.update !== 'function') {
-      throw new Error(
-        `Refusing to write ${table} without an explicit UPDATE: an upsert would re-run the INSERT policy`,
-      );
+      throw new Error(`Refusing to write ${table} without an explicit UPDATE: an upsert would re-run the INSERT policy`);
     }
-    const result = await query.update(value).eq('id', String(id ?? ''));
-    if (result.error) {
-      throw new Error(result.error.message || `Unable to write ${table}`);
+    const result = await query.update(value, table === 'entries' ? { count: 'exact' } : undefined)
+      .eq('id', String(id ?? ''));
+    if (result.error) throw new RemoteWriteError(result.error, `Unable to write ${table}`);
+    if (table === 'entries' && (typeof result.count !== 'number' || !Number.isSafeInteger(result.count) || result.count < 0)) {
+      throw new Error('The server did not confirm the number of changed records; retrying.');
     }
-    return;
+    return result.count ?? null;
   }
 
   if (typeof query.insert !== 'function') {
-    throw new Error(
-      `Refusing to write ${table} without an explicit INSERT: an upsert would bypass the INSERT policy`,
-    );
+    throw new Error(`Refusing to write ${table} without an explicit INSERT: an upsert would bypass the INSERT policy`);
   }
   const result = await query.insert([value]);
-  if (result.error) {
-    throw new Error(result.error.message || `Unable to write ${table}`);
+  if (result.error) throw new RemoteWriteError(result.error, `Unable to write ${table}`);
+  return result.count ?? null;
+}
+
+const OFFICE_TERMINAL_MESSAGE = 'This record can no longer be changed from the Office account';
+
+/** The RPC itself enforces approval; a failed/unknown response is retryable. */
+async function entryVisibility(client: SupabaseDataClient, id: string): Promise<'visible' | 'hidden' | 'missing'> {
+  if (!client.rpc) throw new Error('Entry visibility is unavailable; run ARENA/sql/entry-visibility.sql.');
+  const result = await client.rpc('entry_visibility', { p_id: id });
+  if (result.error) throw new RemoteWriteError(result.error, 'Unable to check record visibility.');
+  const value = Array.isArray(result.data) ? result.data[0] : result.data;
+  if (value !== 'visible' && value !== 'hidden' && value !== 'missing') {
+    throw new Error('The server could not confirm record visibility; retrying.');
   }
+  return value;
 }
 
 /**
@@ -542,52 +567,70 @@ async function permanentlyDeleteRemote(client: SupabaseDataClient, entryId: stri
 }
 
 interface Bookkeeping {
+  pending: (entityType: string, entityId: string) => SupabaseOutboxItem[];
+  markItemsSynced: (items: readonly SupabaseOutboxItem[]) => Promise<void>;
+  markItemsFailed: (items: readonly SupabaseOutboxItem[], message: string) => Promise<void>;
+  markItemsTerminal: (items: readonly SupabaseOutboxItem[], message: string) => Promise<void>;
   markSynced: (entityType: string, entityId: string) => Promise<void>;
   markFailed: (entityType: string, entityId: string, message: string) => Promise<void>;
   unconsumed: () => SupabaseOutboxItem[];
 }
 
-function createBookkeeping(
-  options: SupabaseSyncOptions,
-  items: SupabaseOutboxItem[],
-): Bookkeeping {
+function createBookkeeping(options: SupabaseSyncOptions, items: SupabaseOutboxItem[]): Bookkeeping {
   const pendingByKey = new Map<string, SupabaseOutboxItem[]>();
   const consumedIds = new Set<number | string>();
 
   for (const item of items) {
     const parts = outboxItemParts(item);
-    if (parts.status === 'synced') {
-      continue;
-    }
+    // Terminal items remain visible to the user but are never auto-retried.
+    if (parts.status === 'synced' || parts.status === 'terminal') continue;
     const key = `${parts.entityType}:${parts.entityId}`;
     const bucket = pendingByKey.get(key) ?? [];
     bucket.push(item);
     pendingByKey.set(key, bucket);
   }
 
-  const markSynced = async (entityType: string, entityId: string): Promise<void> => {
-    const bucket = pendingByKey.get(`${entityType}:${entityId}`) ?? [];
+  const pending = (entityType: string, entityId: string): SupabaseOutboxItem[] => (
+    (pendingByKey.get(`${entityType}:${entityId}`) ?? []).filter((item) => !consumedIds.has(item.id))
+  );
+  const markItemsSynced = async (bucket: readonly SupabaseOutboxItem[]): Promise<void> => {
     for (const item of bucket) {
+      if (consumedIds.has(item.id)) continue;
+      requireClearance(options);
+      if (!options.local.markOutboxSynced) throw new Error('Outbox acknowledgement is unavailable.');
+      await options.local.markOutboxSynced(item.id);
       consumedIds.add(item.id);
-      await options.local.markOutboxSynced?.(item.id);
     }
   };
-
-  const markFailed = async (entityType: string, entityId: string, message: string): Promise<void> => {
-    // Defence in depth: the outbox is the long-lived store of per-item
-    // failure reasons; never persist a raw (possibly credential-bearing)
-    // message even if a future caller forgets to sanitise.
-    const safe = sanitizeSyncError(message) || message;
-    const bucket = pendingByKey.get(`${entityType}:${entityId}`) ?? [];
+  const markItemsFailed = async (bucket: readonly SupabaseOutboxItem[], message: string): Promise<void> => {
+    const safe = sanitizeSyncError(message) || 'The change could not be synchronised.';
     for (const item of bucket) {
-      consumedIds.add(item.id);
+      if (consumedIds.has(item.id)) continue;
+      requireClearance(options);
       await options.local.markOutboxFailed?.(item.id, safe);
+      consumedIds.add(item.id);
+    }
+  };
+  const markItemsTerminal = async (bucket: readonly SupabaseOutboxItem[], message: string): Promise<void> => {
+    const safe = sanitizeSyncError(message) || OFFICE_TERMINAL_MESSAGE;
+    if (!options.local.markOutboxTerminal) throw new Error('Terminal outbox recording is unavailable; retrying.');
+    for (const item of bucket) {
+      if (consumedIds.has(item.id)) continue;
+      requireClearance(options);
+      await options.local.markOutboxTerminal(item.id, safe);
+      consumedIds.add(item.id);
     }
   };
 
   return {
-    markSynced,
-    markFailed,
+    pending,
+    markItemsSynced,
+    markItemsFailed,
+    markItemsTerminal,
+    markSynced: (entityType, entityId) => markItemsSynced(pending(entityType, entityId)),
+    markFailed: (entityType, entityId, message) => markItemsFailed(pending(entityType, entityId), message),
+    // Terminal rows are intentionally unconsumed so the status stays in error
+    // with a useful, durable message rather than falsely claiming cloud sync.
     unconsumed: () => items.filter((item) => !consumedIds.has(item.id) && outboxItemParts(item).status !== 'synced'),
   };
 }
@@ -601,6 +644,7 @@ interface ReconcileColumnOptions {
   bookkeeping: Bookkeeping;
   conflicts: SupabaseConflict[];
   errors: string[];
+  requireAllowed: () => void;
 }
 
 /**
@@ -631,11 +675,16 @@ async function reconcileDuplicateColumnName({
   bookkeeping,
   conflicts,
   errors,
+  requireAllowed,
 }: ReconcileColumnOptions): Promise<'synced' | 'reported' | 'unhandled'> {
   let remote: RemoteColumnLookup | null = null;
   try {
+    requireAllowed();
     remote = await resolveRemoteColumnByName(client, column.name);
+    requireAllowed();
   } catch (caught) {
+    if (caught instanceof SyncClearanceError) throw caught;
+    requireAllowed();
     const message = caught instanceof Error ? caught.message : String(caught);
     await bookkeeping.markFailed(
       'column',
@@ -678,6 +727,7 @@ async function reconcileDuplicateColumnName({
   };
   conflicts.push(conflict);
   await local.recordConflict?.(conflict);
+  requireAllowed();
 
   if (!identical) {
     await bookkeeping.markFailed(
@@ -695,8 +745,12 @@ async function reconcileDuplicateColumnName({
   // name and every entry that referenced the old id agree.
   if (local.rekeyColumn && column.id !== remote.id) {
     try {
+      requireAllowed();
       await local.rekeyColumn(column.id, remote.id);
+      requireAllowed();
     } catch (caught) {
+      if (caught instanceof SyncClearanceError) throw caught;
+      requireAllowed();
       const message = caught instanceof Error ? caught.message : String(caught);
       await bookkeeping.markFailed('column', column.id, `Unable to reconcile the column id: ${message}`);
       errors.push(`Column ${column.name}: ${message}`);
@@ -705,8 +759,12 @@ async function reconcileDuplicateColumnName({
   }
 
   try {
+    requireAllowed();
     await writeRow(client, 'app_columns', { ...payload, id: remote.id }, 'update');
+    requireAllowed();
   } catch (caught) {
+    if (caught instanceof SyncClearanceError) throw caught;
+    requireAllowed();
     const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
     await bookkeeping.markFailed('column', column.id, message);
     errors.push(`Column ${column.name}: ${message}`);
@@ -728,18 +786,23 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
   let deletedRemotely = 0;
 
   try {
+    requireClearance(options);
     const snapshot = await options.local.getSnapshot();
+    requireClearance(options);
     const outboxItems = options.local.listOutbox
       ? await options.local.listOutbox({ status: 'all' })
       : [];
+    requireClearance(options);
     await options.local.setSyncStatus({
       status: 'syncing',
       pendingCount: snapshot.syncStatus.pendingCount,
       lastError: null,
     });
+    requireClearance(options);
     // Re-queue previously failed operations so a retry is automatic and
     // idempotent (outbox keys prevent duplicates).
     await options.local.retryFailedOutbox?.();
+    requireClearance(options);
 
     const bookkeeping = createBookkeeping(options, outboxItems);
     const permanentDeleteIds = new Set(
@@ -748,7 +811,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         .filter((parts) => (
           parts.operation === 'permanent_delete'
           && parts.entityType === 'entry'
-          && parts.status !== 'synced'
+          && parts.status !== 'synced' && parts.status !== 'terminal'
         ))
         .map((parts) => parts.entityId),
     );
@@ -757,10 +820,14 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     // so a locally deleted record cannot be resurrected from the remote copy.
     for (const entryId of permanentDeleteIds) {
       try {
+        requireClearance(options);
         await permanentlyDeleteRemote(options.client, entryId);
+        requireClearance(options);
         await bookkeeping.markSynced('entry', entryId);
         deletedRemotely += 1;
       } catch (caught) {
+        if (caught instanceof SyncClearanceError) throw caught;
+        requireClearance(options);
         const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
         await bookkeeping.markFailed('entry', entryId, message);
         errors.push(`Permanently delete ${entryId}: ${message}`);
@@ -771,31 +838,33 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       selectTable(options.client, 'entries'),
       selectTable(options.client, 'app_columns'),
     ]);
+    requireClearance(options);
 
     const localEntryMap = new Map(localRows(snapshot).map((row) => [row.id, row]));
     const remoteEntryMap = new Map(remoteEntries
       .filter((row) => stringValue(row.id) && !permanentDeleteIds.has(stringValue(row.id)))
       .map((row) => [stringValue(row.id), row]));
 
-    interface EntryPush {
-      id: string;
-      payload: Record<string, unknown>;
-      softDeleted: boolean;
-      requiresActiveInsert: boolean;
-      mode: 'insert' | 'update';
-    }
-    const entryPushes: EntryPush[] = [];
     const remoteRowsToApply: Record<string, unknown>[] = [];
+    const terminalEntryIds = new Set(outboxItems
+      .map(outboxItemParts)
+      .filter((parts) => parts.entityType === 'entry' && parts.status === 'terminal')
+      .map((parts) => parts.entityId));
 
+    // The queue, not RLS-filtered SELECT visibility, decides the operation.
+    // A local-only cached row with no queued create must never become INSERT.
     for (const id of new Set([...localEntryMap.keys(), ...remoteEntryMap.keys()])) {
+      requireClearance(options);
+      if (permanentDeleteIds.has(id)) continue;
       const local = localEntryMap.get(id);
       const remote = remoteEntryMap.get(id);
       const localRecord = local as unknown as Record<string, unknown> | undefined;
+      const queued = bookkeeping.pending('entry', id);
 
       if (!isUuid(id)) {
-        if (local) {
+        if (queued.length) {
           const message = `entry ${id} has a local id that is not a UUID and cannot be stored in Supabase`;
-          await bookkeeping.markFailed('entry', id, message);
+          await bookkeeping.markItemsFailed(queued, message);
           errors.push(message);
         }
         continue;
@@ -803,93 +872,107 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
 
       if (localRecord && remote && !entryContentEqual(localRecord, remote)) {
         const conflict: SupabaseConflict = {
-          entityType: 'entry',
-          entityId: id,
-          local: localRecord,
-          remote,
-          winner: localWins(localRecord, remote) ? 'local' : 'remote',
-          createdAt: now(),
+          entityType: 'entry', entityId: id, local: localRecord, remote,
+          winner: localWins(localRecord, remote) ? 'local' : 'remote', createdAt: now(),
         };
         conflicts.push(conflict);
         await options.local.recordConflict?.(conflict);
+        requireClearance(options);
       }
 
-      if (local && (!remote || localWins(localRecord!, remote))) {
-        const softDeleted = local.deleted === true;
-        const requiresActiveInsert = softDeleted && !remote;
-        entryPushes.push({
-          id,
-          payload: toRemoteEntry(local, now(), {
-            userId: options.userId ?? null,
-            forceActive: requiresActiveInsert,
-            // A row the remote has never seen is an INSERT (created_by must be
-            // stamped); a row that already exists is an UPDATE (preserve it).
-            forInsert: !remote,
-          }),
-          softDeleted,
-          requiresActiveInsert,
-          mode: remote ? 'update' : 'insert',
-        });
-        if (requiresActiveInsert) {
-          // Follow-up pass: apply the deletion on the now-existing remote row.
-          // This is an UPDATE (the active insert above just created it), so do
-          // not re-stamp created_by.
-          entryPushes.push({
-            id,
-            payload: toRemoteEntry(local, now(), {
-              userId: options.userId ?? null,
-              forInsert: false,
-            }),
-            softDeleted: true,
-            requiresActiveInsert: false,
-            mode: 'update',
-          });
+      if (!queued.length) {
+        // Never overwrite the local copy of a terminal change. Other remote
+        // winners may be applied normally without producing an outbox echo.
+        if (!terminalEntryIds.has(id) && remote && (!local || remoteWins(localRecord!, remote))) {
+          remoteRowsToApply.push(toLocalEntry(remote));
         }
-      } else if (remote && (!local || remoteWins(localRecord!, remote))) {
-        remoteRowsToApply.push(toLocalEntry(remote));
-        // The server version is authoritative and is applied to the local
-        // cache; the queued mutation for this entity is resolved by that
-        // outcome (the conflict above is recorded). Columns already consume
-        // their queue in the equivalent branch — without this, superseded
-        // outbox items stayed pending forever and the pending count only
-        // ever grew.
-        await bookkeeping.markSynced('entry', id);
-      } else if (local && remote) {
-        // Identical business content: any queued mutation for this entity has
-        // already reached the server.
-        await bookkeeping.markSynced('entry', id);
+        continue;
       }
-    }
+      if (!local) {
+        const message = 'The queued record is missing from the local cache; it was not discarded.';
+        await bookkeeping.markItemsFailed(queued, message);
+        errors.push(`Row ${id}: ${message}`);
+        continue;
+      }
 
-    // Phase 1: upsert entries one at a time so a single rejected row cannot
-    // block unrelated changes (the previous batch upsert failed wholesale).
-    // Group pushes per entry: a locally soft-deleted row that the server has
-    // never seen must be inserted as an active row first (the remote insert
-    // policy rejects rows that are already deleted), then marked deleted.
-    const pushesByEntry = new Map<string, EntryPush[]>();
-    for (const push of entryPushes) {
-      const bucket = pushesByEntry.get(push.id) ?? [];
-      bucket.push(push);
-      pushesByEntry.set(push.id, bucket);
-    }
+      const creates = queued.filter((item) => outboxItemParts(item).operation === 'create');
+      const updates = queued.filter((item) => ['update', 'delete', 'soft_delete'].includes(outboxItemParts(item).operation));
+      const unknown = queued.filter((item) => !creates.includes(item) && !updates.includes(item));
+      if (unknown.length) {
+        const message = 'This queued record has an unsupported operation; it was not discarded.';
+        await bookkeeping.markItemsFailed(unknown, message);
+        errors.push(`Row ${id}: ${message}`);
+      }
 
-    for (const [id, pushes] of pushesByEntry) {
+      // Retain last-write-wins for conflicting updates, but never skip an
+      // explicit create just because a visible remote row happens to exist.
+      if (!creates.length && updates.length && !terminalEntryIds.has(id) && remote
+        && !entryContentEqual(localRecord!, remote) && remoteWins(localRecord!, remote)) {
+        remoteRowsToApply.push(toLocalEntry(remote));
+        await bookkeeping.markItemsSynced(updates);
+        continue;
+      }
+
       let succeeded = true;
-      for (const push of pushes) {
+      for (const item of creates) {
         try {
-          await writeRow(options.client, 'entries', push.payload, push.mode);
+          requireClearance(options);
+          try {
+            // A later queued deletion is represented by a separate UPDATE;
+            // the INSERT policy only permits a live row.
+            await writeRow(options.client, 'entries', toRemoteEntry(local, now(), {
+              userId: options.userId ?? null, forInsert: true, forceActive: local.deleted === true,
+            }), 'insert');
+          } catch (caught) {
+            if (!(caught instanceof RemoteWriteError) || caught.code !== '23505') throw caught;
+            // Do not persist/log the server's raw error or any row data.
+            console.info('[sync] Queued create already exists on the server; acknowledging the create.');
+          }
+          requireClearance(options);
+          // A duplicate create acknowledges ONLY that create. Subsequent edits
+          // or a soft-delete still need their own UPDATE and acknowledgement.
+          await bookkeeping.markItemsSynced([item]);
         } catch (caught) {
+          if (caught instanceof SyncClearanceError) throw caught;
           const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
-          succeeded = false;
-          await bookkeeping.markFailed('entry', id, message);
+          requireClearance(options);
+          await bookkeeping.markItemsFailed(bookkeeping.pending('entry', id), message);
           errors.push(`Row ${id}: ${message}`);
+          succeeded = false;
           break;
         }
       }
-      if (succeeded) {
-        pushedEntries += 1;
-        await bookkeeping.markSynced('entry', id);
+
+      if (succeeded && updates.length) {
+        try {
+          requireClearance(options);
+          const count = await writeRow(options.client, 'entries', toRemoteEntry(local, now(), {
+            userId: options.userId ?? null, forInsert: false,
+          }), 'update');
+          requireClearance(options);
+          if (count === 0) {
+            const visibility = await entryVisibility(options.client, id);
+            requireClearance(options);
+            if (visibility === 'hidden' || visibility === 'missing') {
+              await bookkeeping.markItemsTerminal(updates, OFFICE_TERMINAL_MESSAGE);
+              errors.push(OFFICE_TERMINAL_MESSAGE);
+              succeeded = false;
+            } else {
+              throw new Error('The record is still visible but the update changed no rows; retrying.');
+            }
+          } else {
+            await bookkeeping.markItemsSynced(updates);
+          }
+        } catch (caught) {
+          if (caught instanceof SyncClearanceError) throw caught;
+          const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
+          requireClearance(options);
+          await bookkeeping.markItemsFailed(bookkeeping.pending('entry', id), message);
+          errors.push(`Row ${id}: ${message}`);
+          succeeded = false;
+        }
       }
+      if (succeeded && (creates.length || updates.length)) pushedEntries += 1;
     }
 
     // Columns ---------------------------------------------------------------
@@ -917,6 +1000,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     const duplicateLocalColumns = new Set<string>();
 
     for (const local of localColumns) {
+      requireClearance(options);
       const nameKey = stringValue(local.name).trim().toLowerCase();
       const owner = nameKey ? pushedColumnNames.get(nameKey) : undefined;
       if (owner && owner !== local.id) {
@@ -1000,15 +1084,19 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     }
 
     for (const { column, remoteId, mode } of columnPushes) {
+      requireClearance(options);
       const payload = toRemoteColumn(column, now(), remoteId);
       if (mode === 'update' && remoteId) {
         payload.id = remoteId;
       }
       try {
         await writeRow(options.client, 'app_columns', payload, mode);
+        requireClearance(options);
         pushedColumns += 1;
         await bookkeeping.markSynced('column', column.id);
       } catch (caught) {
+        if (caught instanceof SyncClearanceError) throw caught;
+        requireClearance(options);
         const rawMessage = caught instanceof Error ? caught.message : String(caught);
         const message = sanitizeSyncError(rawMessage);
         if (mode === 'insert' && isDuplicateColumnNameError(rawMessage)) {
@@ -1021,6 +1109,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
             bookkeeping,
             conflicts,
             errors,
+            requireAllowed: () => requireClearance(options),
           });
           if (reconciled === 'synced') {
             pushedColumns += 1;
@@ -1038,6 +1127,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     }
 
     // Apply authoritative remote changes to the local cache -----------------
+    requireClearance(options);
     if (remoteRowsToApply.length > 0 && !options.local.applyRemoteSnapshot) {
       throw new Error('The local cache cannot apply remote records');
     }
@@ -1056,21 +1146,25 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     // and never loses an edit.
     const settingsItems = outboxItems
       .map(outboxItemParts)
-      .filter((parts) => parts.entityType === 'settings' && parts.status !== 'synced');
+      .filter((parts) => parts.entityType === 'settings' && parts.status !== 'synced' && parts.status !== 'terminal');
     if (settingsItems.length > 0) {
       const localSettings = (snapshot.settings ?? {}) as Record<string, unknown>;
       const keys = new Set(settingsItems.map((parts) => parts.entityId));
       try {
         for (const key of keys) {
+          requireClearance(options);
           // Push the CURRENT local value; when the key is no longer stored
           // locally the queued change is still represented as an explicit null.
           const value = key in localSettings ? localSettings[key] : null;
           await upsertRow(options.client, 'settings', { key, value });
         }
+        requireClearance(options);
         for (const parts of settingsItems) {
           await bookkeeping.markSynced('settings', parts.entityId);
         }
       } catch (caught) {
+        if (caught instanceof SyncClearanceError) throw caught;
+        requireClearance(options);
         const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
         for (const parts of settingsItems) {
           await bookkeeping.markFailed('settings', parts.entityId, message);
@@ -1080,6 +1174,7 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     }
 
     // Final status ----------------------------------------------------------
+    requireClearance(options);
     const remaining = bookkeeping.unconsumed();
     const unsyncedCount = remaining.length;
 
@@ -1092,13 +1187,11 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
           lastError: null,
           pendingCount: 0,
         });
-      if (acknowledged.status !== 'healthy') {
-        await options.local.setSyncStatus({
-          status: 'healthy',
-          lastSyncAt: now(),
-          lastError: null,
-          pendingCount: acknowledged.pendingCount,
-        });
+      requireClearance(options);
+      if (acknowledged.status !== 'healthy' || acknowledged.pendingCount > 0) {
+        const message = acknowledged.lastError || 'Some changes have not synchronised yet.';
+        return { status: 'error', pushedEntries, pushedColumns, appliedEntries, appliedColumns,
+          deletedRemotely, conflicts, errors: [message], error: message };
       }
       return {
         status: 'healthy',
@@ -1113,7 +1206,9 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
     }
 
     // Never clear pending operations just to make the indicator look healthy.
-    const firstError = errors[0] ?? 'Some pending changes have not synchronised yet';
+    const terminalReason = remaining.find((item) => outboxItemParts(item).status === 'terminal');
+    const firstError = errors[0] ?? (sanitizeSyncError(terminalReason?.lastError ?? terminalReason?.last_error)
+      || 'Some pending changes have not synchronised yet');
     await options.local.setSyncStatus({
       status: 'error',
       lastError: firstError,
@@ -1130,9 +1225,14 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       error: firstError,
     };
   } catch (caught) {
-    const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
+    const paused = caught instanceof SyncClearanceError || (options.isSessionAllowed && !options.isSessionAllowed());
+    const message = paused
+      ? 'Waiting for admin approval — sync is paused.'
+      : sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
     errors.push(message);
-    await options.local.setSyncStatus({ status: 'error', lastError: message }).catch(() => undefined);
+    // A pending Office fence refuses even status writes; never attempt more
+    // local operations or remote writes after clearance is withdrawn.
+    if (!paused) await options.local.setSyncStatus({ status: 'error', lastError: message }).catch(() => undefined);
     return {
       status: 'error',
       pushedEntries,

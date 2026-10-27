@@ -358,6 +358,9 @@ function createFakeRemote(options: FakeRemoteOptions = {}) {
             error: { message: options.rejectMessage ?? 'rejected by the server' },
           };
         }
+        if (table === 'entries' && values.some((value) => (tables[table] ?? []).some((row) => row.id === value.id))) {
+          return { data: null, error: { code: '23505', message: 'duplicate entries_pkey' } };
+        }
         for (const value of values) {
           inserts.push({ table, ...value });
           const rows = tables[table] ?? (tables[table] = []);
@@ -380,7 +383,7 @@ function createFakeRemote(options: FakeRemoteOptions = {}) {
             // The SQL trigger keeps created_by immutable.
             rows[index] = { ...rows[index], ...values, created_by: rows[index].created_by };
           }
-          return { data: null, error: null };
+          return { data: null, error: null, count: index >= 0 ? 1 : 0 };
         },
       }),
     }),
@@ -445,7 +448,8 @@ describe('entries RLS — sync client writes', () => {
   it('uses a real UPDATE (not an upsert) for an existing row and omits created_by', async () => {
     const { store, local } = createSqliteLocal();
     try {
-      store.createEntry({ id: ROW_ID, data: { name: 'Office edit' }, category: 'Employee' });
+      store.applyRemoteEntry(remoteSeed().entries[0] as never);
+      store.updateEntry(ROW_ID, { data: { name: 'Office edit' } });
       const remote = createFakeRemote({ seed: remoteSeed() });
 
       const result = await runSupabaseSync({ client: remote.client, local, userId: OFFICE_UID });
@@ -468,7 +472,7 @@ describe('entries RLS — sync client writes', () => {
   it('soft deletes an existing Admin-created row with deleted_by = session uid', async () => {
     const { store, local } = createSqliteLocal();
     try {
-      store.createEntry({ id: ROW_ID, data: { name: 'To delete' }, category: 'Employee' });
+      store.applyRemoteEntry(remoteSeed().entries[0] as never);
       store.softDeleteEntry(ROW_ID, undefined, OFFICE_UID);
       const remote = createFakeRemote({ seed: remoteSeed() });
 
