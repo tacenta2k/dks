@@ -175,7 +175,7 @@ describe('notification alert evaluator', () => {
     })).toHaveLength(1);
   });
 
-  it('calculates snoozes as local calendar durations and supports a custom deadline', () => {
+  it('calculates snoozes as Muscat calendar durations and supports a custom deadline', () => {
     const now = new Date(2026, 2, 28, 10, 30);
     const oneDay = new Date(createSnooze('r1', '1d', now).until!);
     const threeDays = new Date(createSnooze('r1', '3d', now).until!);
@@ -238,13 +238,13 @@ describe('notification alert evaluator', () => {
   });
 
   it('selects daily summaries every day and adds a weekly summary on Monday', () => {
-    expect(getSummaryKinds(new Date(2026, 0, 5, 9, 0))).toEqual(['daily', 'weekly']);
-    expect(getSummaryKinds(new Date(2026, 0, 6, 9, 4))).toEqual(['daily']);
-    expect(getSummaryKinds(new Date(2026, 0, 5, 8, 59))).toEqual([]);
+    expect(getSummaryKinds(new Date('2026-01-05T05:00:00Z'))).toEqual(['daily', 'weekly']);
+    expect(getSummaryKinds(new Date('2026-01-06T05:04:00Z'))).toEqual(['daily']);
+    expect(getSummaryKinds(new Date('2026-01-05T04:59:00Z'))).toEqual([]);
   });
 
   it('creates serializable in-app summary records and suppresses sent summaries', () => {
-    const now = new Date(2026, 0, 5, 9, 0);
+    const now = new Date('2026-01-05T05:00:00Z');
     const alerts = evaluateAlerts({
       rows: [row('r1', '2026-01-05')],
       columns,

@@ -55,6 +55,7 @@ import {
   fromLocalNotification,
   toLocalNotificationInput,
 } from '../features/notifications/local-notifications';
+import { notificationOsContent } from '../features/notifications/notification-display';
 import {
   dismissAdminNotification,
   loadAdminNotifications,
@@ -612,7 +613,7 @@ export function App({
         if (osNotifications?.show) {
           for (const record of generated) {
             try {
-              await osNotifications.show({ title: record.title, body: record.body });
+              await osNotifications.show(notificationOsContent(record));
             } catch {
               // OS notification delivery is best effort; the in-app record remains durable.
             }

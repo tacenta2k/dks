@@ -311,7 +311,8 @@ export function formatBusinessDateTime(
     hourCycle: 'h23',
   }).formatToParts(date);
   const pick = (type: string) => parts.find((part) => part.type === type)?.value ?? '';
-  return `${pick('day')}/${pick('month')}/${pick('year')} ${pick('hour')}:${pick('minute')}`;
+  const displayDate = formatDisplayDate(`${pick('year')}-${pick('month')}-${pick('day')}`);
+  return `${displayDate} ${pick('hour')}:${pick('minute')}`;
 }
 
 export function formatLocalDateTime(value: string | Date | null | undefined): string {
