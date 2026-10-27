@@ -84,4 +84,43 @@ describe('ElectronSheetRepository', () => {
     await expect(available.getRows()).rejects.toThrow('database unavailable');
     expect(await fallback.getRows()).toHaveLength(1);
   });
+
+  it('shares one in-flight bridge snapshot between concurrent getColumns and getRows', async () => {
+    const local = createLocalApi();
+    const repository = new ElectronSheetRepository({ windowApi: windowWithLocal(local) });
+
+    // Every host awaits the two reads together; the second must not trigger a
+    // second SQLite snapshot build + IPC structured clone.
+    const [columns, rows] = await Promise.all([
+      repository.getColumns(),
+      repository.getRows(),
+    ]);
+    expect(columns.map((column) => column.id)).toEqual(['name']);
+    expect(rows.map((row) => row.id)).toEqual(['row-1']);
+    expect(local.getSnapshot).toHaveBeenCalledTimes(1);
+
+    // Once the shared read settles, a later read starts a fresh snapshot so
+    // quiet refreshes never reuse stale data.
+    await repository.getRows();
+    expect(local.getSnapshot).toHaveBeenCalledTimes(2);
+  });
+
+  it('never shares an in-flight snapshot across a role switch', async () => {
+    const local = createLocalApi();
+    const repository = new ElectronSheetRepository({
+      windowApi: windowWithLocal(local),
+      role: 'admin',
+    });
+
+    const firstRead = repository.getRows();
+    repository.setRole('office');
+    const secondRead = repository.getRows();
+    await Promise.all([firstRead, secondRead]);
+
+    // The office-scoped read must take its own snapshot rather than receive
+    // the admin-scoped one that was still in flight.
+    expect(local.getSnapshot).toHaveBeenCalledTimes(2);
+    expect(local.getSnapshot).toHaveBeenNthCalledWith(1, { role: 'admin' });
+    expect(local.getSnapshot).toHaveBeenNthCalledWith(2, { role: 'office' });
+  });
 });

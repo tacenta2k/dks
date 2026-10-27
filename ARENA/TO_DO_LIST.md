@@ -109,11 +109,31 @@ Owner steps: run `ARENA/sql/office-3-day-window.sql` in the Supabase SQL editor
 (section 0 preflight first; it aborts on unexpected policies or a missing
 prerequisite helper), then the section 1 transaction and section 2 verification.
 SQL order on an existing project: `entry-visibility.sql` →
-`realtime-office-approval.sql` → `realtime-live-sheet.sql` →
+`realtime-office-approval.sql` →
+`realtime-live-sheet.sql` →
 `office-3-day-window.sql` LAST (it must be the final word on the shared
 helper). Install a build of this branch on the Office PC; see the manual
 script in `ARENA/ARENA_PROGRESS.md` §37. Nothing here is verified against the
 live project by the agent.
+
+---
+
+## Live 0.1.3 owner-reported fixes (2026-10-27)
+
+Three owner-reported defects from the packaged 0.1.3 build. All work stays on
+the existing bridge/repository/outbox surfaces — no new Supabase tables, no
+SQL migration, no bundle restructuring.
+
+| ID | Requirement | Status |
+|----|-------------|--------|
+| SET-BANNER-01 | Settings save banner lifecycle: no banner on mount; success banner appears only after a save and auto-hides after 3.5 s (re-arms per save, so rapid saves keep the newest message); save-failure banners persist until dismissed (Dismiss button) or replaced by the next edit/retry. The app-level `settingsError` banner is unchanged. | IMPLEMENTED_AWAITING_CONFIRMATION |
+| RBIN-DELETE-ALL-01 | Recycle Bin header shows just the live count ("N items"); new Admin-only "Delete all" button beside it (hidden with the toolbar when the bin is empty; Office never reaches the page). Click opens the shared ConfirmDialog with a typed-DELETE gate (confirm disabled until `DELETE` is typed, Enter submits, reset on every open). Confirm loops the EXISTING `permanentDeleteRow` path per row — one SQLite transaction each with its own `permanent_delete` outbox item + audit entry; sync Phase 0 then calls `permanently_delete_entry` per id and excludes the ids from reconciliation, so nothing resurrects. No raw bulk SQL. Search/filter and single-row Restore/Delete unchanged. | IMPLEMENTED_AWAITING_CONFIRMATION |
+| SHEET-PERF-01 | Visa Sheet perceived-load quick wins only (no code-splitting/lazy routes): (a) lightweight shimmer skeleton in the sheet area on the first commit while the snapshot loads; (b) column defs already memoized — additionally memoized the quick-filter derived lists; (c) `ElectronSheetRepository` coalesces concurrent `getColumns()`/`getRows()` into ONE in-flight bridge snapshot (role-scoped; slot released on settle so quiet refreshes always read fresh data); draft row, AG Grid config, reorder and quiet-refresh paths untouched. | IMPLEMENTED_AWAITING_CONFIRMATION |
+
+Verification here: `npm run typecheck` clean; `npm test` 86 files,
+**792 passed / 3 skipped (795)** (baseline 777 passed — 15 new tests);
+`npm run build` clean. No live PC, packaged build, Supabase project or email
+was exercised by the agent — the owner must confirm all three on Windows.
 
 ---
 

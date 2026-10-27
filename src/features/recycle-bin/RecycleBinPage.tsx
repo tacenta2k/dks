@@ -13,6 +13,12 @@ export interface RecycleBinPageProps {
   role?: Role | string | null;
   onRestore?: (row: SheetRow) => void | Promise<void>;
   onPermanentDelete?: (row: SheetRow) => void | Promise<void>;
+  /**
+   * Admin-only bulk permanent delete. The host owns the typed-DELETE
+   * confirmation dialog and the per-row delete path; the page only renders
+   * the toolbar button when the bin is non-empty.
+   */
+  onDeleteAll?: () => void;
 }
 
 /** Human label (S2): never a raw row id like `row-7ce65046-…`. */
@@ -46,15 +52,16 @@ export function RecycleBinPage({
   role,
   onRestore,
   onPermanentDelete,
+  onDeleteAll,
 }: RecycleBinPageProps) {
   const deleted = useMemo(() => deletedRows(rows), [rows]);
   const activeColumns = columns.filter((column) => column.deleted !== true);
   const [search, setSearch] = useState('');
 
   // FIXES_UI §7/§8 (RBIN-02): one compact search/count toolbar. The count is
-  // the number of visible (filtered) items, with truthful retention wording —
-  // automatic purge is not active in this build, so items are kept until the
-  // administrator permanently deletes them.
+  // the number of visible (filtered) items; the Admin-only "Delete all"
+  // action sits beside it and disappears with the toolbar when the bin is
+  // empty (the whole toolbar only renders for a non-empty bin).
   const searchTerms = search.trim().toLowerCase();
   const visible = useMemo(() => {
     if (!searchTerms) {
@@ -93,9 +100,18 @@ export function RecycleBinPage({
             placeholder="Search deleted records…"
             onChange={(event) => setSearch(event.target.value)}
           />
-          <span className="recycle-bin-page__count">
-            {visible.length} {visible.length === 1 ? 'item' : 'items'} · kept until permanently deleted
+          <span className="recycle-bin-page__count" data-testid="recycle-bin-count">
+            {visible.length} {visible.length === 1 ? 'item' : 'items'}
           </span>
+          {can(role, 'permanentDelete') && onDeleteAll ? (
+            <button
+              type="button"
+              className="button button--danger recycle-bin-toolbar__delete-all"
+              onClick={onDeleteAll}
+            >
+              Delete all
+            </button>
+          ) : null}
         </div>
       ) : null}
       {deleted.length === 0 ? (

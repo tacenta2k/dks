@@ -5,6 +5,8 @@ Current Office approval/sync repair session: `arena/b28e239b-dks`; see §34.
 Current Office 3-day visibility window session: `arena/b402cc8f-dks`; see §37.
 Current expiry-digest grid + full-identifier default session:
 `arena/1216115f-dks`; see §38.
+Current live-0.1.3 fix session (settings banner, Recycle Bin Delete all,
+Visa Sheet load quick wins): `arena/1f946390-dks`; see §39.
 Round-2 work is listed in section 8 onwards. Nothing in this file is
 "CONFIRMED" unless the user verified it on Windows.
 Companion file: `ARENA/TO_DO_LIST.md` (single implementation checklist).
@@ -3295,3 +3297,140 @@ user-confirmed; live SQL, the Edge redeploy and a real send are owner-only.
 - No SQL executed, no Edge Function deployed, no email delivered by the agent.
 - Visual polish of the grid on a real attachment (Acrobat/Windows) is
   unverified; unit tests cover content, page geometry and pagination only.
+
+---
+
+## §39 Live 0.1.3 fixes — settings banner, Recycle Bin Delete all, Visa Sheet load quick wins — 2026-10-27 (LLM agent)
+
+Session branch: `arena/1f946390-dks` (branched from `origin/main` at
+`cf8d789`, the v0.1.3 release commit). Three owner-reported defects on the
+packaged 0.1.3 build. No Supabase tables, SQL migrations, secrets, bundle
+restructuring or route changes; the renderer still touches data only through
+the frozen `window.dks` bridge.
+
+### Root causes
+
+1. **Permanent Settings banner.** `SettingsPage` stored a single
+   `statusMessage` string that was set on every edit and on the save effect,
+   but nothing ever cleared it — there was no timer or dismiss path, so the
+   success strip stayed mounted for the page's whole lifetime (and survived
+   section switches).
+2. **No bulk emptying of the Recycle Bin.** The toolbar only had search + a
+   count with retention wording; the repository already had a correct
+   per-row permanent-delete path (SQLite transaction → outbox
+   `permanent_delete` → audit `permanent_delete`, then sync Phase 0 RPC), but
+   no UI invoked it for more than one row.
+3. **Visa Sheet blank pause.** Each navigation remounts `SheetPage`; its
+   initial render was a plain text "Loading visa sheet…" line, and
+   `ElectronSheetRepository.getColumns()` and `getRows()` each independently
+   invoked the bridge `getSnapshot`, so every load (and every quiet refresh)
+   built and structured-cloned the full SQLite snapshot twice.
+
+### Changes
+
+- **SET-BANNER-01** (`SettingsPage.tsx`, `settings.css`): banner state is now
+  a typed `{ id, kind: 'success' | 'error', message }`, null on mount.
+  Success banners auto-hide after `SAVE_BANNER_VISIBLE_MS = 3500` via an
+  effect that re-arms per banner id (rapid saves keep the newest message for
+  the full window); error banners have `role="alert"`, a Dismiss button and
+  never time out; the next edit replaces them with the optimistic success.
+  The separate app-level `settingsError` prop banner is unchanged. Removed
+  the dead `invokeAction` helper. Added error styling and a CSS fade for the
+  auto-hide strip.
+- **RBIN-DELETE-ALL-01** (`RecycleBinPage.tsx`, `AdminTools.tsx`,
+  `ConfirmDialog.tsx`, `styles.css`): count text is now just the live
+  "N item(s)"; an Admin-only danger "Delete all" button sits beside it and
+  disappears with the toolbar when the bin is empty (Office never reaches the
+  page — the existing `can(role, 'recycleBin')` gate is untouched). The shared
+  `ConfirmDialog` gained optional `requireText`/`requireTextLabel` props:
+  typed gate, Enter-to-confirm, reset on every open, fully backward
+  compatible. The panel's confirm loops `repository.permanentDeleteRow(id,
+  actor)` over every soft-deleted row — the same path as the single-row
+  button — then refreshes, bumps the repository revision and reports the
+  count. A mid-loop failure keeps the dialog open with the error and
+  refreshes the list; completed deletes stay committed. Real-SQLite coverage
+  proves N rows → N unique-key pending outbox items + N audit entries, and
+  sync Phase 0 already filters those ids out of reconciliation so they
+  cannot resurrect.
+- **SHEET-PERF-01** (`SheetPage.tsx`, `sheet.css`, `electron-repository.ts`):
+  a lightweight shimmer skeleton (toolbar-shaped bars + 8 skeleton rows,
+  plain elements/CSS only, `prefers-reduced-motion` respected, same
+  "Loading visa sheet…" caption) renders on the first commit; quiet in-place
+  refreshes never set `loading`, so editors/focus are unaffected. Quick-filter
+  chip lists are now memoized (column defs and all other heavy derived values
+  were already `useMemo`). The repository coalesces concurrent snapshots into
+  one in-flight bridge call, keyed by role (a role switch mid-flight takes
+  its own snapshot); the slot releases on settle, so later reads always
+  fetch fresh data. Draft row, AG Grid options, reorder, Tab and quiet-refresh
+  logic are untouched. No `console.time` instrumentation is committed.
+
+### Measurements (temporary benchmark, deleted before commit)
+
+Real `SqliteStore` in-memory, 400 rows × 12 columns (snapshot payload
+568 KiB), 50 runs each:
+
+- Two snapshots per load (old behavior): ~6.5–7.6 ms main-process work +
+  two 568 KiB IPC structured clones.
+- One shared snapshot (new): ~3.5–4.2 ms + one clone — roughly half the
+  snapshot work and one fewer large IPC payload per sheet load/refresh.
+- 41 sequential `permanentDeleteEntry` calls: ~2.8 ms, producing exactly
+  41 outbox items and 41 audit entries.
+- jsdom SheetPage mount: first commit ~20 ms with the skeleton present
+  immediately; content ready ~230 ms in the harness (the real app's AG Grid
+  initialization cost is unchanged and was not measurable in jsdom).
+
+### Files touched
+
+- `src/features/settings/SettingsPage.tsx`, `src/features/settings/settings.css`
+- `src/features/recycle-bin/RecycleBinPage.tsx`
+- `src/features/admin/AdminTools.tsx`
+- `src/features/ui/ConfirmDialog.tsx`
+- `src/features/sheet/SheetPage.tsx`, `src/features/sheet/sheet.css`,
+  `src/features/sheet/electron-repository.ts`
+- `src/renderer/styles.css`
+- tests: `settings.test.tsx`, `recycle-bin.test.tsx`, `confirm-dialog.test.tsx`,
+  `sheet-page.test.tsx`, `electron-repository.test.ts`, `sqlite-outbox.test.ts`
+- `ARENA/TO_DO_LIST.md`, this file. The three read-only handoff docs were not
+  edited.
+
+### Verification performed here
+
+- `npm run typecheck` — clean (both tsconfig programs).
+- `npm test` — 86 files, **792 passed / 3 skipped (795 total)**; baseline was
+  777 passed / 3 skipped (780), so 15 tests were added (4 settings banner,
+  2 ConfirmDialog typed gate, 5 Recycle Bin page/panel, 1 sheet skeleton,
+  2 snapshot coalescing, 1 real-SQLite bulk delete).
+- `npm run build` — renderer Vite build + electron tsc clean (the pre-existing
+  >500 kB chunk-size warning remains; code-splitting is explicitly out of
+  scope here).
+- Note: the sandbox runs Node 22; `better-sqlite3` had no prebuilt binary
+  available through the sandbox proxy, so it was compiled from source against
+  the system Node headers. The pinned runtime stays Node 20.19.0 (`.nvmrc`,
+  `engines`); no lockfile or engine change was made.
+
+### Owner manual Windows steps (agent cannot perform these)
+
+1. Install a build of this branch on the Admin PC.
+2. Settings: open Settings — no banner on open; change any control — the
+   success strip appears and disappears on its own after ~3.5 s; make
+   several quick changes and confirm only the newest message shows; with the
+   network/Supabase failing, the error strip stays until Dismiss or the next
+   edit.
+3. Recycle Bin: confirm the header reads "N items" with no retention clause;
+   click "Delete all" — the dialog requires typing DELETE (button disabled
+   otherwise, Enter works, Cancel changes nothing); confirm the list empties,
+   the count/button disappear and the empty state shows; check the Audit Log
+   lists one "Permanently deleted" entry per record; trigger a sync and
+   confirm the rows do not return on either PC. Confirm Office never sees the
+   Recycle Bin nav item.
+4. Visa Sheet: click Visa Sheet from another view — the skeleton appears
+   immediately and is replaced by the grid; repeat with a large sheet; edit a
+   cell and let a quiet refresh land — no skeleton flash, editor/focus kept.
+
+### Honest gaps
+
+- No packaged Windows build, real Supabase project, email or live two-PC sync
+  was exercised; AG Grid first-init time in the real Electron runtime was not
+  measured (jsdom has no layout engine). The skeleton improves perceived
+  response; it does not change data-arrival time beyond the snapshot
+  coalescing saving.

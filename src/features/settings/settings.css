@@ -100,12 +100,61 @@
 }
 
 .settings-alert {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
   padding: 10px 13px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
   background: var(--color-surface-muted);
   color: var(--color-text-muted);
   font-size: 12px;
+}
+
+.settings-alert__message {
+  min-width: 0;
+}
+
+/* Save-failure banners persist until dismissed or retried; they read as an
+   alert rather than the neutral success strip. */
+.settings-alert--error {
+  border-color: color-mix(in srgb, #dc2626 35%, var(--color-border));
+  background: color-mix(in srgb, #dc2626 8%, var(--color-surface));
+  color: #b91c1c;
+}
+
+.settings-alert__dismiss {
+  flex: none;
+  padding: 4px 10px;
+  border: 1px solid currentColor;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.settings-alert__dismiss:hover {
+  background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* Success banners auto-hide after SAVE_BANNER_VISIBLE_MS in SettingsPage;
+   the CSS only fades the last half-second to match that removal. */
+.settings-alert--autohide {
+  animation: settings-alert-fade 3.5s linear forwards;
+}
+
+@keyframes settings-alert-fade {
+  0%,
+  82% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+  }
 }
 
 .settings-section {

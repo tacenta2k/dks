@@ -164,6 +164,49 @@ function accessibleCellValue(row: SheetRow, column: ColumnDefinition): string {
   return String(value);
 }
 
+const SKELETON_ROW_COUNT = 8;
+const SKELETON_CELL_WIDTHS = ['86%', '64%', '78%', '52%', '70%', '58%'];
+
+/**
+ * Immediate first paint for the Visa Sheet view. Navigation mounts a fresh
+ * SheetPage whose snapshot read is async; this lightweight placeholder (plain
+ * elements + CSS shimmer, no AG Grid, no data) renders on the first commit so
+ * the click never shows a blank pause. Quiet in-place refreshes never reach
+ * it — only the initial (non-quiet) load sets `loading`.
+ */
+function SheetLoadingSkeleton() {
+  return (
+    <div
+      className="sheet-page sheet-loading-skeleton"
+      data-testid="sheet-loading-skeleton"
+      aria-live="polite"
+      aria-busy="true"
+    >
+      <p className="sheet-loading-skeleton__caption">Loading visa sheet…</p>
+      <div className="sheet-loading-skeleton__toolbar" aria-hidden="true">
+        <span className="sheet-skeleton-bar sheet-skeleton-bar--search" />
+        <span className="sheet-skeleton-bar sheet-skeleton-bar--select" />
+        {[0, 1, 2, 3, 4].map((index) => (
+          <span key={index} className="sheet-skeleton-bar sheet-skeleton-bar--chip" />
+        ))}
+      </div>
+      <div className="sheet-loading-skeleton__grid" aria-hidden="true">
+        {Array.from({ length: SKELETON_ROW_COUNT }).map((_, rowIndex) => (
+          <div className="sheet-skeleton-row" key={rowIndex}>
+            {SKELETON_CELL_WIDTHS.map((width, cellIndex) => (
+              <span
+                key={cellIndex}
+                className="sheet-skeleton-bar"
+                style={{ width, animationDelay: `${(rowIndex * 60 + cellIndex * 40) % 700}ms` }}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export function SheetPage({
   repository: providedRepository,
   role = 'office',
@@ -214,6 +257,24 @@ export function SheetPage({
   // FIXES_UI §5.2 "Smaller windows": the last two chips move into a menu.
   const collapsedFilters = useCollapsedQuickFilters();
   const moreFiltersRef = useRef<HTMLDivElement>(null);
+  // Derived once per layout change instead of rebuilding these arrays (and
+  // the chip elements that map over them) on every quiet-refresh render.
+  const visibleQuickFilters = useMemo(
+    () => QUICK_FILTERS
+      .filter((filter) => filter.id !== 'all')
+      .filter((filter) => (
+        collapsedFilters
+          ? (PRIMARY_QUICK_FILTER_IDS as readonly string[]).includes(filter.id)
+          : true
+      )),
+    [collapsedFilters],
+  );
+  const overflowQuickFilters = useMemo(
+    () => QUICK_FILTERS.filter((filter) => (
+      (OVERFLOW_QUICK_FILTER_IDS as readonly string[]).includes(filter.id)
+    )),
+    [],
+  );
 
   // `quiet` refreshes replace the data without unmounting the page: the
   // loading overlay used to destroy open editors, dialogs and focused inputs
@@ -789,7 +850,7 @@ export function SheetPage({
   ) : null;
 
   if (loading) {
-    return <div className="sheet-page sheet-page--loading" aria-live="polite">Loading visa sheet…</div>;
+    return <SheetLoadingSkeleton />;
   }
 
   return (
@@ -845,14 +906,7 @@ export function SheetPage({
                 </select>
               </label>
               <div className="sheet-quick-filters" role="group" aria-label="Quick filters">
-                {QUICK_FILTERS
-                  .filter((filter) => filter.id !== 'all')
-                  .filter((filter) => (
-                    collapsedFilters
-                      ? (PRIMARY_QUICK_FILTER_IDS as readonly string[]).includes(filter.id)
-                      : true
-                  ))
-                  .map((filter) => (
+                {visibleQuickFilters.map((filter) => (
                     <button
                       key={filter.id}
                       className={`sheet-filter-chip${quickFilter === filter.id ? ' sheet-filter-chip--active' : ''}`}
@@ -880,9 +934,7 @@ export function SheetPage({
                     </button>
                     {moreFiltersOpen ? (
                       <div className="sheet-more-filters__menu" role="menu" aria-label="More filters">
-                        {QUICK_FILTERS
-                          .filter((filter) => (OVERFLOW_QUICK_FILTER_IDS as readonly string[]).includes(filter.id))
-                          .map((filter) => (
+                        {overflowQuickFilters.map((filter) => (
                             <button
                               key={filter.id}
                               className="sheet-more-filters__item"

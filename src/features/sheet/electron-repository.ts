@@ -217,6 +217,16 @@ export class ElectronSheetRepository implements SheetRepository {
 
   private role: string;
 
+  /**
+   * A single in-flight snapshot shared by concurrent `getColumns()` /
+   * `getRows()` callers. Every host awaits the two together in `Promise.all`,
+   * so without coalescing each sheet load (and each quiet refresh) paid for
+   * two full SQLite snapshot builds plus two IPC structured clones. The slot
+   * is released as soon as the promise settles, so later reads — including
+   * quiet refreshes — always start a fresh snapshot.
+   */
+  private snapshotInFlight: { role: string; promise: Promise<DksLocalSnapshot> } | null = null;
+
   private renewals: RenewalRecord[] = [];
 
   public constructor(input: RepositoryConstructorInput = {}) {
@@ -265,6 +275,22 @@ export class ElectronSheetRepository implements SheetRepository {
   }
 
   private async snapshot(): Promise<DksLocalSnapshot> {
+    // Reuse only a snapshot taken for the SAME role: a role switch must never
+    // hand a caller another scope's rows even if a read is mid-flight.
+    const inFlight = this.snapshotInFlight;
+    if (inFlight && inFlight.role === this.role) {
+      return inFlight.promise;
+    }
+    const promise = this.loadSnapshot().finally(() => {
+      if (this.snapshotInFlight?.promise === promise) {
+        this.snapshotInFlight = null;
+      }
+    });
+    this.snapshotInFlight = { role: this.role, promise };
+    return promise;
+  }
+
+  private async loadSnapshot(): Promise<DksLocalSnapshot> {
     return this.use<DksLocalSnapshot>(
       'getSnapshot',
       // The validated role parameter (existing role mechanism) scopes Office

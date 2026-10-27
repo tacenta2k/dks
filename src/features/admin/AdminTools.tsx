@@ -66,6 +66,13 @@ export interface AdminToolsProps {
 
 export type AdminExportFormat = 'csv' | 'xlsx';
 
+/**
+ * Typed gate for the Recycle Bin "Delete all" action — the same convention
+ * as the audit-log clear: the confirm button stays disabled until the
+ * administrator types exactly DELETE. ConfirmDialog enforces the gate.
+ */
+const RECYCLE_BIN_DELETE_ALL_CONFIRMATION = 'DELETE';
+
 function activeRows(rows: readonly SheetRow[]): SheetRow[] {
   return rows.filter((row) => row.deleted !== true);
 }
@@ -745,6 +752,11 @@ export function AdminRecycleBinPanel({
   const [pendingAction, setPendingAction] = useState<
     { kind: 'restore' | 'permanent-delete'; row: SheetRow } | null
   >(null);
+  // Bulk "Delete all": its own typed-DELETE dialog (mirrors the audit-log
+  // clear) so the per-row confirm flow stays untouched. The ConfirmDialog
+  // owns and enforces the typed-DELETE gate before onConfirm can fire.
+  const [deleteAllOpen, setDeleteAllOpen] = useState(false);
+  const [deleteAllBusy, setDeleteAllBusy] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -837,6 +849,70 @@ export function AdminRecycleBinPanel({
     }
   };
 
+  const deletedRows = useMemo(() => rows.filter((row) => row.deleted === true), [rows]);
+
+  const askDeleteAll = () => {
+    if (deleteAllBusy || deletedRows.length === 0) {
+      return;
+    }
+    setError(null);
+    setDeleteAllOpen(true);
+  };
+
+  /**
+   * Bulk permanent delete runs EVERY row through the same permanent-delete
+   * path as the single-row button — one SQLite transaction per row that
+   * deletes the entry, enqueues a `permanent_delete` outbox item and writes
+   * the `permanent_delete` audit entry (the sync layer then calls the
+   * `permanently_delete_entry` RPC per outbox item, so nothing resurrects).
+   * Never a raw SQL bulk DELETE that bypasses audit/outbox.
+   */
+  const confirmDeleteAll = async () => {
+    // ConfirmDialog only calls this after the typed-DELETE gate is satisfied.
+    if (deleteAllBusy) {
+      return;
+    }
+    if (!repository.permanentDeleteRow) {
+      setError('This repository does not support permanent deletion.');
+      return;
+    }
+    const targetRows = deletedRows;
+    if (targetRows.length === 0) {
+      setDeleteAllOpen(false);
+      return;
+    }
+    setDeleteAllBusy(true);
+    setError(null);
+    setStatus(null);
+    let deletedCount = 0;
+    try {
+      // Sequential on purpose: each call is its own durable transaction and
+      // must keep identical audit/outbox semantics to a single-row delete.
+      for (const row of targetRows) {
+        await repository.permanentDeleteRow!(row.id, actorOptions(actor));
+        deletedCount += 1;
+      }
+      await refresh();
+      onRepositoryChanged?.();
+      setDeleteAllOpen(false);
+      setStatus(
+        `Permanently deleted ${deletedCount} ${deletedCount === 1 ? 'record' : 'records'}.`,
+      );
+    } catch (caught) {
+      // Completed deletes are already committed with their outbox/audit
+      // records; refresh so the list matches what remains and keep the dialog
+      // open with the failure message, exactly like the single-row flow.
+      await refresh();
+      setError(
+        caught instanceof Error
+          ? caught.message
+          : `Unable to permanently delete all records. ${deletedCount} of ${targetRows.length} were deleted before the failure.`,
+      );
+    } finally {
+      setDeleteAllBusy(false);
+    }
+  };
+
   if (!can(role, 'recycleBin')) {
     return null;
   }
@@ -851,7 +927,30 @@ export function AdminRecycleBinPanel({
         columns={columns}
         onRestore={askRestore}
         onPermanentDelete={askPermanentDelete}
+        onDeleteAll={askDeleteAll}
       />
+      <ConfirmDialog
+        open={deleteAllOpen}
+        title="Delete all records in the Recycle Bin?"
+        confirmLabel="Delete all permanently"
+        destructive
+        requireText={RECYCLE_BIN_DELETE_ALL_CONFIRMATION}
+        busy={deleteAllBusy}
+        error={error}
+        onConfirm={confirmDeleteAll}
+        onCancel={() => {
+          if (!deleteAllBusy) {
+            setDeleteAllOpen(false);
+          }
+        }}
+      >
+        <p>
+          This permanently deletes ALL {deletedRows.length}
+          {' '}
+          {deletedRows.length === 1 ? 'record' : 'records'} in the recycle bin
+          and cannot be undone.
+        </p>
+      </ConfirmDialog>
       <ConfirmDialog
         open={pendingAction !== null}
         title={pendingAction?.kind === 'restore' ? 'Restore this record?' : 'Permanently delete this record?'}

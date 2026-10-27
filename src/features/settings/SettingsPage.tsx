@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Github } from 'lucide-react';
 
 import {
@@ -98,6 +98,22 @@ export interface SettingsPageProps {
 }
 
 export const DEFAULT_NOTIFICATION_DAYS = Object.freeze([90, 60, 30, 15, 7, 1, 0]);
+
+/**
+ * Success banners are transient feedback: visible for ~3.5s after a save,
+ * then removed automatically. Error banners never time out — they stay until
+ * the administrator dismisses them or makes another change (a retry).
+ */
+export const SAVE_BANNER_VISIBLE_MS = 3500;
+
+type SaveBannerKind = 'success' | 'error';
+
+interface SaveBanner {
+  /** Increments per banner so the auto-hide timer always tracks the newest. */
+  id: number;
+  kind: SaveBannerKind;
+  message: string;
+}
 
 /**
  * Truthful one-line copy for every updater state. 'not-available' is the
@@ -284,7 +300,29 @@ export function SettingsPage({
   const [settings, setSettings] = useState<DksSettings>(() => (
     resolveSettings(providedSettings ?? initialSettings, providedColumns ?? [])
   ));
-  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  // Null on purpose: no banner may be visible when the page first opens. A
+  // save action creates a banner; success banners auto-hide, error banners
+  // stay until dismissed or replaced by a new save.
+  const [saveBanner, setSaveBanner] = useState<SaveBanner | null>(null);
+  const bannerIdRef = useRef(0);
+
+  const showBanner = useCallback((kind: SaveBannerKind, message: string) => {
+    bannerIdRef.current += 1;
+    setSaveBanner({ id: bannerIdRef.current, kind, message });
+  }, []);
+
+  // Only success banners auto-hide. The effect re-arms for every new banner
+  // (new id; its cleanup clears the previous timeout), so rapid saves keep the
+  // newest message visible for the full window and unmount clears the timer.
+  useEffect(() => {
+    if (!saveBanner || saveBanner.kind !== 'success') {
+      return undefined;
+    }
+    const timer = setTimeout(() => {
+      setSaveBanner((current) => (current?.id === saveBanner.id ? null : current));
+    }, SAVE_BANNER_VISIBLE_MS);
+    return () => clearTimeout(timer);
+  }, [saveBanner]);
   const [officeSessionsConfirmOpen, setOfficeSessionsConfirmOpen] = useState(false);
   const [officeSessionsFeedback, setOfficeSessionsFeedback] = useState<string | null>(null);
   const [officeSessionsError, setOfficeSessionsError] = useState<string | null>(null);
@@ -372,13 +410,13 @@ export function SettingsPage({
         .filter((result): result is Promise<void> => Boolean(result && typeof result.then === 'function'));
       if (results.length > 0) {
         void Promise.all(results)
-          .then(() => setStatusMessage('Settings saved to the workspace.'))
-          .catch(() => setStatusMessage('Saved locally; cloud sync failed. Changes will retry when online.'));
+          .then(() => showBanner('success', 'Settings saved to the workspace.'))
+          .catch(() => showBanner('error', 'Saved locally; cloud sync failed. Changes will retry when online.'));
       }
     } catch {
-      setStatusMessage('Saved locally; cloud sync failed. Changes will retry when online.');
+      showBanner('error', 'Saved locally; cloud sync failed. Changes will retry when online.');
     }
-  }, [onChange, onSettingsChange, settings]);
+  }, [onChange, onSettingsChange, settings, showBanner]);
 
   if (!can(role, 'settings')) {
     return (
@@ -395,7 +433,9 @@ export function SettingsPage({
   const resolvedVersion = appVersion ?? version ?? defaultVersion();
   const updateSettings = (patch: (current: DksSettings) => DksSettings) => {
     setSettings((current) => patch(current));
-    setStatusMessage('Settings saved locally.');
+    // A new edit is also a retry: replace any persistent save-failure banner
+    // with the transient optimistic success message.
+    showBanner('success', 'Settings saved locally.');
   };
 
   const updateColor = (key: keyof StatusColors, value: string) => {
@@ -480,23 +520,6 @@ export function SettingsPage({
       });
   };
 
-  const invokeAction = (action: (() => void | Promise<void>) | undefined, success: string, failure: string) => {
-    if (!action) {
-      setStatusMessage(success);
-      return;
-    }
-    try {
-      const result = action();
-      if (result && typeof (result as Promise<void>).then === 'function') {
-        void Promise.resolve(result).then(() => setStatusMessage(success)).catch(() => setStatusMessage(failure));
-      } else {
-        setStatusMessage(success);
-      }
-    } catch {
-      setStatusMessage(failure);
-    }
-  };
-
   return (
     <div className="settings-page">
       <div className="settings-layout">
@@ -514,7 +537,24 @@ export function SettingsPage({
           ))}
         </nav>
         <div className="settings-content">
-          {statusMessage ? <div className="settings-alert" role="status">{statusMessage}</div> : null}
+          {saveBanner ? (
+            <div
+              className={`settings-alert${saveBanner.kind === 'error' ? ' settings-alert--error' : ' settings-alert--autohide'}`}
+              role={saveBanner.kind === 'error' ? 'alert' : 'status'}
+            >
+              <span className="settings-alert__message">{saveBanner.message}</span>
+              {saveBanner.kind === 'error' ? (
+                <button
+                  type="button"
+                  className="settings-alert__dismiss"
+                  aria-label="Dismiss message"
+                  onClick={() => setSaveBanner(null)}
+                >
+                  Dismiss
+                </button>
+              ) : null}
+            </div>
+          ) : null}
           {settingsError ? <div className="settings-alert settings-alert--error" role="alert">{settingsError}</div> : null}
 
           {activeSection === 'expiry' ? (
