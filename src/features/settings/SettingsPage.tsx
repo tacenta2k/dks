@@ -103,6 +103,11 @@ export const DEFAULT_NOTIFICATION_DAYS = Object.freeze([90, 60, 30, 15, 7, 1, 0]
  * Truthful one-line copy for every updater state. 'not-available' is the
  * only state allowed to say "up to date" — it means the release feed was
  * actually checked.
+ *
+ * 'error' shows the real, already-sanitised cause from the main process. The
+ * generic connection sentence is only a fallback when the main process did not
+ * supply one — a signature-verification or feed failure must never be
+ * reported as an internet problem.
  */
 export function updateStatusMessage(state: DksUpdateState): string {
   const version = state.version ? ` ${state.version}` : '';
@@ -117,8 +122,10 @@ export function updateStatusMessage(state: DksUpdateState): string {
       return `Update${version} is ready to install.`;
     case 'not-available':
       return 'DKS is up to date.';
-    case 'error':
-      return 'Update check failed. Check your internet connection and try again.';
+    case 'error': {
+      const cause = state.message?.trim();
+      return cause || 'Update check failed. Check your internet connection and try again.';
+    }
     case 'disabled':
       return 'Update checks are unavailable right now.';
     case 'idle':

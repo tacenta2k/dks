@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 
-import { formatDisplayDate, formatLocalDateTime } from '../../lib/date';
+import { formatBusinessDateTime, formatDisplayDate } from '../../lib/date';
 import {
   dedupeNotifications,
   isNotificationSnoozed,
@@ -75,7 +75,9 @@ function secondaryLine(record: NotificationRecord): string {
     return `${expiryLabel(record)} · ${formatDisplayDate(record.expiryValue)}`;
   }
   if (record.kind === 'office-delete') {
-    return `${record.rowLabel} · ${formatLocalDateTime(record.createdAt)}`;
+    // The deletion timestamp is an instant; it is displayed in the business
+    // calendar (Asia/Muscat), not in the PC's locale/timezone.
+    return `${record.rowLabel} · ${formatBusinessDateTime(record.createdAt)}`;
   }
   return formatDisplayDate(record.summaryDate);
 }

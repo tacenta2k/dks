@@ -481,6 +481,86 @@ describe('expiry notification human labels', () => {
   });
 });
 
+describe('notification date display (DD/MM/YYYY, Asia/Muscat)', () => {
+  // 22:30Z is 02:30 the NEXT day in Muscat (UTC+4), so these assertions
+  // distinguish the business calendar from the host's local time and locale.
+  const muscatShiftedInstant = '2026-10-26T22:30:00.000Z';
+  const muscatExpected = '27/10/2026 02:30';
+
+  function openBell(): void {
+    fireEvent.click(screen.getByRole('button', { name: /Notifications/ }));
+  }
+
+  it('renders the office-delete secondary line in the business calendar', () => {
+    render(createElement(NotificationBell, {
+      notifications: [{
+        id: 'admin-notification-1',
+        kind: 'office-delete',
+        entryId: 'aaaaaaaa-1111-4111-8111-0000000000aa',
+        rowLabel: 'Amina',
+        title: 'Office deleted',
+        body: 'Office deleted Amina',
+        createdAt: muscatShiftedInstant,
+        read: false,
+        dismissed: false,
+      }],
+    }));
+
+    openBell();
+
+    expect(screen.getByText(`Amina · ${muscatExpected}`)).toBeTruthy();
+    // The host-local rendering would be 26/10/2026 22:30 — never that.
+    expect(screen.queryByText(/26\/10\/2026 22:30/)).toBeNull();
+  });
+
+  it('renders an expiry secondary line day-first from the stored ISO value', () => {
+    render(createElement(NotificationBell, {
+      notifications: [{
+        id: 'expiry:aaaaaaaa-1111-4111-8111-0000000000aa:2026-10-26:0',
+        kind: 'expiry',
+        rowId: 'aaaaaaaa-1111-4111-8111-0000000000aa',
+        expiryColumnId: 'visa_expiry',
+        expiryValue: '2026-10-26',
+        daysLeft: 0,
+        alertDay: 0,
+        dedupeKey: 'expiry:aaaaaaaa-1111-4111-8111-0000000000aa:2026-10-26:0',
+        title: 'Expiry due today',
+        body: 'Amina expires today.',
+        createdAt: '2026-10-26T05:00:00.000Z',
+        read: false,
+        dismissed: false,
+      }],
+    }));
+    openBell();
+
+    // Stored YYYY-MM-DD, displayed DD/MM/YYYY — never month-first.
+    expect(screen.getByText('Amina · 26/10/2026')).toBeTruthy();
+    expect(screen.queryByText(/10\/26\/2026/)).toBeNull();
+  });
+
+  it('renders a summary secondary line day-first', () => {
+    render(createElement(NotificationBell, {
+      notifications: [{
+        id: 'daily-summary:2026-10-26',
+        kind: 'daily-summary',
+        summaryDate: '2026-10-26',
+        title: 'Daily expiry summary',
+        body: '3 expiry alerts due.',
+        alertCount: 3,
+        alertIds: ['a'],
+        createdAt: muscatShiftedInstant,
+        read: false,
+        dismissed: false,
+      }],
+    }));
+
+    openBell();
+
+    expect(screen.getByText('26/10/2026')).toBeTruthy();
+    expect(screen.queryByText(/10\/26\/2026/)).toBeNull();
+  });
+});
+
 describe('safe desktop notification and tray boundaries', () => {
   it('validates renderer requests and catches OS delivery failures', () => {
     const show = vi.fn();

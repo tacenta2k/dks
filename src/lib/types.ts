@@ -257,6 +257,13 @@ export interface DksUpdateState {
   version?: string;
   /** Download completion 0–100 while downloading (when reported). */
   progress?: number;
+  /**
+   * The real, already-sanitised cause of an 'error' state. The main process
+   * strips control characters, bearer tokens and long signature/token runs and
+   * caps the length; it is forwarded verbatim so the UI never presents a
+   * signature or feed failure as an internet problem.
+   */
+  message?: string;
 }
 
 export interface DksUpdaterApi {

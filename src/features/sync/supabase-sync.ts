@@ -163,6 +163,30 @@ export function isDuplicateColumnNameError(message: string): boolean {
   );
 }
 
+export function isDuplicateEntryPrimaryKeyError(message: string): boolean {
+  const text = message.toLowerCase();
+  return (
+    text.includes('entries_pkey')
+    || (text.includes('duplicate key') && text.includes('entries'))
+    || (text.includes('23505') && text.includes('entries'))
+  );
+}
+
+/**
+ * Drop the `created_by` stamp from an entry payload that is about to be written
+ * as an UPDATE.
+ *
+ * `created_by` identifies the ORIGINAL creator and is immutable after the row
+ * exists: re-stamping it would silently reassign ownership of a record another
+ * device created. It is only ever supplied on an explicit INSERT.
+ */
+export function toRemoteEntryUpdate(
+  payload: Record<string, unknown>,
+): Record<string, unknown> {
+  const { created_by: _createdBy, ...update } = payload;
+  return update;
+}
+
 export interface RemoteColumnLookup {
   id: string;
   name: string;
@@ -860,11 +884,13 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       }
     }
 
-    // Phase 1: upsert entries one at a time so a single rejected row cannot
-    // block unrelated changes (the previous batch upsert failed wholesale).
-    // Group pushes per entry: a locally soft-deleted row that the server has
-    // never seen must be inserted as an active row first (the remote insert
-    // policy rejects rows that are already deleted), then marked deleted.
+    // Phase 1: push entries one at a time so a single rejected row cannot
+    // block unrelated changes (the previous batch write failed wholesale).
+    // Every push is an explicit INSERT or an explicit UPDATE — never an
+    // upsert. Group pushes per entry: a locally soft-deleted row that the
+    // server has never seen must be inserted as an active row first (the
+    // remote insert policy rejects rows that are already deleted), then
+    // marked deleted.
     const pushesByEntry = new Map<string, EntryPush[]>();
     for (const push of entryPushes) {
       const bucket = pushesByEntry.get(push.id) ?? [];
@@ -877,8 +903,39 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       for (const push of pushes) {
         try {
           await writeRow(options.client, 'entries', push.payload, push.mode);
+          continue;
         } catch (caught) {
           const message = sanitizeSyncError(caught instanceof Error ? caught.message : String(caught));
+
+          // The remote already holds this id (a row another device created, or a
+          // remote row this client's snapshot never received). An explicit
+          // INSERT can never win — retry the SAME row as an explicit UPDATE so
+          // the UPDATE policy applies instead of the INSERT policy.
+          //
+          // Deliberately NOT an upsert: `INSERT … ON CONFLICT DO UPDATE` would
+          // re-run the INSERT policy and is exactly the loophole the explicit
+          // INSERT/UPDATE split closes. The outbox row is neither deleted nor
+          // silently marked synced when this fails.
+          if (push.mode === 'insert' && isDuplicateEntryPrimaryKeyError(message)) {
+            if (push.requiresActiveInsert) {
+              // The placeholder "insert an active row first" step is
+              // unnecessary: the deletion push below is the one that matters.
+              continue;
+            }
+            try {
+              await writeRow(options.client, 'entries', toRemoteEntryUpdate(push.payload), 'update');
+              continue;
+            } catch (retryCaught) {
+              const retryMessage = sanitizeSyncError(
+                retryCaught instanceof Error ? retryCaught.message : String(retryCaught),
+              );
+              succeeded = false;
+              await bookkeeping.markFailed('entry', id, message);
+              errors.push(`Row ${id}: ${message}`);
+              break;
+            }
+          }
+
           succeeded = false;
           await bookkeeping.markFailed('entry', id, message);
           errors.push(`Row ${id}: ${message}`);

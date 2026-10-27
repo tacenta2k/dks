@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   createUpdaterScheduler,
   createUpdaterService,
+  MAX_UPDATE_ERROR_LENGTH,
+  sanitizeUpdateError,
+  updaterReleasePolicy,
   type UpdaterAdapter,
 } from '../electron/main/updater';
 
@@ -30,7 +33,7 @@ describe('updater foundation', () => {
     expect(download).not.toHaveBeenCalled();
   });
 
-  it('turns network failures into serializable error state without throwing', async () => {
+  it('turns network failures into serializable error state with the real cause', async () => {
     const service = createUpdaterService({
       adapter: adapter({
         checkForUpdates: vi.fn(async () => {
@@ -40,8 +43,13 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error' });
-    expect(service.getState()).toEqual({ status: 'error' });
+    // The message is the actual cause, so the UI never blames the internet for
+    // a signature or feed failure.
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      message: 'network is offline',
+    });
+    expect(service.getState()).toEqual({ status: 'error', message: 'network is offline' });
   });
 
   it('downloads releases in the background and exposes restart-to-update state', async () => {
@@ -147,9 +155,87 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error' });
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      version: '2.0.0',
+      message: 'connection reset',
+    });
     await expect(service.restartToUpdate()).resolves.toBe(false);
     expect(quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('reports a post-download failure as an error with its own cause', async () => {
+    // "100% then an error": the download resolved but a later step (signature
+    // verification, release metadata) failed. That must NOT be reported as
+    // 'downloaded', and the cause must reach the renderer.
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({
+          isUpdateAvailable: true,
+          updateInfo: { version: '1.2.3' },
+        })),
+        downloadUpdate: vi.fn(async () => {
+          throw new Error('signature verification failed for the downloaded update');
+        }),
+      }),
+      enabled: true,
+    });
+
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      version: '1.2.3',
+      message: 'signature verification failed for the downloaded update',
+    });
+    await expect(service.restartToUpdate()).resolves.toBe(false);
+  });
+
+  it('refuses to offer an unverified artifact for install', async () => {
+    const quitAndInstall = vi.fn();
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({
+          isUpdateAvailable: true,
+          updateInfo: { version: '1.2.3' },
+        })),
+        downloadUpdate: vi.fn(async () => undefined),
+        verifyArtifact: vi.fn(async () => false),
+        quitAndInstall,
+      }),
+      enabled: true,
+    });
+
+    await expect(service.checkForUpdates()).resolves.toEqual({
+      status: 'error',
+      version: '1.2.3',
+      message: 'The downloaded update could not be verified, so it was not installed.',
+    });
+    // Nothing is offered for install until a verified download exists.
+    await expect(service.restartToUpdate()).resolves.toBe(false);
+    expect(quitAndInstall).not.toHaveBeenCalled();
+  });
+
+  it('offers an unsigned artifact for install once it verifies', async () => {
+    // DKS ships unsigned NSIS installers, so "no signature" must not block the
+    // install path — it is verified OK.
+    const quitAndInstall = vi.fn();
+    const verifyArtifact = vi.fn(async () => true);
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({
+          isUpdateAvailable: true,
+          updateInfo: { version: '1.2.3' },
+        })),
+        downloadUpdate: vi.fn(async () => undefined),
+        verifyArtifact,
+        quitAndInstall,
+      }),
+      enabled: true,
+    });
+
+    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'downloaded', version: '1.2.3' });
+    expect(verifyArtifact).toHaveBeenCalledOnce();
+    await expect(service.restartToUpdate()).resolves.toBe(true);
+    expect(quitAndInstall).toHaveBeenCalledOnce();
   });
 
   it('runs a launch check and schedules hourly checks through injectable timers', async () => {
@@ -175,6 +261,77 @@ describe('updater foundation', () => {
     expect((service as unknown as { getState: () => unknown }).getState()).toEqual({ status: 'not-available' });
     scheduler.stop();
     expect(clearInterval).toHaveBeenCalledWith(42);
+  });
+});
+
+describe('update error sanitising', () => {
+  // Control characters are built from code points so the source stays plain
+  // text (and the file never becomes "binary").
+  const controlCharacters = String.fromCharCode(0, 1, 2, 31, 127, 128);
+
+  it('keeps a plain cause readable', () => {
+    expect(sanitizeUpdateError(new Error('network is offline'))).toBe('network is offline');
+  });
+
+  it('strips bearer tokens, signatures and control characters', () => {
+    const raw = [
+      'request failed: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payload.signature',
+      'signature 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08',
+      controlCharacters,
+    ].join(' ');
+
+    const cleaned = sanitizeUpdateError(new Error(raw));
+    expect(cleaned).not.toMatch(/Bearer\s/);
+    expect(cleaned).not.toMatch(/eyJ/);
+    expect(cleaned).not.toMatch(/9f86d081/);
+    expect(cleaned).toMatch(/request failed/);
+    for (const character of controlCharacters) {
+      expect(cleaned).not.toContain(character);
+    }
+  });
+
+  it('accepts plain strings and error-like objects', () => {
+    expect(sanitizeUpdateError('release feed rejected')).toBe('release feed rejected');
+    expect(sanitizeUpdateError({ reason: 'release feed rejected' })).toBe('release feed rejected');
+  });
+
+  it('returns an empty string for anything without a cause', () => {
+    expect(sanitizeUpdateError(null)).toBe('');
+    expect(sanitizeUpdateError(undefined)).toBe('');
+    expect(sanitizeUpdateError(42)).toBe('');
+    expect(sanitizeUpdateError(new Error('   '))).toBe('');
+    expect(sanitizeUpdateError(new Error(controlCharacters))).toBe('');
+  });
+
+  it('collapses a long token-like run so a credential can never reach the UI', () => {
+    const raw = `update failed while reading the release feed: ${'abcdefghij'.repeat(12)}`;
+
+    const cleaned = sanitizeUpdateError(new Error(raw));
+
+    expect(cleaned).not.toContain('abcdefghij');
+    expect(cleaned).toMatch(/update failed while reading the release feed/);
+  });
+
+  it('caps the length so a huge error cannot flood the UI', () => {
+    const huge = `update failed: ${Array.from({ length: 300 }, (_, index) => `step ${index} rejected`).join(' ')}`;
+    const cleaned = sanitizeUpdateError(new Error(huge));
+
+    expect(cleaned.length).toBeLessThanOrEqual(MAX_UPDATE_ERROR_LENGTH);
+    expect(cleaned.endsWith('…')).toBe(true);
+    expect(cleaned.startsWith('update failed:')).toBe(true);
+  });
+});
+
+describe('updater release policy', () => {
+  it('keeps unsigned NSIS installs installable and never auto-installs', () => {
+    // DKS publishes unsigned installers from a public GitHub repository, so
+    // signature enforcement stays OFF. Nothing is downloaded or installed
+    // without an explicit confirmation in the renderer.
+    const policy = updaterReleasePolicy();
+    expect(policy.forceCodeSigning).toBe(false);
+    expect(policy.autoDownload).toBe(false);
+    expect(policy.autoInstallOnAppQuit).toBe(false);
+    expect(policy.allowDowngrade).toBe(false);
   });
 });
 

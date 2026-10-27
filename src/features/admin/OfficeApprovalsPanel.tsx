@@ -5,6 +5,7 @@ import {
   type OfficeApprovalService,
   type OfficeSigninRequest,
 } from '../auth/office-approval-service';
+import { formatBusinessDateTime } from '../../lib/date';
 
 /**
  * Admin popover for Office sign-in approvals.
@@ -25,12 +26,17 @@ export interface OfficeApprovalsPanelProps {
 
 const REQUEST_REFRESH_MS = 10_000;
 
+/**
+ * Request timestamps are shown in the DKS business calendar
+ * (Asia/Muscat, DD/MM/YYYY HH:mm) — never in the PC's locale, which renders
+ * month-first dates on an en-US machine.
+ */
 function formatDateTime(value: string | null | undefined): string {
   if (!value) {
     return '';
   }
   const when = new Date(value);
-  return Number.isNaN(when.getTime()) ? value : when.toLocaleString();
+  return Number.isNaN(when.getTime()) ? value : formatBusinessDateTime(when);
 }
 
 function PeopleIcon() {

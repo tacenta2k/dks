@@ -116,6 +116,12 @@ export function createAppStore(
   approvalService: OfficeApprovalService | null = createOfficeApprovalService(),
 ): StoreApi<AppStore> {
   let authRequestId = 0;
+  // Approval verdicts are fetched on a timer AND on auth-state changes, so
+  // overlapping requests can resolve out of order. The newest request wins:
+  // without this, a late 'approved' response from an older poll could overwrite
+  // a newer 'revoked' verdict and re-open the workspace after an administrator
+  // revoked it.
+  let approvalRequestId = 0;
   const serviceHealth: SupabaseHealth = {
     ...EMPTY_HEALTH,
     configured: authService.isConfigured,
@@ -313,6 +319,7 @@ export function createAppStore(
     },
 
     submitOfficeApprovalRequest: async () => {
+      const requestId = ++approvalRequestId;
       if (get().profile?.role !== 'office') {
         set({ ...EMPTY_SESSION_APPROVAL });
         return;
@@ -330,10 +337,15 @@ export function createAppStore(
       }
       set({ sessionApproval: 'checking', sessionApprovalError: null });
       const result = await approvalService.requestApproval();
+      if (requestId !== approvalRequestId) {
+        // A newer verdict already landed — this response is stale.
+        return;
+      }
       applyApprovalStatus(set, result.data, result.error);
     },
 
     refreshSessionApproval: async () => {
+      const requestId = ++approvalRequestId;
       if (get().profile?.role !== 'office') {
         set({ ...EMPTY_SESSION_APPROVAL });
         return;
@@ -351,6 +363,10 @@ export function createAppStore(
       }
       set({ sessionApprovalError: null });
       const result = await approvalService.fetchMyRequest();
+      if (requestId !== approvalRequestId) {
+        // A newer verdict already landed — this response is stale.
+        return;
+      }
       if (result.error) {
         applyApprovalStatus(set, null, result.error);
         return;
@@ -360,6 +376,9 @@ export function createAppStore(
       if (!result.data) {
         set({ sessionApproval: 'checking' });
         const requested = await approvalService.requestApproval();
+        if (requestId !== approvalRequestId) {
+          return;
+        }
         applyApprovalStatus(set, requested.data, requested.error);
         return;
       }

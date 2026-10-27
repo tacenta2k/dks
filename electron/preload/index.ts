@@ -655,7 +655,7 @@ function normaliseUpdateState(value: unknown): UpdateState {
     return { status: 'error' };
   }
 
-  const record = value as { status?: unknown; version?: unknown; progress?: unknown };
+  const record = value as { status?: unknown; version?: unknown; progress?: unknown; message?: unknown };
   const statuses: UpdateState['status'][] = [
     'idle',
     'checking',
@@ -677,6 +677,11 @@ function normaliseUpdateState(value: unknown): UpdateState {
   }
   if (typeof record.progress === 'number' && Number.isFinite(record.progress)) {
     state.progress = Math.max(0, Math.min(100, Math.round(record.progress)));
+  }
+  // The main process already sanitised this; it is forwarded verbatim so the
+  // UI can show the real cause instead of a generic connection message.
+  if (typeof record.message === 'string' && record.message.trim()) {
+    state.message = record.message.trim();
   }
   return state;
 }

@@ -361,6 +361,13 @@ export function AppShell({
   const [avatarOpen, setAvatarOpen] = useState(false);
   const [restartPromptVersion, setRestartPromptVersion] = useState<string | null>(null);
   const [restartError, setRestartError] = useState<string | null>(null);
+  /**
+   * The update pill the user dismissed with "Later". Keyed by the update it
+   * dismissed so a NEW release always gets its own decision. It is cleared by
+   * the next check (or the next launch) — "Later" is never a permanent
+   * opt-out.
+   */
+  const [dismissedUpdate, setDismissedUpdate] = useState<string | null>(null);
   const syncRef = useRef<HTMLDivElement>(null);
   const avatarRef = useRef<HTMLDivElement>(null);
 
@@ -436,6 +443,58 @@ export function AppShell({
   const updateReadyVersion = updateState?.status === 'downloaded'
     ? updateState.version?.trim() || null
     : null;
+
+  // States the top-bar pill is allowed to occupy. idle/checking/not-available/
+  // disabled/error deliberately render NO pill: the user is not being asked to
+  // do anything, and an error has its own copy in Settings → About & updates.
+  const updatePill = (() => {
+    const status = updateState?.status;
+    const version = updateState?.version?.trim() || null;
+    if (status === 'available') {
+      return {
+        kind: 'available' as const,
+        version,
+        label: `Update${version ? ` ${version}` : ''} available`,
+      };
+    }
+    if (status === 'downloading') {
+      return {
+        kind: 'downloading' as const,
+        version,
+        progress: updateState?.progress,
+        label: `Downloading…${typeof updateState?.progress === 'number' ? ` ${updateState.progress}%` : ''}`,
+      };
+    }
+    if (status === 'downloaded') {
+      return { kind: 'downloaded' as const, version, label: `Update${version ? ` ${version}` : ''} ready` };
+    }
+    return null;
+  })();
+  const updatePillKey = updatePill
+    ? `${updatePill.kind}:${updatePill.version ?? ''}`
+    : null;
+
+  // A "Later" dismissal is temporary: the next check (any new status from the
+  // updater) re-shows the pill, as does a fresh launch.
+  useEffect(() => {
+    setDismissedUpdate((current) => (current === null ? current : null));
+  }, [updateState]);
+
+  const handleDownloadUpdate = async () => {
+    if (!updater) {
+      return;
+    }
+    try {
+      // The main process downloads in the background and reports progress
+      // through the same onStatus subscription the rest of the app uses.
+      const next = await updater.checkForUpdates();
+      onUpdateStateChange?.(next);
+    } catch {
+      // The bridge never rejects; a failed check lands as status 'error' and is
+      // shown in Settings → About & updates.
+    }
+  };
+
   const openRestartPrompt = () => {
     setRestartError(null);
     setRestartPromptVersion(updateReadyVersion ?? '');
@@ -567,19 +626,37 @@ export function AppShell({
             <h1 className="top-bar__title">{copy.title}</h1>
           </div>
           <div className="top-bar__actions">
-            {updateState?.status === 'downloaded' ? (
+            {updatePill && updatePillKey !== dismissedUpdate ? (
               <div className="topbar-update" role="status">
                 <span className="topbar-update__dot" aria-hidden="true" />
-                <span className="topbar-update__label">
-                  Update{updateReadyVersion ? ` ${updateReadyVersion}` : ''} ready
-                </span>
-                <button
-                  className="topbar-update__button"
-                  type="button"
-                  onClick={openRestartPrompt}
-                >
-                  Restart to install
-                </button>
+                <span className="topbar-update__label">{updatePill.label}</span>
+                {updatePill.kind === 'downloaded' ? (
+                  <button
+                    className="topbar-update__button"
+                    type="button"
+                    onClick={openRestartPrompt}
+                  >
+                    Restart to install
+                  </button>
+                ) : null}
+                {updatePill.kind === 'available' ? (
+                  <button
+                    className="topbar-update__button"
+                    type="button"
+                    onClick={() => void handleDownloadUpdate()}
+                  >
+                    Download
+                  </button>
+                ) : null}
+                {updatePill.kind === 'available' || updatePill.kind === 'downloaded' ? (
+                  <button
+                    className="topbar-update__button"
+                    type="button"
+                    onClick={() => setDismissedUpdate(updatePillKey ?? '')}
+                  >
+                    Later
+                  </button>
+                ) : null}
               </div>
             ) : null}
             <div className="topbar-sync" ref={syncRef}>

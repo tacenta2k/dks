@@ -3,7 +3,7 @@ import { useStore } from 'zustand';
 
 import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
-import { OfficeApprovalGate } from '../features/auth/OfficeApprovalGate';
+import { OfficeApprovalGate, OFFICE_APPROVAL_POLL_INTERVAL_MS } from '../features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../features/admin/OfficeApprovalsPanel';
 import type { OfficeApprovalService } from '../features/auth/office-approval-service';
 import {
@@ -21,6 +21,12 @@ import type {
 } from '../lib/types';
 import { localStoreErrorMessage } from '../lib/local-store-error';
 import { sanitizeSyncError } from '../lib/sync-error';
+import {
+  clearanceAllowsWorkspace,
+  createSessionClearanceBridge,
+  type SessionClearance,
+  type SessionClearanceBridge,
+} from '../lib/session-clearance';
 import { rowDisplayLabel } from '../lib/labels';
 import type { DashboardFilterId } from '../features/dashboard/selectors';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
@@ -98,6 +104,14 @@ function getSystemDarkPreference(): boolean {
     return false;
   }
 }
+
+/**
+ * Post-approval revocation watcher cadence. Shares the gate's poll interval so
+ * an Office session that is already approved notices a deny/revoke (including
+ * a bulk "sign out all office sessions") within the same window the gate uses
+ * while it is waiting — well under five seconds.
+ */
+export const OFFICE_APPROVAL_WATCH_INTERVAL_MS = OFFICE_APPROVAL_POLL_INTERVAL_MS;
 
 export function App({
   initialView = 'dashboard',
@@ -261,23 +275,75 @@ export function App({
   // session is approved the workspace (Sheet, Dashboard, local cache, sync)
   // never mounts and its effects never run.
   const sessionApproval = useStore(appStore, (state) => state.sessionApproval);
+  // The value the MAIN PROCESS last acknowledged. An Office workspace is only
+  // allowed to mount once the main process actually holds 'allowed' — not once
+  // the renderer has merely dispatched the push. See the clearance bridge
+  // below: without this, the workspace (and its `dks:local:get-snapshot` from
+  // SheetPage/Dashboard) mounted in the same commit that approved the session,
+  // while the main process still held 'office-pending'.
+  const [clearanceAcknowledged, setClearanceAcknowledged] = useState<SessionClearance | null>(null);
   const isWorkspaceVisible = (authStatus === 'authenticated' || authStatus === 'demo')
-    && (profile?.role !== 'office' || sessionApproval === 'approved');
+    && (profile?.role !== 'office' || sessionApproval === 'approved')
+    && (profile?.role === 'office'
+      ? clearanceAcknowledged === 'allowed'
+      : clearanceAcknowledged !== 'office-pending');
+
+  // Single writer of the main-process session clearance. The bridge serialises
+  // the writes and remembers the value the main process actually acknowledged,
+  // so the workspace effects below can wait for it instead of racing a
+  // fire-and-forget IPC call in the same commit that mounts the workspace.
+  const clearanceBridgeRef = useRef<SessionClearanceBridge | null>(null);
+  if (clearanceBridgeRef.current === null) {
+    clearanceBridgeRef.current = createSessionClearanceBridge(
+      typeof window !== 'undefined' ? window.dks?.local : undefined,
+    );
+  }
+  const clearanceBridge = clearanceBridgeRef.current;
 
   // Push the session clearance into the main process so a pending Office
   // session cannot read/write local cached customer records via IPC either.
+  // BOTH directions land here: an approval flips the value to 'allowed' and a
+  // later revoke/deny flips it straight back to 'office-pending' — the gate
+  // remounts immediately and the .exe is never restarted.
   useEffect(() => {
-    const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
-    if (!local || typeof local.setSessionClearance !== 'function') {
-      return;
-    }
     const pending = authStatus === 'authenticated'
       && profile?.role === 'office'
       && sessionApproval !== 'approved'
       && sessionApproval !== 'not-required';
-    void local.setSessionClearance(pending ? 'office-pending' : 'allowed')
-      .catch(() => undefined);
-  }, [authStatus, profile?.role, sessionApproval]);
+    void clearanceBridge.write(pending ? 'office-pending' : 'allowed').then(() => {
+      setClearanceAcknowledged(clearanceBridge.acknowledged());
+    });
+  }, [authStatus, profile?.role, sessionApproval, clearanceBridge]);
+
+  // An Office session must keep watching its approval AFTER it is approved.
+  // The gate stops polling once the status leaves pending/checking, so a
+  // revocation — including a bulk "sign out all office sessions" — that arrives
+  // while the workspace is open would otherwise only be noticed on the next
+  // Supabase token refresh. This watcher runs only while the gate is NOT
+  // mounted (i.e. while the session is approved and the workspace is open) so
+  // the two pollers never overlap. The verdict always comes from the server.
+  useEffect(() => {
+    if (authStatus !== 'authenticated' || profile?.role !== 'office' || !isWorkspaceVisible) {
+      return undefined;
+    }
+    const tick = () => {
+      void appStore.getState().refreshSessionApproval();
+    };
+    const interval = window.setInterval(tick, OFFICE_APPROVAL_WATCH_INTERVAL_MS);
+    const onFocus = () => tick();
+    const onVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.clearInterval(interval);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [authStatus, profile?.role, isWorkspaceVisible, appStore]);
 
   useEffect(() => {
     if (!isWorkspaceVisible || authStatus === 'demo') {
@@ -293,6 +359,12 @@ export function App({
 
     const load = async () => {
       try {
+        // A pending Office session must not read the cached customer records
+        // even for a moment: wait for the main process to hold 'allowed'
+        // before the first customer-data IPC call of this mount.
+        if (!(await clearanceAllowsWorkspace(clearanceBridge))) {
+          return;
+        }
         if (local?.getSettings) {
           const cached = await local.getSettings();
           const cachedPartial = settingsRecordToPartialSettings(cached);
@@ -439,6 +511,11 @@ export function App({
     let loading = false;
     const loadNotifications = async () => {
       if (loading || cancelled) {
+        return;
+      }
+      // Local notification rows are part of the customer-data surface: wait
+      // for the main process to hold 'allowed' before reading them.
+      if (!(await clearanceAllowsWorkspace(clearanceBridge))) {
         return;
       }
       loading = true;
@@ -622,7 +699,14 @@ export function App({
       }
       running = true;
       runStartedAt = Date.now();
-      const thisRun = (async (): Promise<SupabaseSyncResult> => {
+      const thisRun = (async (): Promise<SupabaseSyncResult | null> => {
+        // The sync loop reads AND writes the local customer cache
+        // (`applyRemoteSnapshot`, `flushSync`, …). The main process must hold
+        // 'allowed' before the first pass; a refused pass keeps every outbox
+        // row untouched (nothing is pushed, nothing is dropped).
+        if (!(await clearanceAllowsWorkspace(clearanceBridge))) {
+          return null;
+        }
         const result = await runSupabaseSync({
           client: syncClient,
           local: syncLocal,
@@ -717,22 +801,31 @@ export function App({
       return undefined;
     }
     let cancelled = false;
-    void local
-      .getSnapshot()
-      .then((snapshot) => {
-        if (cancelled) {
-          return;
-        }
-        setLocalStoreError(null);
-        if (snapshot.syncStatus) {
-          setSyncStatus(snapshot.syncStatus);
-        }
-      })
-      .catch((error: unknown) => {
-        if (!cancelled) {
-          setLocalStoreError(localStoreErrorMessage(error));
-        }
-      });
+    void (async () => {
+      // The main process must hold 'allowed' before the first customer-data
+      // IPC call of this mount (see the clearance bridge above). Without this
+      // the snapshot can be dispatched in the same commit that approves the
+      // session, while the main process still holds 'office-pending'.
+      if (!(await clearanceAllowsWorkspace(clearanceBridge))) {
+        return;
+      }
+      await local
+        .getSnapshot()
+        .then((snapshot) => {
+          if (cancelled) {
+            return;
+          }
+          setLocalStoreError(null);
+          if (snapshot.syncStatus) {
+            setSyncStatus(snapshot.syncStatus);
+          }
+        })
+        .catch((error: unknown) => {
+          if (!cancelled) {
+            setLocalStoreError(localStoreErrorMessage(error));
+          }
+        });
+    })();
     return () => {
       cancelled = true;
     };

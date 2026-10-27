@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  isDuplicateEntryPrimaryKeyError,
   runSupabaseSync,
+  toRemoteEntryUpdate,
   type SupabaseDataClient,
   type SupabaseOutboxItem,
   type SupabaseSyncLocal,
@@ -1346,5 +1348,194 @@ describe('no upsert loophole for entries or columns (R3 batch G)', () => {
     } finally {
       store.close();
     }
+  });
+});
+
+describe('duplicate entries_pkey insert retries as an explicit UPDATE', () => {
+  const EXISTING_ID = '99999999-3333-4333-8333-000000000003';
+
+  function sqliteLocal() {
+    const store = createSqliteStore({ filename: ':memory:', now: () => '2026-01-05T00:00:00.000Z' });
+    const snapshot = (): DksLocalSnapshot => ({
+      rows: store.listRows(true).map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      deletedRows: store.listRows(true).filter((row) => row.deleted === true)
+        .map((row) => ({ ...row })) as unknown as DksLocalRow[],
+      columns: store.listColumns(false).map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      deletedColumns: store.listColumns(true).filter((column) => column.deleted === true)
+        .map((column) => ({ ...column })) as unknown as DksLocalColumn[],
+      settings: store.getSettings(),
+      syncStatus: store.getSyncStatus() as unknown as DksLocalSnapshot['syncStatus'],
+    });
+    const local: SupabaseSyncLocal = {
+      getSnapshot: async () => snapshot(),
+      setSyncStatus: async (state) => store.setSyncStatus(state as never) as unknown as DksLocalSnapshot['syncStatus'],
+      applyRemoteSnapshot: async (input) => {
+        for (const row of input.rows) store.applyRemoteEntry(row as never);
+        for (const column of input.columns) store.applyRemoteColumn(column as never);
+        return snapshot();
+      },
+      acknowledgeOutbox: async () => store.acknowledgeOutbox() as unknown as DksLocalSnapshot['syncStatus'],
+      recordConflict: async (conflict) => {
+        store.recordConflict({ ...conflict, resolved: false } as never);
+      },
+      listOutbox: async (input) => store.listOutbox(input?.status ?? 'all') as unknown as SupabaseOutboxItem[],
+      markOutboxSynced: (id) => store.markOutboxSynced(id),
+      markOutboxFailed: (id, message) => store.markOutboxFailed(id, message),
+      retryFailedOutbox: async () => store.retryFailedOutbox(),
+    };
+    return { store, local };
+  }
+
+  /**
+   * A remote whose READ view is stale: the row already exists on the server
+   * (so the INSERT is rejected with entries_pkey) but the SELECT does not
+   * return it, which is exactly how a client ends up planning an INSERT for an
+   * id the server already holds. The write half records every attempt.
+   */
+  function staleReadRemote(seeded: Record<string, unknown>[]) {
+    const inserts: Record<string, unknown>[] = [];
+    const updates: Record<string, unknown>[] = [];
+    const upserts: string[] = [];
+
+    const client: SupabaseDataClient = {
+      from: (table) => ({
+        select: async () => ({ data: table === 'entries' ? [] : [], error: null }),
+        insert: async (values) => {
+          const list = values as Record<string, unknown>[];
+          for (const value of list) inserts.push({ ...value });
+          const collision = list.find(
+            (value) => value.id === EXISTING_ID && seeded.some((row) => row.id === value.id),
+          );
+          if (collision) {
+            return {
+              data: null,
+              error: {
+                message: 'duplicate key value violates unique constraint "entries_pkey"',
+              },
+            };
+          }
+          return { data: list, error: null };
+        },
+        update: (values) => ({
+          eq: async (_column: string, id: string) => {
+            updates.push({ ...values, id });
+            return { data: null, error: null };
+          },
+        }),
+        upsert: async () => {
+          upserts.push('upsert');
+          return { data: null, error: { message: 'never used' } };
+        },
+      }),
+    };
+
+    return { client, inserts, updates, upserts, seeded };
+  }
+
+  it('retries the row as an explicit UPDATE without created_by, never an upsert', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createEntry({
+        id: EXISTING_ID,
+        data: { name: 'Already on the server' },
+        category: 'Employee',
+      });
+      const { client, inserts, updates, upserts } = staleReadRemote([{ id: EXISTING_ID }]);
+
+      const result = await runSupabaseSync({
+        client,
+        local,
+        userId: '846536af-f3c6-47c1-8559-d13442c1490a',
+      });
+
+      expect(result.status).toBe('healthy');
+      // The INSERT was attempted once, and the retry was an UPDATE.
+      expect(inserts).toHaveLength(1);
+      expect(updates).toHaveLength(1);
+      expect(upserts).toEqual([]);
+      // The INSERT stamped created_by (the INSERT policy needs it); the retry
+      // UPDATE must NOT reassign the row's original creator.
+      expect(inserts[0].created_by).toBe('846536af-f3c6-47c1-8559-d13442c1490a');
+      expect(updates[0].created_by).toBeUndefined();
+      expect(updates[0].id).toBe(EXISTING_ID);
+      // The queued operation drained and the local record was not deleted.
+      expect(store.getPendingOutboxCount()).toBe(0);
+      expect(store.listRows(true)).toHaveLength(1);
+      expect(store.listRows(true)[0].id).toBe(EXISTING_ID);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the outbox item when the retry UPDATE is also rejected', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createEntry({
+        id: EXISTING_ID,
+        data: { name: 'Already on the server' },
+        category: 'Employee',
+      });
+      const client: SupabaseDataClient = {
+        from: () => ({
+          select: async () => ({ data: [], error: null }),
+          insert: async () => ({
+            data: null,
+            error: { message: 'duplicate key value violates unique constraint "entries_pkey"' },
+          }),
+          update: () => ({
+            eq: async () => ({
+              data: null,
+              error: { message: 'new row violates row-level security policy for table "entries"' },
+            }),
+          }),
+          upsert: async () => ({ data: null, error: { message: 'never used' } }),
+        }),
+      };
+
+      const result = await runSupabaseSync({
+        client,
+        local,
+        userId: '846536af-f3c6-47c1-8559-d13442c1490a',
+      });
+
+      // Failed, but reported honestly — and the record is still queued, never
+      // deleted and never silently marked synced.
+      expect(result.status).toBe('error');
+      expect(result.errors.join(' ')).toContain('entries_pkey');
+      expect(store.listRows(true)).toHaveLength(1);
+      expect(store.getPendingOutboxCount()).toBeGreaterThan(0);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('classifies duplicate primary key errors without swallowing other failures', () => {
+    expect(isDuplicateEntryPrimaryKeyError(
+      'duplicate key value violates unique constraint "entries_pkey"',
+    )).toBe(true);
+    expect(isDuplicateEntryPrimaryKeyError(
+      'SQLSTATE 23505: duplicate key value violates unique constraint "entries_pkey"',
+    )).toBe(true);
+    expect(isDuplicateEntryPrimaryKeyError('new row violates row-level security policy for table "entries"'))
+      .toBe(false);
+    expect(isDuplicateEntryPrimaryKeyError('connection reset by peer')).toBe(false);
+    // app_columns duplicates are a different constraint and must not be
+    // retried as an entry UPDATE.
+    expect(isDuplicateEntryPrimaryKeyError(
+      'duplicate key value violates unique constraint "app_columns_name_key"',
+    )).toBe(false);
+  });
+
+  it('drops created_by from a payload rewritten as an UPDATE', () => {
+    const updated = toRemoteEntryUpdate({
+      id: EXISTING_ID,
+      data: { name: 'x' },
+      created_by: '846536af-f3c6-47c1-8559-d13442c1490a',
+      updated_at: '2026-01-05T00:00:00.000Z',
+    });
+
+    expect(updated.created_by).toBeUndefined();
+    expect(updated.id).toBe(EXISTING_ID);
+    expect(updated.updated_at).toBe('2026-01-05T00:00:00.000Z');
   });
 });

@@ -20,6 +20,91 @@ export interface UpdateState {
   version?: string;
   /** Download completion 0–100 while status is 'downloading' (when reported). */
   progress?: number;
+  /**
+   * The REAL reason the last check/download failed, already sanitised for the
+   * renderer (control characters, bearer tokens and long signature/token runs
+   * removed, length capped). Never a token, a path or a raw exception.
+   *
+   * Optional so the success states stay exactly as small as before.
+   */
+  message?: string;
+}
+
+/** Longest sanitised error text forwarded to the renderer. */
+export const MAX_UPDATE_ERROR_LENGTH = 300;
+
+const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/g;
+const BEARER_TOKEN = /\bBearer\s+\S+/gi;
+const LONG_HEX_RUN = /\b[0-9a-f]{32,}\b/gi;
+const LONG_TOKEN_RUN = /\b[A-Za-z0-9+/]{40,}={0,2}\b/g;
+
+/**
+ * Turn an arbitrary failure into a short, safe, human-readable sentence.
+ *
+ * The previous implementation dropped the error object entirely and mapped
+ * EVERY failure to `status: 'error'`, which the renderer rendered as
+ * "Update check failed. Check your internet connection and try again." — so a
+ * signature-verification failure, a rejected release or a bad feed looked like
+ * a network problem. The message below is the real cause, stripped of anything
+ * that could carry a credential or a machine-specific path.
+ */
+export function sanitizeUpdateError(error: unknown): string {
+  let text = '';
+  if (error instanceof Error && typeof error.message === 'string') {
+    text = error.message;
+  } else if (typeof error === 'string') {
+    text = error;
+  } else if (error && typeof error === 'object') {
+    const record = error as { message?: unknown; reason?: unknown };
+    if (typeof record.message === 'string') {
+      text = record.message;
+    } else if (typeof record.reason === 'string') {
+      text = record.reason;
+    }
+  }
+
+  if (!text.trim()) {
+    return '';
+  }
+
+  text = text
+    .replace(CONTROL_CHARACTERS, ' ')
+    .replace(BEARER_TOKEN, 'a bearer token')
+    .replace(LONG_HEX_RUN, 'a signature')
+    .replace(LONG_TOKEN_RUN, 'a long token')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!text) {
+    return '';
+  }
+
+  return text.length > MAX_UPDATE_ERROR_LENGTH
+    ? `${text.slice(0, MAX_UPDATE_ERROR_LENGTH - 1)}…`
+    : text;
+}
+
+/**
+ * The release-integrity policy DKS applies to electron-updater.
+ *
+ * DKS publishes UNSIGNED NSIS installers from a public GitHub repository, so
+ * signature enforcement is deliberately OFF: an unsigned artifact must still
+ * install. `autoDownload` and `autoInstallOnAppQuit` stay false — a downloaded
+ * update is never installed without an explicit confirmation in the renderer.
+ * `allowDowngrade` stays false so a stale feed can never roll an install back.
+ */
+export function updaterReleasePolicy(): {
+  autoDownload: boolean;
+  autoInstallOnAppQuit: boolean;
+  allowDowngrade: boolean;
+  forceCodeSigning: boolean;
+} {
+  return {
+    autoDownload: false,
+    autoInstallOnAppQuit: false,
+    allowDowngrade: false,
+    forceCodeSigning: false,
+  };
 }
 
 export interface UpdateCheckResult {
@@ -41,6 +126,12 @@ export interface UpdaterAdapter {
   quitAndInstall?: () => void;
   /** Register a download-progress listener (percent 0–100), when supported. */
   onDownloadProgress?: (listener: (percent: number) => void) => void;
+  /**
+   * Verify the downloaded artifact before it may be installed. Resolves false
+   * only for a real verification failure; an unsigned release (DKS's normal
+   * case) resolves true.
+   */
+  verifyArtifact?: () => Promise<boolean>;
 }
 
 export interface UpdaterServiceOptions {
@@ -76,8 +167,16 @@ function createDefaultAdapter(): UpdaterAdapter {
   // electron-updater is intentionally kept behind this adapter. The rest of
   // the main process can therefore treat update failures as ordinary state.
   try {
-    autoUpdater.autoDownload = false;
-    autoUpdater.autoInstallOnAppQuit = false;
+    // Release-integrity policy (see `updaterReleasePolicy`): unsigned NSIS
+    // releases install, nothing is ever downloaded or installed automatically.
+    // `forceCodeSigning` is not part of every electron-updater typings revision,
+    // so it is applied through the optional-property shape.
+    const policy = updaterReleasePolicy();
+    const signaturePolicy = autoUpdater as unknown as { forceCodeSigning?: boolean };
+    autoUpdater.autoDownload = policy.autoDownload;
+    autoUpdater.autoInstallOnAppQuit = policy.autoInstallOnAppQuit;
+    autoUpdater.allowDowngrade = policy.allowDowngrade;
+    signaturePolicy.forceCodeSigning = policy.forceCodeSigning;
 
     let progressListener: ((percent: number) => void) | undefined;
     autoUpdater.on('download-progress', (info) => {
@@ -99,6 +198,35 @@ function createDefaultAdapter(): UpdaterAdapter {
       onDownloadProgress: (listener) => {
         progressListener = listener;
       },
+      /**
+       * Verify the downloaded artifact before it may be offered for install.
+       *
+       * DKS ships unsigned NSIS installers, so a missing signature is NOT a
+       * failure — only an explicit verification error counts, and only when the
+       * publisher has opted into signature enforcement (which DKS does not).
+       * This mirrors electron-updater's `verifyUpdateCodeSignature` without
+       * making an unsigned release uninstallable.
+       */
+      verifyArtifact: async () => {
+        const enforceSignatures = (autoUpdater as unknown as { forceCodeSigning?: boolean })
+          .forceCodeSigning === true;
+        if (!enforceSignatures) {
+          return true;
+        }
+        const verifier = (autoUpdater as unknown as {
+          verifyUpdateCodeSignature?: () => Promise<boolean>;
+        }).verifyUpdateCodeSignature;
+        if (typeof verifier !== 'function') {
+          // The installed electron-updater cannot verify: do not block the
+          // install on a capability this build does not have.
+          return true;
+        }
+        try {
+          return await verifier();
+        } catch {
+          return false;
+        }
+      },
     };
   } catch {
     return {
@@ -115,6 +243,12 @@ function cloneState(state: UpdateState): UpdateState {
   if (typeof state.progress === 'number' && Number.isFinite(state.progress)) {
     clone.progress = Math.max(0, Math.min(100, Math.round(state.progress)));
   }
+  // The sanitised message is already safe to forward; drop it when empty so the
+  // success states stay byte-identical to the previous shape.
+  const message = sanitizeUpdateError(state.message);
+  if (message) {
+    clone.message = message;
+  }
   return clone;
 }
 
@@ -126,8 +260,9 @@ function updateVersion(result: UpdateCheckResult | null | undefined): string | u
 /**
  * Wrap electron-updater with a no-throw, serializable state machine.
  *
- * No error object is retained or sent to the renderer. Network and release
- * configuration failures are represented by `status: 'error'` only.
+ * The error OBJECT is never retained or sent to the renderer. The sanitised
+ * cause is carried on `status: 'error'` so the UI can show what actually
+ * happened instead of blaming the internet.
  */
 export function createUpdaterService(options: UpdaterServiceOptions = {}): UpdaterService {
   const adapter = options.adapter ?? createDefaultAdapter();
@@ -194,13 +329,34 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
 
         if (downloadInBackground && adapter.downloadUpdate) {
           setState({ status: 'downloading', version });
-          await adapter.downloadUpdate();
+          try {
+            await adapter.downloadUpdate();
+            // The artifact is only offered for install once it has been
+            // verified. An unsigned NSIS release (DKS's normal case) verifies
+            // OK; a genuine verification failure gets its own message.
+            if (adapter.verifyArtifact && !(await adapter.verifyArtifact())) {
+              return setState({
+                status: 'error',
+                version,
+                message: 'The downloaded update could not be verified, so it was not installed.',
+              });
+            }
+          } catch (downloadError) {
+            // "100% then an error" is a post-download failure (verification,
+            // signature, release metadata). Report the actual cause instead of
+            // letting the renderer blame the connection.
+            return setState({
+              status: 'error',
+              version,
+              message: sanitizeUpdateError(downloadError),
+            });
+          }
           return setState({ status: 'downloaded', version });
         }
 
         return cloneState(state);
-      } catch {
-        return setState({ status: 'error' });
+      } catch (error) {
+        return setState({ status: 'error', message: sanitizeUpdateError(error) });
       }
     })();
 
@@ -219,8 +375,8 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
     try {
       adapter.quitAndInstall();
       return true;
-    } catch {
-      setState({ status: 'error' });
+    } catch (error) {
+      setState({ status: 'error', message: sanitizeUpdateError(error) });
       return false;
     }
   };

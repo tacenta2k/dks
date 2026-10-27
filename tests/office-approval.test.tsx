@@ -16,6 +16,7 @@ import {
 import { OfficeApprovalGate } from '../src/features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../src/features/admin/OfficeApprovalsPanel';
 import { createAppStore, type AppStore } from '../src/lib/store';
+import type { DksLocalSnapshot } from '../src/lib/types';
 import { App } from '../src/renderer/App';
 import {
   createLocalIpcHandlers,
@@ -570,6 +571,22 @@ describe('OfficeApprovalGate render', () => {
     expect(screen.getByRole('alert')).toHaveTextContent(/revoked/i);
   });
 
+  it('shows the request timestamp in the business calendar, not the host locale', async () => {
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service: approvalService } = makeFakeApprovalService({});
+    const store = createAppStore(authService, approvalService);
+    store.setState({
+      sessionApproval: 'pending',
+      sessionApprovalRequest: makeRequest({ requestedAt: '2026-10-26T22:30:00.000Z' }),
+    });
+    render(<OfficeApprovalGate appStore={store} onSignOut={vi.fn()} />);
+
+    // 22:30Z is 02:30 on 27/10/2026 in Muscat (UTC+4). A host-locale render
+    // would show 26/10/2026, and an en-US locale would show month-first.
+    expect(screen.getByText(/Request submitted 27\/10\/2026 02:30/)).toBeInTheDocument();
+    expect(screen.queryByText(/26\/10\/2026/)).toBeNull();
+  });
+
   it('error render fails closed with a retry that re-polls the server', async () => {
     store.setState({
       sessionApproval: 'error',
@@ -813,5 +830,251 @@ describe('approval gate — readability contract', () => {
     expect(styles).toMatch(
       /\.office-approval-card__detail\s*\{[^}]*background:\s*var\(--color-surface-muted\)[^}]*color:\s*var\(--color-text-muted\)/s,
     );
+  });
+});
+
+// ---------------------------------------------------------------------------
+// App-level session clearance — approval must actually open the workspace, and
+// a later revocation must close it again without restarting the app
+// ---------------------------------------------------------------------------
+
+describe('App-level session clearance', () => {
+  interface ClearanceHarness {
+    local: Record<string, unknown>;
+    calls: string[];
+    clearanceValues: Array<'office-pending' | 'allowed'>;
+    releaseClearance: () => void;
+  }
+
+  const offlineSyncState = {
+    status: 'offline' as const,
+    lastSyncAt: null,
+    lastError: null,
+    pendingCount: 0,
+  };
+
+  function makeSnapshot(): DksLocalSnapshot {
+    return {
+      rows: [],
+      deletedRows: [],
+      columns: [],
+      syncStatus: offlineSyncState,
+    };
+  }
+
+  function makeHarness(options: { deferClearance?: boolean } = {}): ClearanceHarness {
+    const calls: string[] = [];
+    const clearanceValues: Array<'office-pending' | 'allowed'> = [];
+    let resolver: (() => void) | null = null;
+    const gate = options.deferClearance
+      ? new Promise<void>((resolve) => {
+        resolver = resolve;
+      })
+      : null;
+    const snapshot = makeSnapshot();
+
+    const local: Record<string, unknown> = {
+      setSessionClearance: async (value: 'office-pending' | 'allowed') => {
+        calls.push('set-session-clearance');
+        clearanceValues.push(value);
+        if (gate) {
+          await gate;
+        }
+        return value;
+      },
+      getSnapshot: async () => {
+        calls.push('get-snapshot');
+        return snapshot;
+      },
+      getSettings: async () => {
+        calls.push('get-settings');
+        return {};
+      },
+      setSettings: async () => {
+        calls.push('set-settings');
+        return {};
+      },
+      acknowledgeSettings: async () => {
+        calls.push('acknowledge-settings');
+        return offlineSyncState;
+      },
+      listNotifications: async () => {
+        calls.push('list-notifications');
+        return [];
+      },
+      addNotification: async () => {
+        calls.push('add-notification');
+        return null;
+      },
+      updateNotification: async () => {
+        calls.push('update-notification');
+        return null;
+      },
+      applyRemoteSnapshot: async () => {
+        calls.push('apply-remote-snapshot');
+        return snapshot;
+      },
+      setSyncStatus: async () => {
+        calls.push('set-sync-status');
+        return offlineSyncState;
+      },
+      flushSync: async () => {
+        calls.push('flush-sync');
+        return offlineSyncState;
+      },
+      acknowledgeOutbox: async () => {
+        calls.push('acknowledge-outbox');
+        return offlineSyncState;
+      },
+      listOutbox: async () => {
+        calls.push('list-outbox');
+        return [];
+      },
+      retryFailedOutbox: async () => {
+        calls.push('retry-failed-outbox');
+        return { requeued: 0 };
+      },
+      recordConflict: async () => {
+        calls.push('record-conflict');
+        return undefined;
+      },
+      listAudit: async () => {
+        calls.push('list-audit');
+        return [];
+      },
+      close: async () => {
+        calls.push('close');
+        return { closed: true, flushed: true };
+      },
+    };
+
+    return { local, calls, clearanceValues, releaseClearance: () => resolver?.() };
+  }
+
+  function installFakeDks(local: Record<string, unknown>): () => void {
+    const windowWithDks = window as unknown as { dks?: unknown };
+    const previous = windowWithDks.dks;
+    windowWithDks.dks = { local };
+    return () => {
+      if (previous === undefined) {
+        delete windowWithDks.dks;
+      } else {
+        windowWithDks.dks = previous;
+      }
+    };
+  }
+
+  it('waits for the main process to acknowledge the clearance before the workspace reads local records', async () => {
+    const harness = makeHarness({ deferClearance: true });
+    const restore = installFakeDks(harness.local);
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service } = makeFakeApprovalService({ my: makeRequest({ status: 'approved' }) });
+
+    const { unmount } = render(<App authService={authService} approvalService={service} />);
+
+    // The clearance push is dispatched…
+    await waitFor(() => expect(harness.calls).toContain('set-session-clearance'));
+    // …but the workspace stays closed until the main process has stored it.
+    expect(harness.calls).not.toContain('get-snapshot');
+    expect(harness.calls).not.toContain('get-settings');
+    expect(harness.calls).not.toContain('list-notifications');
+
+    harness.releaseClearance();
+
+    await waitFor(() => expect(harness.calls).toContain('get-snapshot'), { timeout: 3_000 });
+    expect(harness.calls.indexOf('set-session-clearance'))
+      .toBeLessThan(harness.calls.indexOf('get-snapshot'));
+
+    unmount();
+    restore();
+  });
+
+  it('opens the workspace for an approved Office session without restarting the app', async () => {
+    const harness = makeHarness();
+    const restore = installFakeDks(harness.local);
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service } = makeFakeApprovalService({ my: makeRequest({ status: 'approved' }) });
+
+    const { unmount } = render(<App authService={authService} approvalService={service} />);
+
+    await waitFor(() => expect(screen.getByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument());
+    expect(harness.clearanceValues).toContain('allowed');
+    // The workspace never sees the pending clearance value.
+    expect(harness.clearanceValues.at(-1)).toBe('allowed');
+
+    unmount();
+    restore();
+  });
+
+  it('flips an approved Office session back to the gate when it is revoked', async () => {
+    const harness = makeHarness();
+    const restore = installFakeDks(harness.local);
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service } = makeFakeApprovalService({});
+
+    let myStatus: OfficeSigninRequest['status'] | null = 'approved';
+    service.fetchMyRequest = vi.fn(async () => ({
+      data: myStatus ? makeRequest({ status: myStatus }) : null,
+      error: null,
+    }));
+
+    const { unmount } = render(<App authService={authService} approvalService={service} />);
+
+    await waitFor(() => expect(screen.getByRole('banner', { name: 'DKS top bar' })).toBeInTheDocument());
+    expect(harness.clearanceValues.at(-1)).toBe('allowed');
+
+    // The administrator revokes the approval while the Office session is open.
+    myStatus = 'revoked';
+    window.dispatchEvent(new Event('focus'));
+
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/revoked/i));
+    // The gate remounted and the main process was told to fence again — no
+    // restart of the application was needed.
+    expect(harness.clearanceValues.at(-1)).toBe('office-pending');
+    expect(screen.queryByRole('banner', { name: 'DKS top bar' })).not.toBeInTheDocument();
+
+    unmount();
+    restore();
+  });
+
+  it('keeps the newest approval verdict when overlapping refreshes resolve out of order', async () => {
+    const authService = new AuthService(makeAuthClient({ id: 'user-office', role: 'office' }));
+    const { service } = makeFakeApprovalService({});
+    const store = createAppStore(authService, service);
+    store.setState({
+      profile: {
+        id: 'user-office',
+        email: 'office@example.com',
+        role: 'office',
+        fullName: 'Office',
+      } as AppStore['profile'],
+    });
+
+    // The FIRST (older) request resolves 'approved' AFTER the second one has
+    // already resolved 'revoked'.
+    const olderResolver: { resolve: ((value: { data: OfficeSigninRequest | null; error: null }) => void) | null } = {
+      resolve: null,
+    };
+    const older = new Promise<{ data: OfficeSigninRequest | null; error: null }>((resolve) => {
+      olderResolver.resolve = resolve;
+    });
+    let first = true;
+    service.fetchMyRequest = vi.fn(async () => {
+      if (first) {
+        first = false;
+        await older;
+        return { data: makeRequest({ status: 'approved' }), error: null };
+      }
+      return { data: makeRequest({ status: 'revoked' }), error: null };
+    });
+
+    const olderCall = store.getState().refreshSessionApproval();
+    const newerCall = store.getState().refreshSessionApproval();
+    olderResolver.resolve?.({ data: makeRequest({ status: 'approved' }), error: null });
+
+    await Promise.all([olderCall, newerCall]);
+
+    // The stale 'approved' must not re-open the workspace.
+    expect(store.getState().sessionApproval).toBe('revoked');
   });
 });

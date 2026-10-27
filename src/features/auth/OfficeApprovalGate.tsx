@@ -4,6 +4,7 @@ import type { StoreApi } from 'zustand/vanilla';
 import { useStore } from 'zustand';
 
 import type { AppStore } from '../../lib/store';
+import { formatBusinessDateTime } from '../../lib/date';
 
 /**
  * The ONLY surface a pending / denied / revoked Office session may see.
@@ -24,14 +25,25 @@ export interface OfficeApprovalGateProps {
   onSignOut: () => void;
 }
 
-const POLL_INTERVAL_MS = 5_000;
+/**
+ * How often a waiting Office session re-asks the server for its own approval
+ * row. Tightened from 5s so a decision (approve OR deny/revoke) is visible in
+ * under five seconds; the poll is a single-row RPC and stops as soon as the
+ * status leaves pending/checking.
+ */
+export const OFFICE_APPROVAL_POLL_INTERVAL_MS = 4_000;
 
+/**
+ * The request timestamp is shown in the DKS business calendar
+ * (Asia/Muscat, DD/MM/YYYY HH:mm) rather than the PC's locale, which renders
+ * month-first dates on an en-US machine.
+ */
 function formatRequestedAt(value: string | undefined): string {
   if (!value) {
     return 'just now';
   }
   const when = new Date(value);
-  return Number.isNaN(when.getTime()) ? value : when.toLocaleString();
+  return Number.isNaN(when.getTime()) ? value : formatBusinessDateTime(when);
 }
 
 interface GateStateCopy {
@@ -46,7 +58,7 @@ export function OfficeApprovalGate({ appStore, onSignOut }: OfficeApprovalGatePr
   const request = useStore(appStore, (state) => state.sessionApprovalRequest);
   const error = useStore(appStore, (state) => state.sessionApprovalError);
 
-  useEffect(() => {
+    useEffect(() => {
     if (approval !== 'pending' && approval !== 'checking') {
       return undefined;
     }
@@ -54,11 +66,19 @@ export function OfficeApprovalGate({ appStore, onSignOut }: OfficeApprovalGatePr
     const tick = () => {
       void appStore.getState().refreshSessionApproval();
     };
-    const interval = setInterval(tick, POLL_INTERVAL_MS);
-    window.addEventListener('focus', tick);
+    const interval = setInterval(tick, OFFICE_APPROVAL_POLL_INTERVAL_MS);
+    const onFocus = () => tick();
+    const onVisibility = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+        tick();
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       clearInterval(interval);
-      window.removeEventListener('focus', tick);
+      window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [appStore, approval]);
 
