@@ -14,8 +14,8 @@
  *   - passport / Civil ID masked by default unless an Admin opted in.
  */
 
-import { escapeHtml } from './email';
-import { formatDisplayDate, isValidIsoDate } from '../../../src/lib/date';
+import { escapeHtml } from './email.ts';
+import { formatDisplayDate, isValidIsoDate } from '../../../src/lib/date.ts';
 
 /** Window for the email/PDF report. Deliberately NOT the workspace setting. */
 export const EXPIRY_REPORT_WINDOW_DAYS = 30;
