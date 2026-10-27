@@ -283,7 +283,7 @@ describe('updater foundation', () => {
     expect(lastCall).toMatchObject({ from: 'checking', to: 'error', errorKind: 'check' });
     expect(lastCall?.errorMessage).toContain('secret release URL');
     // Transition carries the sanitized message (bounded, no raw URL leak beyond the message itself).
-    // It no longer hides the error — the pill and electron-log surface name/code/message.
+    // It no longer hides the error - the pill and electron-log surface name/code/message.
     expect(typeof lastCall?.errorMessage).toBe('string');
   });
 
@@ -342,22 +342,36 @@ describe('release provider configuration', () => {
     expect(packageJson.scripts?.dist).toContain('--publish never');
   });
 
-  it('clears only Chromium session storage on a real uninstall, never on update', () => {
+  it('clears Chromium session storage on a real uninstall (4 locations, elevation-aware) - never on update', () => {
     expect(builderYml).toMatch(/include:\s*build\/installer\.nsh/);
     const installer = readTextFileNormalised(resolve(root, 'build/installer.nsh'));
 
     // Real uninstall only: an in-place update also runs the old uninstaller
     // and must not sign the user out.
+    expect(installer).toContain('!macro customInstall');
     expect(installer).toContain('!macro customUnInstall');
     expect(installer).toContain('${ifNot} ${isUpdated}');
-    // Supabase's persisted session lives in Chromium Local Storage; removing
-    // these two directories stops a reinstall silently restoring the login.
-    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Local Storage"');
-    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Session Storage"');
-    // The SQLite business cache at the userData root is never targeted.
-    expect(installer).not.toMatch(/RMDir[^\n]*\$APPDATA\\DKS"/);
+    // Fresh-install nonce: new GUID on fresh install, preserved on update (Bug 1).
+    expect(installer).toContain('install-nonce');
+    expect(installer).toContain('CoCreateGuid');
+    // Second-layer NSIS guard: abort if DKS is still running (tray counts).
+    expect(installer).toContain('nsProcess::FindProcess');
+    expect(installer).toContain('DKS.exe');
+    // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
+    expect(installer).toContain('SetShellVarContext current');
+    // Supabase's persisted session lives in Chromium storages; on Electron 34
+    // (Chromium 130) Cookies is at Network\\Cookies (file), not a Cookies directory.
+    expect(installer).toContain('Local Storage');
+    expect(installer).toContain('Session Storage');
+    expect(installer).toContain('IndexedDB');
+    // Cookies: legacy directory + legacy file + current Network\\Cookies file
+    expect(installer).toContain('Cookies');
+    expect(installer).toContain('Network');
+    // The SQLite business cache at the userData root is never targeted - it holds
+    // customer data + outbox and must survive uninstall/reinstall.
+    expect(installer).not.toMatch(/RMDir[^\\n]*\\$APPDATA\\\\DKS"/);
     expect(installer).not.toContain('dks-cache.sqlite"');
-    expect(installer).not.toMatch(/Delete[^\n]*\.sqlite/);
+    expect(installer).not.toMatch(/Delete[^\\n]*\\.sqlite/);
   });
 
   it('embeds no release credential anywhere in the client configuration', () => {

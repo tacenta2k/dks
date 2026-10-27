@@ -1,25 +1,34 @@
 ; DKS keeps its SQLite business cache at the root of Electron userData
 ; ($APPDATA\DKS\dks-cache.sqlite). Never delete that directory or file here.
 ;
-; Session lives in four Chromium storages under userData:
+; Session lives in Chromium storages under userData. On Electron 34
+; (Chromium 130) the on-disk layout is:
 ;   %APPDATA%\DKS\Local Storage\leveldb
 ;   %APPDATA%\DKS\Session Storage
 ;   %APPDATA%\DKS\IndexedDB
-;   %APPDATA%\DKS\Cookies (plus -journal / -wal siblings inside that folder)
-; All four must be removed on a REAL uninstall so a later reinstall cannot
+;   %APPDATA%\DKS\Cookies            (legacy file, Chromium <90)
+;   %APPDATA%\DKS\Cookies-journal    (legacy)
+;   %APPDATA%\DKS\Network\Cookies    (current, Chromium 90+)
+;   %APPDATA%\DKS\Network\Cookies-journal
+; All must be removed on a REAL uninstall so a later reinstall cannot
 ; silently restore the previous JWT (Admin AND Office). The SQLite file at
-; the userData root must NEVER be touched — it holds customer data + outbox.
+; the userData root (dks-cache.sqlite) must NEVER be touched — it holds
+; customer data + outbox. Use SetShellVarContext current to resolve the real
+; user's %APPDATA% even if the uninstaller is elevated.
 ;
 ; Two cooperating layers:
-;   1) NSIS (this file): second layer — deletes the four session subfolders
+;   1) NSIS (this file): second layer — deletes the session locations
 ;      when the old uninstaller runs, after verifying no DKS process is still
 ;      running (tray counts). Guarded by ${isUpdated} so an in-place
 ;      auto-update that also runs the old uninstaller does not sign out.
-;   2) App-level nonce guard in electron/main/index.ts: first layer — on every
-;      packaged launch compares the install nonce written here (new GUID on
-;      fresh install, preserved on update) against the last nonce stored in
-;      SQLite. On mismatch it calls session.defaultSession.clearStorageData
-;      for the four storages. That survives an incomplete uninstall.
+;   2) App-level nonce guard in electron/main/install-nonce.ts: first layer —
+;      on every packaged launch compares the install nonce written here (new
+;      GUID on fresh install, preserved on update) against the last nonce
+;      stored in SQLite. On mismatch it calls session.defaultSession
+;      .clearStorageData({ storages: ['cookies','localstorage','indexdb'] })
+;      plus Session Storage fs cleanup, before loading the renderer. If
+;      cleanup fails it does NOT record the new nonce, so next launch retries
+;      and never silently resumes an old session.
 ; Both layers skip when !app.isPackaged (dev builds).
 
 !include "LogicLib.nsh"
@@ -30,6 +39,7 @@
 !macro customInstall
   ${ifNot} ${isUpdated}
     DetailPrint "DKS: creating fresh install nonce"
+    SetShellVarContext current
     CreateDirectory "$APPDATA\DKS"
     ; Generate a GUID via ole32; fall back to tick count if unavailable.
     ; The GUID text is written verbatim to $APPDATA\DKS\install-nonce .
@@ -50,6 +60,9 @@
 
 !macro customUnInstall
   ${ifNot} ${isUpdated}
+    ; Ensure we resolve the real user's %APPDATA%, not an elevated admin's.
+    SetShellVarContext current
+
     ; Tray Exit must be used before uninstall — a live DKS process holds
     ; Local Storage\leveldb files open, so RMDir would be incomplete and the
     ; next reinstall would auto-login.
@@ -60,17 +73,19 @@
       Abort
     ${EndIf}
 
-    ; Delete ONLY the four Chromium session subfolders under the real user's
+    ; Delete ONLY the Chromium session locations under the real user's
     ; %APPDATA%\DKS. Never touch dks-cache.sqlite, install-nonce, logs/,
     ; or any other file at the userData root.
+    ; Local Storage, Session Storage, IndexedDB are directories.
     RMDir /r "$APPDATA\DKS\Local Storage"
     RMDir /r "$APPDATA\DKS\Session Storage"
     RMDir /r "$APPDATA\DKS\IndexedDB"
+    ; Cookies may be a directory (old) or file (legacy). Handle both.
     RMDir /r "$APPDATA\DKS\Cookies"
-
-    ; History: older builds left Cookies as a file (not a directory) on some
-    ; Windows/Electron combinations. Ensure a stray file is also removed, but
-    ; never use a wildcard against $APPDATA\DKS itself.
     Delete "$APPDATA\DKS\Cookies"
+    Delete "$APPDATA\DKS\Cookies-journal"
+    ; Current Chromium (Electron 34 / Chromium 130) stores cookies at Network\Cookies.
+    Delete "$APPDATA\DKS\Network\Cookies"
+    Delete "$APPDATA\DKS\Network\Cookies-journal"
   ${endIf}
 !macroend

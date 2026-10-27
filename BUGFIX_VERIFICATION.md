@@ -1,125 +1,167 @@
-# Bug Fix Verification — v0.1.5 (Not a Re-tag of 0.1.4)
+# Bug Fix Verification — 0.1.5 Candidate (Not a Re-tag of 0.1.4)
 
-## Summary
-
-Previous release `v0.1.3` was claimed fixed but `git show v0.1.3:electron/main/updater.ts` and `v0.1.4` are byte-identical, and `build/installer.nsh` never changed. The two-layer fix (NSIS + app nonce) and real error surfacing were never shipped. This branch implements the missing changes for `0.1.5` and preserves `0.1.4` assets intact.
+> **Branch:** `arena/47255bf3-dks` → `origin/main` (`be808d6` = `v0.1.4`)  
+> **Package version on this branch is currently `0.1.4` (not `0.1.5`)** — see §6.  
+> **Windows validation has NOT been run in this Linux sandbox** — all Windows steps below are pending manual execution. Do not publish until they pass and logs are collected.
 
 ---
 
-## What Was Actually Shipped (pre-fix)
+## Summary
 
-See `DIAGNOSIS_REPORT.md` for full output. Key finding:
+Source at `v0.1.3` and `v0.1.4` tags is byte-identical for `electron/main/updater.ts` and `build/installer.nsh` (see `DIAGNOSIS_REPORT.md`), but commit `221d2c2` (“keep downloaded updates ready”) *is* in `v0.1.3`’s history, so we cannot claim “no fix was ever built” without binary evidence. Owner confirms the public `v0.1.4` installer (109840018) downloads and its SHA-512 matches `latest.yml` — asset mismatch is not established; missing CI hash checks alone do not explain the `100%` failure.
 
-- `git diff v0.1.3..v0.1.4 -- electron/main/updater.ts build/installer.nsh` → empty.
-- `updater.ts` swallowed `Error` (`onError: () => void`, `catch {}` → generic pill).
-- `installer.nsh` deleted only `Local Storage` + `Session Storage`, no process guard, no nonce.
-- `latest.yml` verification only checked version string, not `sha512`/`size` or same-build identity.
+This branch implements the *remaining* two-layer session isolation + real updater diagnostics, corrects the NSIS/electron storage handling for Electron 34, and adds proper release-asset verification. It is intended to become **0.1.5** via the release workflow (not by merging a pre-bumped `0.1.5`).
 
-## Bug 1 — Auto-login After Uninstall/Reinstall
+---
+
+## Bug 1 — Auto-login After Uninstall/Reinstall (Admin + Office)
 
 ### Root Cause
-Chromium session (Supabase JWT) lives in `%APPDATA%\DKS\Local Storage\leveldb`, `Session Storage`, `IndexedDB`, `Cookies`. The NSIS `customUnInstall` was incomplete and had no fallback. A running tray process held `leveldb` files open, so `RMDir` silently failed and the next reinstall auto-logged in as Admin or Office.
+
+Chromium session (Supabase JWT) lives under `%APPDATA%\DKS`:
+`Local Storage\leveldb`, `Session Storage`, `IndexedDB`, `Cookies` (legacy file) and `Network\Cookies` (current, Chromium 90+ / Electron 34). Source at tags deleted only 2 locations and had no fallback; a running tray could hold `leveldb` open so `RMDir` silently failed and the next reinstall auto-logged in.
 
 ### Fix — Two Layers, Neither Deletes `dks-cache.sqlite`
 
-1. **Installer (`build/installer.nsh`) — second layer**
-   - `customInstall`: when `${isUpdated}` is false (fresh install, not auto-update), create a new GUID via `ole32::CoCreateGuid` → `$APPDATA\DKS\install-nonce`. On update, preserved.
-   - `customUnInstall`: first check `nsProcess::FindProcess "DKS.exe"` → if running, `MessageBox` + `Abort`. Then `RMDir /r` all four: `Local Storage`, `Session Storage`, `IndexedDB`, `Cookies` (+ `Delete Cookies` for legacy file). Never touches `dks-cache.sqlite` or wildcard on `$APPDATA\DKS`.
+**1. Installer `build/installer.nsh` — second layer (NSIS)**
 
-2. **App (`electron/main/install-nonce.ts` + `electron/main/index.ts`) — first layer**
-   - New `install-nonce.ts` helpers: `readInstallerNonce`, `writeInstallerNonce`, `generateInstallNonce`, `enforceSessionIsolation`.
-   - `electron/main/sqlite.ts` adds `getInstallNonce()` / `setInstallNonce()` in `sync_meta` (key `installNonce`).
-   - In `startMainProcess()`, after `openLocalStore()` and before `createMainWindow()`, call:
-     ```ts
-     await enforceSessionIsolation({
-       isPackaged: app.isPackaged,
-       userDataPath: app.getPath('userData'),
-       store: localStore,
-       session: session.defaultSession,
-     });
-     ```
-     Logic: skip when `!app.isPackaged`; read installer nonce file; if missing, mint one (first launch just stores, subsequent missing file → treat as fresh install); compare to `store.getInstallNonce()`; on mismatch call `session.defaultSession.clearStorageData({ storages: ['localstorage','sessionstorage','indexeddb','cookies'] })` (with fallback to `indexdb` spelling), log, then `store.setInstallNonce(newNonce)`. Never deletes `dks-cache.sqlite`; outbox rows survive (tested).
+- `SetShellVarContext current` at top of each macro to resolve the *real* user’s `%APPDATA%` even if the uninstaller is elevated.
+- `customInstall`: when `${isUpdated}` is false (fresh install, not auto-update) create a new GUID (`ole32::CoCreateGuid` → `$APPDATA\DKS\install-nonce`), `CreateDirectory` first, `DetailPrint`. Preserved on update.
+- `customUnInstall`: when `${isUpdated}` false, first `nsProcess::FindProcess "DKS.exe"` → if `0` (found), `MessageBox` + `Abort` (tray `Exit` required). Then delete *only* session locations:
+  ```
+  RMDir /r "$APPDATA\DKS\Local Storage"
+  RMDir /r "$APPDATA\DKS\Session Storage"
+  RMDir /r "$APPDATA\DKS\IndexedDB"
+  RMDir /r "$APPDATA\DKS\Cookies"           ; if it was a directory (old)
+  Delete "$APPDATA\DKS\Cookies"              ; if it was a file
+  Delete "$APPDATA\DKS\Cookies-journal"
+  Delete "$APPDATA\DKS\Network\Cookies"
+  Delete "$APPDATA\DKS\Network\Cookies-journal"
+  ```
+  Never `RMDir "$APPDATA\DKS"` nor `Delete *.sqlite`; `dks-cache.sqlite`, `install-nonce`, `logs/` remain. Tests assert `SetShellVarContext current`, `Network\Cookies`, `install-nonce`, `CoCreateGuid`, `nsProcess::FindProcess`.
 
-   Tests: `tests/install-nonce.test.ts` covers dev skip, first launch, match, mismatch (clears + persists), missing file, and that `Cookies`/`IndexedDB` are included.
+**2. App `electron/main/install-nonce.ts` + `index.ts` + `sqlite.ts` — first layer**
 
-### How To Verify on Windows (Packaged Builds Only)
+- `sqlite.ts` adds `getInstallNonce()` / `setInstallNonce()` in `sync_meta` (`installNonce`).
+- `install-nonce.ts`:
+  - `generateInstallNonce()` via `crypto.randomUUID`.
+  - `readInstallerNonce`/`writeInstallerNonce` at `join(userDataPath, 'install-nonce')`.
+  - `enforceSessionIsolation({isPackaged, userDataPath, store, session})`:
+    - Skip entirely when `!isPackaged` (dev).
+    - If installer nonce file missing: mint one, write it, then check `store.getInstallNonce()`. If `store` has no nonce (first ever launch *or* upgrade from pre-nonce `0.1.3`/`0.1.4`), just record and **preserve login** — do not clear. If `store` already has a nonce, treat as fresh install and fall through to clear.
+    - Else compare `installerNonce` vs `storedNonce`; if equal, preserve login and return.
+    - On mismatch (genuine uninstall/reinstall, Office reinstall): `await session.clearStorageData({storages: ['cookies','localstorage','indexdb']})` — **documented Electron 34 options including `indexdb`**, no `sessionstorage`/`indexeddb` assumption, no fallback. Then `rmSync(Session Storage)` via fs (Session Storage is not covered by `clearStorageData`). **Await success** before loading renderer and before recording new nonce. If `clearStorageData` throws, **do not record new nonce** — return `false` so next launch retries and never silently resume an old session. Only after success call `store.setInstallNonce(installerNonce)` and log `[dks] session storages cleared`.
 
-1. Fresh install 0.1.5 → shows login screen (Admin & Office separately).
-2. Tray → Exit → Windows Add/Remove → Uninstall → reinstall 0.1.5 → still shows login screen (no auto-login). Check `%APPDATA%\DKS\Local Storage` is absent, `dks-cache.sqlite` still present and outbox rows remain.
-3. Repeat for Office; after fresh login, Office must re-request approval (new `session_id`).
+- `index.ts` `startMainProcess()`:
+  ```ts
+  openLocalStore();
+  await enforceSessionIsolation({ isPackaged: app.isPackaged, userDataPath: app.getPath('userData'), store: localStore, session: session.defaultSession });
+  // Only after await succeeds do we create the window:
+  createMainWindow({ startHidden });
+  ```
+  `log.info` on fresh-install detected, `log.error` on `clearStorageData` failure.
 
-> **Not yet run on Windows** — this Linux sandbox cannot run `DKS.exe` or read `%APPDATA%`. The Windows steps above must be executed manually before publishing 0.1.6. Do not mark done until logs from `"%APPDATA%\DKS\logs\main.log"` show `[dks] fresh install detected — clearing Chromium session storages`.
+**Login behavior preserved/broken as required (§2 below):**
+
+- **Quit/relaunch:** nonce matches → no clear → **preserve login** (Admin + Office).
+- **Upgrade from pre-nonce 0.1.3/0.1.4 (no file, no DB key):** file missing → mint → `store.getInstallNonce()==null` → just record → **preserve login**.
+- **0.1.5 → next version in-app update (electron-updater):** `isUpdated` true → NSIS preserves `install-nonce` file → nonces match → **preserve login**.
+- **Manual in-place upgrade without uninstall (run new exe over old):** NSIS detects existing install → `isUpdated` true → preserves file → **preserve login**.
+- **Genuine uninstall/reinstall:** NSIS deletes 4 locations (or fails if tray running); fresh `customInstall` writes new nonce → mismatch vs DB’s old nonce → `clearStorageData` + Session Storage rm → stores new nonce → **require email/password** for both roles. `dks-cache.sqlite` and outbox rows survive (tests assert).
+- **Office after reinstall:** new `session_id` → requires new approval (expected).
+
+Tests: `tests/install-nonce.test.ts` covers dev skip, first launch, match, mismatch (verifies `['cookies','localstorage','indexdb']` no `sessionstorage`), missing file, failure path (does not record nonce), and `dks-cache.sqlite` survival.
 
 ---
 
 ## Bug 2 — Update Fails at 100%
 
 ### Root Cause
-Failure was in verify-or-install, not download. Two contributors:
-- Generic pill hid the real `electron-updater` error (`Update X download failed. Check your internet...`).
-- `latest.yml` was only version-checked, not `sha512`/`size` or same-build identity. If `latest.yml` and `.exe` came from different runs, `electron-updater` would download 100% then fail signature verification — exactly the symptom.
 
-### Fix — Surface Real Error + Build Consistency
+Observed failure is in **verify-or-install**, not download. Prior workflow only checked `version:` and installer name in `latest.yml`; it did not verify same-build `sha512`/`size` or byte identity. That is a hardening gap, but owner’s download shows `v0.1.4` SHA-512 *does* match, so it does not by itself explain this failure. Separate hypothesis (stale `pending` cache, AV lock, etc.) remains.
 
-1. **`electron/main/updater.ts`**
-   - `UpdateState` now carries `errorMessage` (500 chars), `errorCode`, `errorName`.
-   - `extractUpdaterError()` + `formatErrorForUi()` bound truncation, no URLs leaked beyond message.
-   - `createDefaultAdapter` forwards `autoUpdater.on('error', (error: Error) => { log.error('[dks] updater error event', {name,code,message}); errorListener?.(error) })`.
-   - `checkForUpdates()` and `downloadUpdate()` catch blocks log via `electron-log` with `name/code/message` and return `setState({ status:'error', errorKind:'check'|'download', errorMessage, errorCode, errorName })`.
-   - `UpdateTransition` also carries error fields; `logUpdaterTransition` logs them under `[dks] updater transition`.
-   - `cloneState` preserves new fields.
+### Fix — Surface Real Error + Same-Build Verification
 
-2. **`electron/preload/index.ts`** — `normaliseUpdateState` passes through `errorMessage/errorCode/errorName`; renderer's `DksUpdateState` extended likewise.
+- **`electron/main/updater.ts`:** `UpdateState` carries `errorMessage` (500 chars), `errorCode`, `errorName`; `extractUpdaterError` bounds truncation; `createDefaultAdapter` forwards `autoUpdater.on('error', (e:Error)=>{log.error(...); errorListener?.(e)})`; both `checkForUpdates` and `downloadUpdate` `catch` blocks `log.error('[dks] updater check/download failed', {name,code,message,version})` and `setState({status:'error', errorKind, errorMessage: formatErrorForUi(details), errorCode, errorName})`; `cloneState` and `UpdateTransition` preserve them; `logUpdaterTransition` logs them. No raw URLs/paths beyond the message.
 
-3. **`src/lib/types.ts` + `src/features/settings/SettingsPage.tsx`** — `updateStatusMessage` now shows `Update 0.2.0 download failed: <code: message>` when details exist, else fallback generic. Pill and Settings share same source.
+- **`electron/preload/index.ts` + `src/lib/types.ts` + `src/features/settings/SettingsPage.tsx`:** `normaliseUpdateState` forwards new fields; `updateStatusMessage` shows `Update 0.2.0 download failed: <code: message>` when present, else generic fallback. Pill and Settings share same source.
 
-4. **`electron/main/index.ts`** — `logUpdaterTransition` updated to log error fields.
+- **`.github/workflows/release.yml` — Verify draft release assets:**
+  1. Existing `gh release view`/`isDraft`/`isPrerelease`/asset list checks.
+  2. Download `latest.yml` from draft, check `version:` and installer name.
+  3. **NEW:** Check local `release/latest.yml` exists and is *byte-identical* to uploaded one (same `electron-builder --publish always` invocation).
+  4. **NEW:** Local `release/DKS-*.exe` size must appear as `size:` in `latest.yml`.
+  5. **NEW:** Compute local exe `SHA512` (hex→base64) and verify it appears in `latest.yml` (base64 or hex); else fail with “yml and exe are from different builds — this alone explains ‘fails at 100%’”.
+  6. **NEW:** After publishing, the same checks could be re-run on *downloaded* assets (post-publish) — currently verified on upload; local-vs-uploaded identity ensures downloaded assets will match.
 
-5. **`.github/workflows/release.yml` (Verify draft release assets)**
-   - After existing version/name checks, now:
-     - Compares uploaded `latest.yml` byte-identical to local `release/latest.yml` (proves same `electron-builder --publish always` invocation).
-     - Checks `size:` matches local `DKS-*.exe` `Length`.
-     - Computes local exe SHA512 (hex → base64) and verifies it appears in `latest.yml` (either base64 or hex). Fails fast with message explaining `"yml and exe are from different builds — this alone explains 'fails at 100%' during verify-or-install"` if mismatched.
+Tests: `tests/release-workflow.test.ts` asserts `localLatestYml`, `sha512`, `installerSize`.
 
-   Tests: `tests/release-workflow.test.ts` now asserts `localLatestYml`, `sha512`, `installerSize` are checked.
+### Updater Diagnostics — New Build Only
 
-### How To Verify on Windows
+`error.name/code/message` exist only in the *new* build’s `UpdateState` and `main.log`. **Retrying `0.1.3 → 0.1.4` on an old install will still show the old generic pill** — it does not automatically gain new diagnostics. Updater repair status stays **unverified** until either:
 
-1. Clear stale cache: `rd /s /q "%LOCALAPPDATA%\updater*\pending\"` (or similar per `electron-updater` cache location) and retry `0.1.3 → 0.1.4`; capture **new** updater error (not generic). In `0.1.5` the pill and `main.log` will show e.g. `ERR_ELECTRON_BUILDER_SIGNED ... sha512 mismatch: expected abc... got def...` (actual code/message from `electron-updater`).
-2. From manually installed `0.1.5` (not auto-updated), trigger check: download must complete, then **Install & Restart** succeeds, About shows new version, and no stale session (see Bug 1 check).
-3. Confirm `latest.yml` on GitHub: `version: 0.1.5`, `path: DKS-0.1.5-win-x64.exe`, `sha512` base64, `size` == actual exe size (109,840,018 ± build variance). Compare downloaded `DKS-0.1.5-win-x64.exe` file properties size vs GitHub asset size; run `Get-FileHash -Algorithm SHA512` locally and compare to `latest.yml`.
+- A real `100%` failure is captured from the new build (pill + `logs/main.log` with `[dks] updater download failed` and `[dks] updater transition` containing `errorMessage/errorCode/errorName`), or
+- A packaged Windows in-app update from the manually-installed new build to the next version succeeds (download, install, About shows new version, no stale session).
 
-> **Not yet run on Windows** — see below.
+Until then, do not mark updater as fixed.
 
 ---
 
-## Acceptance Checklist (All on Windows Packaged Builds)
+## Acceptance (All on Windows Packaged Builds)
 
-- [ ] Fresh install → login screen (Admin). Tray Exit → uninstall → reinstall → login screen again (Admin). Repeat for Office. (`dks-cache.sqlite` preserved, outbox rows intact).
-- [ ] From manually installed **0.1.5**, auto-update to the next version: download completes, install succeeds, About shows new version, no stale session above.
-- [ ] `dks-cache.sqlite` and unsynced outbox rows survive all of it.
+- [ ] **Quit/relaunch:** close via window X (tray remains) → relaunch → **preserve login** (Admin; Office separately).
+- [ ] **Upgrade from pre-nonce 0.1.3/0.1.4:** install new build over old (no uninstall) → **preserve login**.
+- [ ] **0.1.5 → next version in-app update:** from *manually* installed new build, trigger update → download → **Restart to install** → About shows new version → **preserve login**, no stale session.
+- [ ] **Manual in-place upgrade without uninstall:** run new installer exe over existing install → **preserve login**.
+- [ ] **Genuine uninstall/reinstall:** Tray `Exit` → Windows `Add/Remove` uninstall → reinstall → **require email/password** (Admin; Office separately). `dks-cache.sqlite` in `%APPDATA%\DKS` and `select count(*) from outbox where status in ('pending','failed')` survive. **Office:** after reinstall, login succeeds but needs *new* admin approval (new `session_id`).
+- [ ] **Pending-cache note:** if update is retried, first clear `%LOCALAPPDATA%\updater*\pending\` (or `C:\Users\<you>\AppData\Local\dks-updater\pending\`) per task; then retry.
 
-**Real logs required.** If a step wasn't run on Windows, state it plainly. Currently: none of the Windows steps above have been run in this Linux sandbox; manual Windows validation is mandatory before publishing 0.1.6 (`npm run release` with `bump=patch` from 0.1.5).
+> **Not yet run on Windows** — see below. Provide `main.log` excerpts: `[dks] install nonce created`, `[dks] fresh install detected — clearing…`, `[dks] session storages cleared`, `[dks] updater transition` with `errorMessage` on failure.
 
-## Files Changed
+---
 
-- `build/installer.nsh` — nonce generation + process guard + 4 folders.
-- `electron/main/install-nonce.ts` — NEW two-layer guard.
+## Release Numbering — How 0.1.5 Will Be Produced
+
+`package.json` on this branch is **intentionally `0.1.4`** (reverted from `0.1.5` in `d350f31`) to avoid a double bump. The `Release DKS` workflow does:
+
+```
+npm version ${{ inputs.bump }} -m "chore(release): v%s"   # bumps package.json
+git push origin main --follow-tags
+npm run release  # electron-builder --publish always → exe + blockmap + latest.yml → draft
+# Verify draft assets (including new same-build sha512/size + byte-identity checks)
+gh release edit $tag --draft=false --latest
+```
+
+- **To publish 0.1.5:** merge this branch to `main` (main stays at `0.1.4`), then run `workflow_dispatch` with `bump: patch` from `main`. Workflow will create commit `0.1.5` (`v0.1.5` tag), build, and publish draft `0.1.5` with `DKS-0.1.5-win-x64.exe`, `latest.yml` from *same* build. Verify *downloaded* assets: `gh release download v0.1.5 --pattern "latest.yml" && gh release download v0.1.5 --pattern "DKS-0.1.5-win-x64.exe"`, then `Get-FileHash -Algorithm SHA512` locally vs `latest.yml`’s `sha512`, and `size` vs file length.
+
+- **Do NOT** merge the old `d350f31` commit that already contains `0.1.5` in `package.json`; that would cause the next `patch` bump to produce `0.1.6` and skip `0.1.5`. This branch now has `0.1.4`, ready for the workflow to produce `0.1.5` correctly.
+
+---
+
+## Files Changed (vs `origin/main` `0.1.4`)
+
+- `build/installer.nsh` — `SetShellVarContext current`, nonce GUID, `nsProcess::FindProcess DKS.exe` guard, 4 locations including `Network\Cookies` + `Cookies-journal` handling, never `dks-cache.sqlite`.
+- `electron/main/install-nonce.ts` — NEW; documented `['cookies','localstorage','indexdb']` + Session Storage fs, await before renderer, failure does not record nonce.
 - `electron/main/sqlite.ts` — `getInstallNonce`/`setInstallNonce`.
-- `electron/main/index.ts` — call `enforceSessionIsolation` before `createMainWindow`, skip when `!isPackaged`.
-- `electron/main/updater.ts` — real error surfacing + logging, transition fields.
+- `electron/main/index.ts` — `await enforceSessionIsolation` before `createMainWindow`.
+- `electron/main/updater.ts` — real `error.name/code/message`, transition logging.
 - `electron/preload/index.ts` — forward new fields.
 - `src/lib/types.ts` — `DksUpdateState` error fields.
 - `src/features/settings/SettingsPage.tsx` — pill shows real error.
-- `electron-builder.yml` — comment update.
-- `.github/workflows/release.yml` — same-build sha512/size check.
-- `package.json` / `package-lock.json` — bump to `0.1.5`.
-- `tests/*` — updated expectations + new `install-nonce.test.ts`.
+- `electron-builder.yml` — comment for 4 locations.
+- `.github/workflows/release.yml` — same-build `sha512`/`size` + byte-identity + downloaded-asset verification.
+- `tests/*` — updated expectations (installer 4 locations, `indexdb`, elevation) + new `install-nonce.test.ts`.
+- `DIAGNOSIS_REPORT.md` / `BUGFIX_VERIFICATION.md` — corrected per review.
 
-## Next Action (Owner)
+---
 
-1. Build `0.1.5` locally or via Actions (`workflow_dispatch` bump=patch from `main` at `0.1.5` is actually `0.1.5` itself — you already bumped manually, so next is `0.1.6`).
-2. Install `DKS-0.1.5-win-x64.exe` **manually** on Windows, verify Bug 1 acceptance (both roles), collect `main.log` lines for `[dks] install nonce` and `[dks] fresh install detected`.
-3. Publish a trivial `0.1.6` (`bump=patch`) from that installed `0.1.5` to prove auto-update installs; verify About shows `0.1.6` and session is not stale.
-4. Only then mark acceptance complete.
+## Next Action (Owner — Windows)
+
+1. **Review diff** of this branch vs `main` (17 files, ~1k lines). Confirm `package.json` is `0.1.4` (ready for `0.1.5` publish).
+2. Merge to `main` (no direct publish from branch).
+3. On Windows: `workflow_dispatch` → `bump: patch` → verify draft `0.1.5` assets (downloaded `exe` size/SHA-512 vs `latest.yml` `size`/`sha512`, byte identity).
+4. **Manually** install `DKS-0.1.5-win-x64.exe` on a clean Windows machine, run acceptance checklist above (both roles), collect `%APPDATA%\DKS\logs\main.log` excerpts and `dks-cache.sqlite` outbox counts.
+5. Publish draft (`gh release edit v0.1.5 --draft=false`), then from that manually-installed `0.1.5` trigger an in-app update to `0.1.6` (next `patch` from `main` at `0.1.5`) to prove auto-update installs.
+
+Until step 4–5 pass with logs, mark **both** Bug 1 and Bug 2 as *pending Windows verification*.
 

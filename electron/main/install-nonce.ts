@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 
 import type { Session } from 'electron';
 import type { SqliteStore } from './sqlite';
@@ -58,12 +58,20 @@ export interface EnforceSessionIsolationOptions {
   logger?: Pick<typeof log, 'info' | 'warn' | 'error'>;
 }
 
-export async function enforceSessionIsolation(options: EnforceSessionIsolationOptions): Promise<void> {
+/**
+ * Enforce fresh-install isolation.
+ *
+ * Returns true if no action was needed or cleanup succeeded and nonce was recorded.
+ * Returns false if cleanup was required but failed — caller must NOT consider the
+ * session cleared and must NOT record the new nonce, so next launch retries.
+ * This prevents silently resuming an old session after a failed cleanup.
+ */
+export async function enforceSessionIsolation(options: EnforceSessionIsolationOptions): Promise<boolean> {
   const logger = options.logger ?? log;
-  if (!options.isPackaged) return;
-  if (!options.store) return;
+  if (!options.isPackaged) return true;
+  if (!options.store) return true;
   const userDataPath = options.userDataPath;
-  if (!userDataPath || typeof userDataPath !== 'string' || !userDataPath.trim()) return;
+  if (!userDataPath || typeof userDataPath !== 'string' || !userDataPath.trim()) return true;
 
   try {
     let installerNonce = readInstallerNonce(userDataPath);
@@ -79,7 +87,7 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
         // First ever launch — just record, do not wipe a non-existent session.
         trySetStoredNonce(options.store, installerNonce);
         logger.info('[dks] install nonce created for first launch', { nonce: installerNonce.slice(0, 8) + '…' });
-        return;
+        return true;
       }
       // File was missing but DB already has a nonce (e.g., manual delete or
       // old build): treat as fresh install and fall through to clear.
@@ -90,7 +98,7 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
 
     const storedNonce = tryGetStoredNonce(options.store);
     if (installerNonce && storedNonce === installerNonce) {
-      return;
+      return true;
     }
 
     logger.info('[dks] fresh install detected — clearing Chromium session storages', {
@@ -100,37 +108,53 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
       storedPrefix: storedNonce ? storedNonce.slice(0, 8) + '…' : null,
     });
 
-    if (options.session) {
-      try {
-        // Must NEVER delete dks-cache.sqlite — that lives at the userData root
-        // and is the customer data + outbox. This call touches only the four
-        // Chromium storages that hold the Supabase JWT.
-        // Task specifies: ['localstorage','sessionstorage','indexeddb','cookies'].
-        // Electron spells one of them 'indexdb' (no e); try both for robustness.
-        try {
-          await options.session.clearStorageData({
-            storages: ['cookies', 'localstorage', 'sessionstorage', 'indexeddb'] as unknown as string[],
-          } as Parameters<Session['clearStorageData']>[0]);
-        } catch {
-          await options.session.clearStorageData({
-            storages: ['cookies', 'localstorage', 'indexdb'] as unknown as string[],
-          } as Parameters<Session['clearStorageData']>[0]);
-        }
-        logger.info('[dks] session storages cleared for fresh install', {
-          storages: ['cookies', 'localstorage', 'sessionstorage', 'indexeddb'],
-        });
-      } catch (error) {
-        logger.warn('[dks] clearStorageData failed during fresh-install handling', error);
-      }
-    } else {
-      logger.warn('[dks] fresh install detected but no session available to clear');
+    if (!options.session) {
+      logger.warn('[dks] fresh install detected but no session available to clear — will retry next launch');
+      return false;
     }
 
+    // Use documented Electron 34 clearStorageData options.
+    // For Electron 34 (Chromium 130) the valid storages are:
+    //   'cookies', 'filesystem', 'indexdb', 'localstorage', 'shadercache',
+    //   'websql', 'serviceworkers', 'cachestorage'
+    // There is no 'sessionstorage' or 'indexeddb' (with e) — those are invalid and throw.
+    // We must include 'indexdb' (no e) and not rely on a fallback.
+    try {
+      await options.session.clearStorageData({
+        // Documented options for Electron 34, including indexdb
+        storages: ['cookies', 'localstorage', 'indexdb'],
+      } as Parameters<Session['clearStorageData']>[0]);
+    } catch (error) {
+      logger.error('[dks] clearStorageData failed — will retry next launch, not recording new nonce', error);
+      return false;
+    }
+
+    // Session Storage is not covered by clearStorageData's storages list.
+    // It lives at %APPDATA%\DKS\Session Storage on disk. Remove it via fs.
+    // This is best-effort but we log if it fails; the critical storages above
+    // have already been cleared, so we can proceed to record nonce.
+    try {
+      const sessionStoragePath = join(userDataPath, 'Session Storage');
+      if (existsSync(sessionStoragePath)) {
+        rmSync(sessionStoragePath, { recursive: true, force: true });
+        logger.info('[dks] Session Storage directory removed via fs');
+      }
+    } catch (error) {
+      logger.warn('[dks] Session Storage fs cleanup failed', error);
+      // Non-fatal: main storages already cleared, still record nonce
+    }
+
+    // Only after successful cleanup do we record the new nonce.
     trySetStoredNonce(options.store, installerNonce);
+    logger.info('[dks] session storages cleared for fresh install', {
+      storages: ['cookies', 'localstorage', 'indexdb', 'Session Storage (fs)'],
+    });
+    return true;
   } catch (error) {
     try {
       logger.warn('[dks] session isolation check failed', error);
     } catch {}
+    return false;
   }
 }
 

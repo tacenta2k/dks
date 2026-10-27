@@ -203,11 +203,14 @@ describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
       logger: logger as unknown as never,
     });
 
-    // Must have called clearStorageData with the four Chromium storages (task-specified array).
+    // Must have called clearStorageData with documented Electron 34 options (including indexdb).
+    // Session Storage is not a valid clearStorageData storage; it is removed via fs separately.
     expect(session.clearStorageData).toHaveBeenCalledTimes(1);
     const arg = (session.clearStorageData as any).mock.calls[0][0] as { storages: string[] };
     expect(arg.storages).toEqual(expect.arrayContaining(['localstorage', 'cookies']));
-    expect(arg.storages).toEqual(expect.arrayContaining(['cookies', 'localstorage', 'sessionstorage', 'indexeddb']));
+    expect(arg.storages).toEqual(expect.arrayContaining(['cookies', 'localstorage', 'indexdb']));
+    expect(arg.storages).not.toContain('sessionstorage');
+    expect(arg.storages).not.toContain('indexeddb');
 
     // New nonce persisted; outbox untouched.
     expect(store.getInstallNonce()).toBe(newNonce);
@@ -258,5 +261,27 @@ describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
     expect(newFileNonce).toBe(store.getInstallNonce());
     expect(newFileNonce).not.toBe('old-stored');
     tryClose(store);
+  });
+
+  it('never silently resumes old session if cleanup fails — does not record new nonce', async () => {
+    const store = makeFakeStore();
+    store.setInstallNonce('old-nonce');
+    writeInstallerNonce(dir, 'new-nonce');
+    const failingSession = { clearStorageData: vi.fn(async () => { throw new Error('EBUSY: leveldb locked'); }) };
+    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
+    const result = await enforceSessionIsolation({
+      isPackaged: true,
+      userDataPath: dir,
+      store,
+      session: failingSession as unknown as never,
+      logger: logger as unknown as never,
+    });
+    expect(result).toBe(false);
+    expect(failingSession.clearStorageData).toHaveBeenCalled();
+    // New nonce must NOT be recorded so next launch retries
+    expect(store.getInstallNonce()).toBe('old-nonce');
+    expect(logger.error).toHaveBeenCalled();
+    // Installer nonce file still has new-nonce (written by installer), but DB still old — mismatch persists for retry
+    expect(readInstallerNonce(dir)).toBe('new-nonce');
   });
 });
