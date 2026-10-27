@@ -15,18 +15,30 @@
  *                         Default: the Resend onboarding sender (test-only;
  *                         see deployment notes before going live).
  *
+ * Two kinds ride the same queue:
+ *   - office_signin_request: unchanged notification-only email. NO attachment,
+ *     NO approval link, NO session data (Approve/Deny stays inside DKS).
+ *   - expiry_digest: a clean HTML report + a plain-text fallback + exactly ONE
+ *     in-memory PDF attachment carrying every active Visa Sheet column.
+ *
+ * Privacy: passport / Civil ID values are masked by default everywhere
+ * (HTML, text, PDF). The PDF is generated in memory and discarded after the
+ * send — it is never written to disk, Storage, or a database table.
+ *
  * Deploy-time notes:
- *   - Content is deliberately minimal (row labels + expiry only; no passport,
- *     no Civil ID, no internal ids — see _shared/email.ts redaction).
  *   - Email failure NEVER blocks anything: rows get requeued up to 3 attempts
  *     and are then left 'failed' alongside a sanitized delivery_log entry.
+ *   - If PDF generation fails, the HTML/text report is still delivered (with a
+ *     sanitized detail noting the fallback) rather than sending nothing.
  */
 
+import { jsPDF } from 'npm:jspdf';
+
+import { bytesToBase64 } from '../_shared/base64.ts';
+import { renderDigestPdf, type PdfDocument } from '../_shared/digest-pdf.ts';
+import { buildOutboxEmail, sanitizeDetail, type OutboxEmail } from '../_shared/outbox-email.ts';
 import {
-  buildExpiryDigestEmail,
-  buildOfficeApprovalEmail,
   recipientsFrom,
-  type DigestEntry,
   type EmailOutboxRow,
   isValidEmail,
 } from '../_shared/email.ts';
@@ -40,6 +52,12 @@ interface Env {
   triggerKey: string;
   resendApiKey: string | null;
   fromEmail: string;
+}
+
+interface ResendAttachment {
+  filename: string;
+  content: string;
+  content_type: string;
 }
 
 function env(): Env | null {
@@ -92,39 +110,55 @@ function recipientFor(row: EmailOutboxRow): string | null {
   return fallback[0] ?? null;
 }
 
-function buildEmail(row: EmailOutboxRow): { subject: string; text: string; html: string } | null {
-  if (row.kind === 'office_signin_request') {
-    const requestedAt = typeof row.payload?.requestedAt === 'string' ? (row.payload as { requestedAt: string }).requestedAt : '';
-    const email = buildOfficeApprovalEmail(requestedAt);
-    return { subject: email.subject, text: email.text, html: email.html };
-  }
-  if (row.kind === 'expiry_digest') {
-    const rawEntries = Array.isArray(row.payload?.entries) ? row.payload.entries : [];
-    const entries: DigestEntry[] = rawEntries
-      .map((entry) => {
-        const candidate = entry as Record<string, unknown>;
-        return {
-          label: typeof candidate.label === 'string' && candidate.label.trim() ? candidate.label.trim() : '(unnamed entry)',
-          expiry: typeof candidate.expiry === 'string' ? candidate.expiry : '',
-          daysLeft: typeof candidate.daysLeft === 'number' && Number.isFinite(candidate.daysLeft) ? candidate.daysLeft : null,
-        };
-      });
-    const email = buildExpiryDigestEmail(entries);
-    return { subject: email.subject, text: email.text, html: email.html };
-  }
-  return null;
+/**
+ * Render the digest PDF in memory. Two passes: the first counts pages so the
+ * footer can print "Page X of Y" on the second, final pass.
+ *
+ * jsPDF is the ONLY dependency; it runs in Deno (npm specifier) and Node. Its
+ * standard WinAnsi fonts cannot encode non-Latin scripts, so unsupported
+ * characters are replaced with a visible marker and reported by the renderer.
+ */
+function generateExpiryPdf(model: NonNullable<OutboxEmail['model']>, jsPDFClass: unknown): Uint8Array {
+  const factory = (jsPDFClass as { new (): PdfDocument });
+  const probe = new factory();
+  const first = renderDigestPdf(probe, model, { totalPages: 0 });
+
+  const doc = new factory();
+  renderDigestPdf(doc, model, { totalPages: first.pages });
+
+  const arrayBuffer = doc.output('arraybuffer') as ArrayBuffer;
+  return new Uint8Array(arrayBuffer);
 }
 
 async function deliver(envValue: Env, row: EmailOutboxRow): Promise<{ delivered: boolean; detail: string }> {
   const recipient = recipientFor(row);
-  const email = buildEmail(row);
-  if (!recipient || !email) {
+  const built = buildOutboxEmail(row);
+  if (!recipient || !built) {
     return { delivered: false, detail: 'no-valid-recipient-or-content' };
   }
   if (!envValue.resendApiKey) {
     // Quiet no-op: Resend optional by design. Recorded but never fails the run.
     return { delivered: false, detail: 'resend-not-configured' };
   }
+
+  let attachments: ResendAttachment[] = [];
+  let pdfFallback: string | undefined;
+  if (built.model && built.pdfFileName) {
+    try {
+      const bytes = generateExpiryPdf(built.model, jsPDF);
+      attachments = [{
+        filename: built.pdfFileName,
+        content: bytesToBase64(bytes),
+        content_type: 'application/pdf',
+      }];
+    } catch {
+      // Prefer delivering the HTML/text report without the attachment over
+      // sending nothing. The sanitized detail records the fallback honestly.
+      attachments = [];
+      pdfFallback = 'delivered-without-pdf';
+    }
+  }
+
   try {
     const response = await fetch(RESEND_API_URL, {
       method: 'POST',
@@ -135,18 +169,22 @@ async function deliver(envValue: Env, row: EmailOutboxRow): Promise<{ delivered:
       body: JSON.stringify({
         from: envValue.fromEmail,
         to: [recipient],
-        subject: email.subject,
-        text: email.text,
-        html: email.html,
+        subject: built.subject,
+        text: built.text,
+        html: built.html,
+        ...(attachments.length > 0 ? { attachments } : {}),
       }),
     });
     const bodyText = await response.text();
     if (!response.ok) {
-      return { delivered: false, detail: `resend-http-${response.status}: ${bodyText.slice(0, 160)}` };
+      return { delivered: false, detail: `resend-http-${response.status}: ${sanitizeDetail(bodyText)}` };
     }
-    return { delivered: true, detail: 'sent' };
+    return { delivered: true, detail: pdfFallback ?? 'sent' };
   } catch (error) {
-    return { delivered: false, detail: error instanceof Error ? error.message.slice(0, 160) : 'unknown-send-error' };
+    return {
+      delivered: false,
+      detail: sanitizeDetail(error instanceof Error ? error.message : 'unknown-send-error'),
+    };
   }
 }
 

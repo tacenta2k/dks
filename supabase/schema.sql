@@ -1589,3 +1589,397 @@ begin
   end if;
 end;
 $$;
+
+-- ============================================================================
+-- OPTIONAL EMAIL NOTIFICATIONS (Resend) — fresh-install surface
+-- ============================================================================
+--
+-- The same surfaces live in ARENA/sql/email-notifications.sql (existing
+-- deployments) and ARENA/sql/expiry-digest-report.sql (digest upgrade). They
+-- are included here so a FRESH project gets the complete deliverable from one
+-- script. Everything below is additive and idempotent; no existing object is
+-- dropped. The Resend API key lives only in Edge Function secrets.
+--
+-- Privacy: the digest payload carries only column metadata + record data; the
+-- Edge Function masks passport / Civil ID values by default and never logs
+-- raw values. The PDF is generated in memory and never persisted.
+-- ============================================================================
+
+create table if not exists public.email_outbox (
+  id uuid primary key default gen_random_uuid(),
+  kind text not null check (kind in ('office_signin_request', 'expiry_digest')),
+  dedupe_key text not null,
+  recipient text,
+  payload jsonb not null default '{}'::jsonb,
+  status text not null default 'pending' check (status in ('pending', 'delivered', 'failed')),
+  attempts integer not null default 0,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(),
+  delivered_at timestamptz,
+  last_error text
+);
+create unique index if not exists email_outbox_kind_dedupe_uq
+  on public.email_outbox (kind, dedupe_key);
+create index if not exists email_outbox_pending_idx
+  on public.email_outbox (status, created_at)
+  where status = 'pending';
+
+create table if not exists public.email_delivery_log (
+  id uuid primary key default gen_random_uuid(),
+  outbox_id uuid references public.email_outbox(id) on delete set null,
+  kind text not null,
+  recipient text,
+  status text not null check (status in ('delivered', 'skipped', 'failed')),
+  detail text,
+  created_at timestamptz not null default now()
+);
+create index if not exists email_delivery_log_created_idx
+  on public.email_delivery_log (created_at desc);
+
+alter table public.email_outbox enable row level security;
+alter table public.email_delivery_log enable row level security;
+
+drop policy if exists email_outbox_admin_select on public.email_outbox;
+create policy email_outbox_admin_select
+  on public.email_outbox for select to authenticated
+  using (public.is_admin());
+
+drop policy if exists email_delivery_log_admin_select on public.email_delivery_log;
+create policy email_delivery_log_admin_select
+  on public.email_delivery_log for select to authenticated
+  using (public.is_admin());
+
+grant select on public.email_outbox to authenticated;
+grant select on public.email_delivery_log to authenticated;
+revoke insert, update, delete on public.email_outbox from authenticated;
+revoke insert, update, delete on public.email_delivery_log from authenticated;
+
+insert into public.settings (key, value)
+values ('email_notifications', jsonb_build_object(
+  'enabled', false,
+  'admin_email', null,
+  'expiry_digest_enabled', false,
+  'expiry_recipients', jsonb_build_array(),
+  'include_full_ids', false
+))
+on conflict (key) do nothing;
+
+insert into public.settings (key, value)
+values ('email_trigger_key', to_jsonb(gen_random_uuid()::text))
+on conflict (key) do nothing;
+
+-- One email per NEW pending Office sign-in request (dedupe key = request id).
+create or replace function public.office_signin_request_email_enqueue()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_prefs jsonb;
+  v_admin_email text;
+begin
+  select value into v_prefs from public.settings where key = 'email_notifications';
+  v_admin_email := nullif(trim(coalesce(v_prefs ->> 'admin_email', '')), '');
+
+  if coalesce((v_prefs ->> 'enabled')::boolean, false) is not true or v_admin_email is null then
+    return new;
+  end if;
+
+  insert into public.email_outbox (kind, dedupe_key, recipient, payload)
+  values (
+    'office_signin_request',
+    'office_signin_request:' || new.id::text,
+    v_admin_email,
+    jsonb_build_object('requestedAt', new.requested_at, 'adminEmail', v_admin_email)
+  )
+  on conflict (kind, dedupe_key) do nothing;
+  return new;
+end;
+$$;
+
+drop trigger if exists office_signin_requests_email_enqueue on public.office_signin_requests;
+create trigger office_signin_requests_email_enqueue
+after insert on public.office_signin_requests
+for each row execute function public.office_signin_request_email_enqueue();
+
+-- Service-role-only outbox claim/complete.
+create or replace function public.claim_email_outbox(p_limit integer default 5)
+returns setof public.email_outbox
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_limit integer := greatest(1, least(coalesce(p_limit, 5), 20));
+begin
+  if coalesce(current_setting('request.jwt.claims', true)::json ->> 'role', '') <> 'service_role'
+     and coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then
+    raise exception 'Only the email worker may claim outbox rows' using errcode = '42501';
+  end if;
+
+  return query
+  update public.email_outbox
+     set attempts = attempts + 1,
+         updated_at = now()
+   where id in (
+     select id
+       from public.email_outbox
+      where status = 'pending'
+        and attempts < 5
+      order by created_at
+      for update skip locked
+      limit v_limit
+   )
+  returning *;
+end;
+$$;
+
+create or replace function public.complete_email_outbox(
+  p_id uuid,
+  p_delivered boolean,
+  p_detail text,
+  p_recipient text,
+  p_max_attempts integer default 3
+)
+returns jsonb
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_row public.email_outbox%rowtype;
+  v_final text;
+begin
+  if coalesce(current_setting('request.jwt.claims', true)::json ->> 'role', '') <> 'service_role'
+     and coalesce(auth.jwt() ->> 'role', '') <> 'service_role' then
+    raise exception 'Only the email worker may complete outbox rows' using errcode = '42501';
+  end if;
+
+  select * into v_row from public.email_outbox where id = p_id for update;
+  if not found then
+    return jsonb_build_object('ok', false, 'reason', 'not-found');
+  end if;
+
+  if p_delivered then
+    v_final := 'delivered';
+    update public.email_outbox
+       set status = 'delivered',
+           delivered_at = now(),
+           updated_at = now(),
+           last_error = null
+     where id = p_id;
+  else
+    v_final := case when v_row.attempts >= greatest(coalesce(p_max_attempts, 3), 1) then 'failed' else 'pending' end;
+    update public.email_outbox
+       set status = v_final,
+           updated_at = now(),
+           last_error = left(coalesce(p_detail, ''), 240)
+     where id = p_id;
+  end if;
+
+  insert into public.email_delivery_log (outbox_id, kind, recipient, status, detail)
+  values (
+    p_id,
+    v_row.kind,
+    p_recipient,
+    case when p_delivered then 'delivered' when v_final = 'failed' then 'failed' else 'skipped' end,
+    left(coalesce(p_detail, ''), 240)
+  );
+
+  return jsonb_build_object('ok', true, 'status', v_final, 'attempts', v_row.attempts);
+end;
+$$;
+
+revoke execute on function public.claim_email_outbox(integer) from public, anon, authenticated;
+revoke execute on function public.complete_email_outbox(uuid, boolean, text, text, integer) from public, anon, authenticated;
+grant execute on function public.claim_email_outbox(integer) to service_role;
+grant execute on function public.complete_email_outbox(uuid, boolean, text, text, integer) to service_role;
+
+-- Strict ISO parse helper for the digest window.
+create or replace function public.dks_parse_iso_date(value text)
+returns date
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+begin
+  if value is null or not (value ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}$') then
+    return null;
+  end if;
+  begin
+    return value::date;
+  exception when others then
+    return null;
+  end;
+end;
+$$;
+
+revoke all on function public.dks_parse_iso_date(text) from public, anon, authenticated;
+grant execute on function public.dks_parse_iso_date(text) to service_role;
+
+-- Daily digest builder: one email per recipient per Asia/Muscat day, 30-day
+-- window, ordered expired-first → today → upcoming 1..30.
+create or replace function public.enqueue_expiry_digest()
+returns integer
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_prefs jsonb;
+  v_recipients jsonb;
+  v_primary_id text;
+  v_primary_name text;
+  v_muscat_today date;
+  v_items jsonb := '[]'::jsonb;
+  v_columns jsonb;
+  v_currency jsonb;
+  v_include_full boolean := false;
+  v_recipient text;
+  v_count integer := 0;
+  v_total integer := 0;
+  v_rows integer := 0;
+  v_max integer := 200;
+  c record;
+begin
+  select value into v_prefs from public.settings where key = 'email_notifications';
+
+  if coalesce((v_prefs ->> 'expiry_digest_enabled')::boolean, false) is not true then
+    return 0;
+  end if;
+
+  v_recipients := coalesce(v_prefs -> 'expiry_recipients', '[]'::jsonb);
+  if jsonb_typeof(v_recipients) <> 'array' or jsonb_array_length(v_recipients) = 0 then
+    return 0;
+  end if;
+
+  v_include_full := coalesce((v_prefs ->> 'include_full_ids')::boolean, false);
+
+  select c.id::text, c.name
+    into v_primary_id, v_primary_name
+    from public.app_columns c
+   where c.is_primary_expiry and not c.deleted and c.visible
+   limit 1;
+
+  if v_primary_id is null then
+    return 0;
+  end if;
+
+  v_muscat_today := (now() at time zone 'Asia/Muscat')::date;
+
+  select jsonb_agg(jsonb_build_object(
+           'id', c.id::text,
+           'name', c.name,
+           'type', c.type,
+           'position', c.position,
+           'visible', c.visible,
+           'isPrimaryExpiry', c.is_primary_expiry,
+           'isPassport', c.is_passport,
+           'sensitive', (c.type = 'civil_id' or c.is_passport or c.name ~* 'passport')
+         ) order by c.position, c.id)
+    into v_columns
+    from public.app_columns c
+   where not c.deleted and c.visible;
+
+  select value into v_currency from public.settings where key = 'currency';
+  if v_currency is null or jsonb_typeof(v_currency) <> 'object' then
+    v_currency := '{"code":"OMR","symbol":"ر.ع.","decimals":3}'::jsonb;
+  end if;
+
+  for c in
+    select *
+      from (
+        select e.id,
+               e.data,
+               public.dks_parse_iso_date(
+                 coalesce(e.data ->> v_primary_id, e.data ->> v_primary_name)
+               ) as expiry_date
+          from public.entries e
+         where not e.deleted
+       ) candidate
+     where candidate.expiry_date is not null
+       and candidate.expiry_date - v_muscat_today <= 30
+     order by candidate.expiry_date asc, candidate.id asc
+  loop
+    v_rows := v_rows + 1;
+    if v_rows <= v_max then
+      v_items := v_items || jsonb_build_array(jsonb_build_object(
+        'id', c.id::text,
+        'expiry', to_char(c.expiry_date, 'YYYY-MM-DD'),
+        'daysLeft', c.expiry_date - v_muscat_today,
+        'data', c.data
+      ));
+    end if;
+  end loop;
+
+  v_total := v_rows;
+
+  for v_recipient in
+    select trim(both '"' from recipient::text)
+      from jsonb_array_elements(v_recipients) as recipient
+     where jsonb_typeof(recipient) = 'string'
+  loop
+    insert into public.email_outbox (kind, dedupe_key, recipient, payload)
+    values (
+      'expiry_digest',
+      'expiry_digest:' || v_recipient || ':' || to_char(v_muscat_today, 'YYYY-MM-DD'),
+      v_recipient,
+      jsonb_build_object(
+        'reportDate', to_char(v_muscat_today, 'YYYY-MM-DD'),
+        'columns', coalesce(v_columns, '[]'::jsonb),
+        'currency', v_currency,
+        'includeFullIds', v_include_full,
+        'entries', v_items,
+        'totalQualifying', v_total,
+        'truncated', v_total > v_max
+      )
+    )
+    on conflict (kind, dedupe_key) do nothing;
+    if found then
+      v_count := v_count + 1;
+    end if;
+  end loop;
+
+  return v_count;
+end;
+$$;
+
+revoke execute on function public.enqueue_expiry_digest() from public, anon, authenticated;
+grant execute on function public.enqueue_expiry_digest() to service_role;
+
+-- Scheduled delivery (pg_cron + pg_net). Skipped cleanly when unavailable.
+do $$
+begin
+  if exists (select 1 from pg_extension where extname = 'pg_cron') then
+    perform cron.schedule(
+      'dks-email-outbox-tick',
+      '* * * * *',
+      $cron$
+      select net.http_post(
+        url := (select value #>> '{}' from public.settings where key = 'email_worker_url'),
+        headers := jsonb_build_object(
+          'content-type', 'application/json',
+          'x-dks-trigger-key', (select value #>> '{}' from public.settings where key = 'email_trigger_key')
+        ),
+        body := '{}'::jsonb,
+        timeout_milliseconds := 15000
+      );
+      $cron$
+    );
+    perform cron.schedule(
+      'dks-expiry-digest-daily',
+      '0 7 * * *',
+      $cron$
+      perform public.enqueue_expiry_digest();
+      $cron$
+    );
+  end if;
+exception when others then
+  raise notice 'email schedule install skipped: %', sqlerrm;
+end $$;
+
+insert into public.settings (key, value)
+values ('email_worker_url', to_jsonb('https://<PROJECT_REF>.functions.supabase.co/send-email'::text))
+on conflict (key) do nothing;
