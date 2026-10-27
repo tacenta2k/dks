@@ -27,7 +27,7 @@ import {
   type DigestReportModel,
   type ReportColumn,
   type ReportEntry,
-} from './digest-report';
+} from './digest-report.ts';
 
 export interface PdfDocument {
   setFont(font: string, style?: string): void;

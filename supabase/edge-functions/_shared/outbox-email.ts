@@ -13,8 +13,8 @@ import {
   renderDigestHtml,
   renderDigestText,
   type DigestReportModel,
-} from './digest-report';
-import { buildOfficeApprovalEmail, type EmailOutboxRow } from './email';
+} from './digest-report.ts';
+import { buildOfficeApprovalEmail, type EmailOutboxRow } from './email.ts';
 
 export interface OutboxEmail {
   subject: string;

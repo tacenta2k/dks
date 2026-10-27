@@ -14,6 +14,11 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "noEmit": true,
+    // Deno Edge Functions require explicit file extensions on relative imports
+    // (`supabase/edge-functions/**`). Those modules are pulled into this program
+    // by the vitest suite, so TS must be told extensions are allowed. Requires
+    // `noEmit` (or `emitDeclarationOnly`), which is set above.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "types": ["vite/client"]
   },
