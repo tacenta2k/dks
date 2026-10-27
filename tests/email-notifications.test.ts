@@ -111,6 +111,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: 'Admin@Example.COM ',
       expiryDigestEnabled: true,
       expiryRecipients: ['office@example.com'],
+      includeFullIds: false,
     });
     expect(result.error).toBeNull();
     expect(result.data).toEqual({
@@ -118,6 +119,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: 'admin@example.com',
       expiryDigestEnabled: true,
       expiryRecipients: ['office@example.com'],
+      includeFullIds: false,
     });
     expect(saved).toEqual([{ key: EMAIL_PREFS_SETTINGS_KEY, value: emailPrefsToRecord(result.data!) }]);
   });
@@ -130,6 +132,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: null,
       expiryDigestEnabled: false,
       expiryRecipients: [],
+      includeFullIds: false,
     });
     expect(result.error).toBeNull();
   });
@@ -151,6 +154,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: null,
       expiryDigestEnabled: false,
       expiryRecipients: [],
+      includeFullIds: false,
     })).toMatch(/administrator email/i);
 
     expect(validateEmailPrefs({
@@ -158,6 +162,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: 'admin@example.com',
       expiryDigestEnabled: true,
       expiryRecipients: [],
+      includeFullIds: false,
     })).toMatch(/digest recipient/i);
 
     expect(validateEmailPrefs({
@@ -165,6 +170,7 @@ describe('email preferences persistence contract', () => {
       adminEmail: null,
       expiryDigestEnabled: false,
       expiryRecipients: [],
+      includeFullIds: false,
     })).toBeNull();
   });
 });

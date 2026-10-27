@@ -371,6 +371,11 @@
   line-height: 1.55;
 }
 
+.settings-help--warning {
+  color: var(--color-warning-text, #8a5a00);
+  font-weight: 600;
+}
+
 .settings-email__actions {
   display: flex;
   flex-wrap: wrap;

@@ -221,8 +221,69 @@ describe('settings page', () => {
         admin_email: 'new-admin@example.com',
         expiry_digest_enabled: true,
         expiry_recipients: ['one@example.com', 'two@example.com'],
+        include_full_ids: false,
       },
     }], { onConflict: 'key' });
+  });
+
+  it('keeps full-identifier sharing OFF by default and forces it off for Office', async () => {
+    const upsert = vi.fn(async () => ({ data: [], error: null }));
+    const emailPrefsClient = {
+      from: vi.fn(() => ({
+        select: vi.fn(() => ({
+          eq: vi.fn(() => ({
+            maybeSingle: vi.fn(async () => ({
+              data: null,
+              error: null,
+            })),
+          })),
+        })),
+        upsert,
+      })),
+    };
+
+    render(
+      <SettingsPage role="admin" emailPrefsClient={emailPrefsClient as never} />,
+    );
+    nav('Notifications');
+
+    const includeFullIds = await screen.findByLabelText(
+      'Include full Passport / Civil ID values in the emailed PDF',
+    );
+    // Default OFF.
+    expect(includeFullIds).not.toBeChecked();
+
+    // Toggling it on is recorded in the save payload.
+    fireEvent.click(includeFullIds);
+    fireEvent.click(screen.getByRole('button', { name: 'Save email preferences' }));
+    expect(await screen.findByText('Email preferences saved.')).toBeInTheDocument();
+    expect(upsert).toHaveBeenCalledWith([{
+      key: 'email_notifications',
+      value: {
+        enabled: false,
+        admin_email: null,
+        expiry_digest_enabled: false,
+        expiry_recipients: [],
+        include_full_ids: true,
+      },
+    }], { onConflict: 'key' });
+
+    // The warning is visible so the administrator knows what they are opting in to.
+    expect(screen.getByText(/Warning: enabling this sends sensitive/i)).toBeInTheDocument();
+
+    // Turning it back on is reflected in the UI state as well.
+    expect(includeFullIds).toBeChecked();
+  });
+
+  it('does not render email preferences for Office at all', async () => {
+    render(<SettingsPage role="office" />);
+    // Office accounts never reach the settings screen, so they cannot reach the
+    // full-identifier opt-in either.
+    expect(screen.getByRole('alert', { name: 'Settings access' })).toBeInTheDocument();
+    expect(screen.getByText('Settings unavailable')).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText('Include full Passport / Civil ID values in the emailed PDF'),
+    ).not.toBeInTheDocument();
   });
 
   it('confirms before signing out all Office sessions and keeps the administrator signed in', async () => {

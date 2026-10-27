@@ -33,6 +33,9 @@ export interface EmailPrefsClient {
  *   adminEmail           — ONE recipient for pending Office sign-in requests.
  *   expiryDigestEnabled  — daily batch switch.
  *   expiryRecipients     — explicit list of digest recipients.
+ *   includeFullIds       — ADMIN opt-in to put full Passport / Civil ID values
+ *                          in the emailed PDF. Default OFF; sensitive
+ *                          identifiers are masked everywhere otherwise.
  */
 
 export const EMAIL_PREFS_SETTINGS_KEY = 'email_notifications';
@@ -42,6 +45,7 @@ export interface EmailNotificationPrefs {
   adminEmail: string | null;
   expiryDigestEnabled: boolean;
   expiryRecipients: string[];
+  includeFullIds: boolean;
 }
 
 export const EMPTY_EMAIL_PREFS: EmailNotificationPrefs = {
@@ -49,6 +53,7 @@ export const EMPTY_EMAIL_PREFS: EmailNotificationPrefs = {
   adminEmail: null,
   expiryDigestEnabled: false,
   expiryRecipients: [],
+  includeFullIds: false,
 };
 
 function toError(message: string, code?: string, cause?: unknown): AuthError {
@@ -96,6 +101,7 @@ export function parseEmailPrefs(value: unknown): EmailNotificationPrefs {
     adminEmail: parseEmail(record.admin_email) ?? null,
     expiryDigestEnabled: parseBoolean(record.expiry_digest_enabled),
     expiryRecipients: parseRecipients(record.expiry_recipients),
+    includeFullIds: parseBoolean(record.include_full_ids),
   };
 }
 
@@ -105,6 +111,7 @@ export function emailPrefsToRecord(prefs: EmailNotificationPrefs): Record<string
     admin_email: prefs.adminEmail && isValidEmail(prefs.adminEmail) ? prefs.adminEmail.trim().toLowerCase() : null,
     expiry_digest_enabled: prefs.expiryDigestEnabled === true,
     expiry_recipients: prefs.expiryRecipients.filter((item) => isValidEmail(item)),
+    include_full_ids: prefs.includeFullIds === true,
   };
 }
 

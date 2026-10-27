@@ -169,7 +169,21 @@ describe('Supabase STEP 3 schema', () => {
     expect(sql).toContain('auth.uid()');
     expect(sql).toContain('security definer');
     expect(sql).toContain('set search_path = public');
-    expect(sql).not.toMatch(/service[_-]?role|postgres:\/\//);
+    // No connection string or credentials may live in the schema. The literal
+    // role name `service_role` is expected and required: the send-email Edge
+    // Function is a trusted server component that claims outbox rows through
+    // these RPCs, and it must never be reachable by anonymous callers.
+    expect(sql).not.toMatch(/postgres:\/\//);
+    expect(sql).not.toMatch(/:\/\/[^/\s:]+:[^@\s]+@/);
+    const serviceGrants = sql.match(
+      /grant\s+execute\s+on\s+function\s+public\.\w+[^;]*?to\s+service_role/gi,
+    ) ?? [];
+    expect(serviceGrants.length).toBeGreaterThan(0);
+    for (const grant of serviceGrants) {
+      expect(grant).toMatch(
+        /claim_email_outbox|complete_email_outbox|dks_parse_iso_date|enqueue_expiry_digest/,
+      );
+    }
 
     for (const functionName of [
       'is_admin',

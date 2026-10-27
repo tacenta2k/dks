@@ -237,8 +237,16 @@ populated by database triggers/functions (see `ARENA/sql/email-notifications.sql
 - **Office sign-in request**: after an Office session opens a pending request,
   the qualifying trigger enqueues at most ONE email per request (dedupe key =
   request id) to the configured Admin email from `settings.email_notifications`.
-- **Expiry digest**: `public.enqueue_expiry_digest()` enqueues at most ONE batch
-  email per recipient per local-day (dedupe key = recipient + date).
+- **Expiry digest**: `public.enqueue_expiry_digest()` runs on a Muscat
+  business-day schedule (`Asia/Muscat`, UTC+4) and enqueues at most ONE batch
+  email per recipient per local-day (dedupe key = recipient + date). Each email
+  carries an HTML summary, a plain-text fallback, and exactly ONE in-memory PDF
+  attachment with every active Visa Sheet column, ordered by workspace
+  position. The window is a rolling 30 days: expired → today → 1..30.
+
+  The digest report is an additive upgrade over the original 90-day/UTC
+  version. Apply it with `ARENA/sql/expiry-digest-report.sql` (see below);
+  `supabase/schema.sql` already contains the same objects for fresh installs.
 
 Both are processed by a scheduled POST to this Edge Function, which claims rows
 server-side (service-role only — a desktop client cannot drive the queue)
@@ -266,8 +274,30 @@ supabase db execute -c "insert into public.settings (key, value) values \
   MUST come from a Resend-verified domain once you want real delivery.
 - Without `RESEND_API_KEY` the function returns a quiet no-op; the user
   experience never degrades (local Windows alerts keep working).
-- By default emails NEVER include passport/Civil ID values.
+- By default emails NEVER include passport/Civil ID values. They are masked
+  (last 4 digits) in the PDF, and the HTML/plain-text summary does not carry
+  them at all. Only an **administrator** can opt in from Settings →
+  Notifications → "Include full Passport / Civil ID values in the emailed
+  PDF"; the setting row lives behind admin-only RLS, so Office accounts
+  cannot turn it on.
+- The PDF is generated in memory (jsPDF, standard WinAnsi fonts) and attached
+  straight to the Resend call. It is never written to disk, Storage, or a
+  database table. Characters the WinAnsi font cannot encode are replaced with
+  a visible `?` and flagged in the report, so nothing is ever blank or
+  garbled silently.
+- If PDF generation fails, the HTML/text report is still delivered (with a
+  sanitized note) rather than sending nothing.
 - Email failure never blocks login, approval, or local saves — failed rows
   requeue up to 3 attempts and then stay `failed` with a sanitized detail.
 - Free Supabase projects pause after ~7 days of inactivity: the in-DB cron
   then simply pauses with it; nothing else is affected.
+
+### Upgrading an existing deployment
+
+`ARENA/sql/expiry-digest-report.sql` upgrades an already-deployed project. It
+is additive and idempotent: it preflights the existing digest function, adds
+`public.dks_parse_iso_date(text)`, rewrites `enqueue_expiry_digest()` in place
+(the old 90-day/UTC body is gone), adds the optional `include_full_ids`
+setting without clobbering an existing `true`, grants the RPCs, and prints
+read-only verification queries. Run §0 first — it only `SELECT`s. Do not run
+it against production without a backup.

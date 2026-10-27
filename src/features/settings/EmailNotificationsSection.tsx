@@ -154,6 +154,22 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
         />
       </label>
 
+      <label className="settings-email__toggle" htmlFor="settings-email-include-full-ids">
+        <input
+          id="settings-email-include-full-ids"
+          type="checkbox"
+          checked={prefs.includeFullIds}
+          disabled={!prefs.enabled || !prefs.expiryDigestEnabled}
+          onChange={(event) => setPrefs((current) => ({ ...current, includeFullIds: event.target.checked }))}
+        />
+        <span>Include full Passport / Civil ID values in the emailed PDF</span>
+      </label>
+
+      <p className="settings-help settings-help--warning" role="note">
+        Warning: enabling this sends sensitive passport and Civil ID numbers in
+        the daily PDF. Keep it off unless it is required.
+      </p>
+
       <p className="settings-help" role="note">
         Local alerts keep working even if email cannot be sent.
       </p>
