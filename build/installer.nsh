@@ -32,8 +32,6 @@
 ; Both layers skip when !app.isPackaged (dev builds).
 
 !include "LogicLib.nsh"
-!include "StrFunc.nsh"
-${StrStr}
 
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
 ; The main process stores the last seen nonce in SQLite (sync_meta.installNonce)
@@ -108,8 +106,8 @@ ${StrStr}
     Pop $0  ; tasklist output (CSV line if running, INFO if not)
     Pop $1  ; exit code (tasklist always 0, so check stdout)
     ${If} $0 != ""
-      ${StrStr} $2 $0 "DKS.exe"
-      ${If} $2 != ""
+      StrCpy $2 $0 9
+      ${If} $2 == '"DKS.exe"'
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
         FileWrite $R0 "ABORT: DKS.exe still running stdout=$0$\r$\n"
         FileClose $R0
