@@ -78,12 +78,19 @@
     FileWrite $R0 "APPDATA=$APPDATA$\r$\n"
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
-
+    ; Debug log whether running.lock check will trigger
     ${If} ${FileExists} "$APPDATA\DKS\running.lock"
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "CHECK running.lock exists, aborting$\r$\n"
+      FileClose $R0
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
       FileWrite $R0 "ABORT: DKS running.lock exists$\r$\n"
       FileClose $R0
       Abort
+    ${Else}
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "CHECK running.lock not found, proceeding$\r$\n"
+      FileClose $R0
     ${EndIf}
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
