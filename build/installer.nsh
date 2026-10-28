@@ -32,6 +32,8 @@
 ; Both layers skip when !app.isPackaged (dev builds).
 
 !include "LogicLib.nsh"
+!include "StrFunc.nsh"
+${StrStr}
 
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
 ; The main process stores the last seen nonce in SQLite (sync_meta.installNonce)
