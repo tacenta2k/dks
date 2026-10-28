@@ -363,8 +363,15 @@ jobs:
           Write-Host "Manual verification required: start DKS, run Uninstall DKS.exe without /S, verify MessageBox appears and uninstall aborts; also verify stale running.lock deleted when no DKS.exe (see installer.nsh stale handling)."
           Write-Host "LOG: e. manual only — CHECK_APP_RUNNING force-kills in /S (uninstaller.nsh un.onInit)"
           "e-passed" | Out-File "$env:TEMP\nsis-stage.txt" -Encoding utf8 -Append
-
-          # Cleanup for runner hygiene (no dummy needed)
+          } catch {
+            $err = $_ | Out-String
+            if (-not $err) { $err = $_.Exception.Message }
+            if (-not $err) { $err = $Error[0] | Out-String }
+            $err | Out-File "$env:TEMP\nsis-proof-error.txt" -Encoding utf8
+            Write-Host "NSIS proof error: $err"
+            throw
+          }
+          # Cleanup for runner hygiene — best-effort outside try/catch (never fails job)
           try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
           Start-Sleep -Seconds 2
           $finalUninst = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
@@ -378,14 +385,6 @@ jobs:
           Write-Host "=== NSIS runtime proof completed successfully ==="
           Write-Host "Summary: a.install-nonce non-empty, b.sentinels planted, c.uninstall cleared sentinels+nonce sqlite hash unchanged, d.nonce differs, e.blocked uninstall preserves files"
           Write-Host "If this can't run on hosted runner, exact reason would be logged above (e.g., Defender SmartScreen blocks unsigned NSIS, tasklist/findstr unavailable, per-user install requires interactive explorer, or DKS.exe auto-launch holds lock)"
-          } catch {
-            $err = $_ | Out-String
-            if (-not $err) { $err = $_.Exception.Message }
-            $err | Out-File "$env:TEMP\nsis-proof-error.txt" -Encoding utf8
-            Write-Host "NSIS proof error: $err"
-            throw
-          }
-
       - name: Report NSIS (c) failure details (no blob storage)
         if: failure()
         shell: pwsh
