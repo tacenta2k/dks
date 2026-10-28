@@ -369,8 +369,8 @@ describe('release provider configuration', () => {
     // Uses nsExec + tasklist (built-in) — no external nsProcess plugin required.
     expect(installer).toMatch(/nsExec::Exec/);
     expect(installer).toMatch(/tasklist/i);
-    // findstr variant is legacy; new StrStr variant also valid (both check DKS.exe via tasklist)
-    expect(installer).toMatch(/findstr|StrStr/i);
+    // findstr/StrStr variant is legacy; new StrCpy variant also valid (both check DKS.exe via tasklist)
+    expect(installer).toMatch(/findstr|StrStr|StrCpy/i);
     expect(installer).toContain('DKS.exe');
     expect(installer).toContain('Abort');
     // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
