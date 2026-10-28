@@ -62,7 +62,17 @@ jobs:
         run: npm run typecheck
 
       - name: Test
-        run: npm test -- --testTimeout=60000
+        shell: pwsh
+        run: |
+          npm test -- --testTimeout=60000 2>&1 | Tee-Object test-output.txt
+          $out = Get-Content -Raw test-output.txt
+          # Extract totals for reporting as required
+          if ($out -match "Test Files\s+(\d+)\s+passed") { Write-Host "Test Files: $($matches[1]) passed" } else { Write-Host "Test Files line not found"; Get-Content test-output.txt | Select-Object -Last 20 }
+          if ($out -match "Tests\s+(\d+)\s+passed") { Write-Host "Tests: $($matches[1]) passed" } else { Write-Host "Tests line not found" }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Ensure totals are present
+          if ($out -notmatch "Test Files") { Write-Warning "Could not parse Test Files totals" }
+          Write-Host "=== Full npm test completed ==="
 
       - name: Verify installer nonce generation (non-empty check)
         shell: pwsh
@@ -103,6 +113,167 @@ jobs:
             exit 1
           }
           Get-ChildItem release | Format-Table Name, Length
+
+      - name: NSIS runtime proof — silent install/uninstall lifecycle
+        shell: pwsh
+        run: |
+          Write-Host "=== NSIS runtime proof on Windows runner ==="
+          $installer = Get-ChildItem release/*.exe | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "No installer found in release/" }
+          Write-Host "Installer: $installer"
+
+          # Ensure clean state
+          if (Test-Path "$env:APPDATA\DKS") { Remove-Item -Recurse -Force "$env:APPDATA\DKS" -ErrorAction SilentlyContinue }
+          # Also ensure previous per-user install is removed if present (silent uninstall if exists)
+          $prevUninst = Get-ChildItem "$env:LOCALAPPDATA\Programs\DKS\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($prevUninst) { Write-Host "Cleaning previous install: $($prevUninst.FullName)"; & $prevUninst.FullName /S; Start-Sleep -Seconds 5 }
+
+          # a. Silent install → install-nonce exists & non-empty (Get-Content)
+          Write-Host "--- a. Silent install ---"
+          & $installer /S
+          $code = $LASTEXITCODE
+          Write-Host "Silent install exit code: $code"
+          if ($code -ne 0) { throw "Silent install failed with exit code $code" }
+          Start-Sleep -Seconds 8
+          $installDir = "$env:LOCALAPPDATA\Programs\DKS"
+          if (-not (Test-Path "$installDir\DKS.exe")) { 
+            # Fallback: check AppData install dir
+            $altDir = "$env:APPDATA\..\Local\Programs\DKS"
+            Write-Host "Checking alt dir $altDir"
+            if (Test-Path "$altDir\DKS.exe") { $installDir = $altDir } else { throw "DKS.exe not found after silent install at $installDir" }
+          }
+          Write-Host "Installed to: $installDir"
+          $noncePath = "$env:APPDATA\DKS\install-nonce"
+          if (-not (Test-Path $noncePath)) { throw "a. FAIL: install-nonce missing after silent install" }
+          $nonceA = (Get-Content -Raw $noncePath).Trim()
+          if ([string]::IsNullOrWhiteSpace($nonceA)) { throw "a. FAIL: install-nonce empty after silent install" }
+          Write-Host "a. Silent install → install-nonce exists & non-empty (Get-Content): $nonceA"
+          $nonceA | Out-File "$env:RUNNER_TEMP\nonce-a.txt" -Encoding utf8
+          # Log line to quote: ci.yml + log lines proof
+          Write-Host "LOG: install-nonce Get-Content non-empty confirmed"
+
+          # b. Plant sentinels + dummy dks-cache.sqlite with known hash
+          Write-Host "--- b. Plant sentinels ---"
+          $base = "$env:APPDATA\DKS"
+          New-Item -ItemType Directory -Force -Path "$base\Local Storage\leveldb" | Out-Null
+          "sentinel-A" | Out-File "$base\Local Storage\leveldb\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Session Storage" | Out-Null
+          "sentinel-B" | Out-File "$base\Session Storage\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\IndexedDB" | Out-Null
+          "sentinel-C" | Out-File "$base\IndexedDB\x" -Encoding ascii
+          "cookie-legacy" | Out-File "$base\Cookies" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Network" | Out-Null
+          "cookie-current" | Out-File "$base\Network\Cookies" -Encoding ascii
+          "dummy-sqlite-content-for-hash-v1" | Out-File "$base\dks-cache.sqlite" -Encoding ascii
+          $hashBefore = (Get-FileHash "$base\dks-cache.sqlite" -Algorithm SHA256).Hash
+          $hashBefore | Out-File "$env:RUNNER_TEMP\sqlite-hash-before.txt" -Encoding utf8
+          Write-Host "b. Planted sentinels (Local Storage\leveldb\x, Session Storage\x, IndexedDB\x, Cookies, Network\Cookies) + dummy dks-cache.sqlite hash $hashBefore"
+          Get-ChildItem "$base\Local Storage\leveldb\x", "$base\Session Storage\x", "$base\IndexedDB\x", "$base\Cookies", "$base\Network\Cookies" | Format-Table Name, Directory, Length
+          Get-ChildItem "$base\dks-cache.sqlite" | Format-Table Name, Length
+          Write-Host "LOG: sentinels planted + sqlite hash $hashBefore"
+
+          # Locate uninstaller
+          $uninstaller = Get-ChildItem "$installDir\Uninstall*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $uninstaller) {
+            $reg = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "*DKS*" }
+            if ($reg) { $uninstaller = $reg.UninstallString.Trim('"').Split(' _?=')[0] }
+          }
+          if (-not $uninstaller -or -not (Test-Path $uninstaller)) { throw "Uninstaller not found" }
+          Write-Host "Uninstaller: $uninstaller"
+          $uninstaller | Out-File "$env:RUNNER_TEMP\uninstaller-path.txt" -Encoding utf8
+
+          # c. Silent uninstall → sentinels + nonce gone, sqlite hash unchanged
+          Write-Host "--- c. Silent uninstall ---"
+          & $uninstaller /S
+          $uCode = $LASTEXITCODE
+          Write-Host "Silent uninstall exit code: $uCode"
+          Start-Sleep -Seconds 5
+          $checks = @(
+            "$base\Local Storage\leveldb\x",
+            "$base\Session Storage\x",
+            "$base\IndexedDB\x",
+            "$base\Cookies",
+            "$base\Network\Cookies",
+            "$base\install-nonce"
+          )
+          foreach ($p in $checks) {
+            if (Test-Path $p) { throw "c. FAIL: Sentinel still exists after uninstall: $p" }
+            Write-Host "Verified gone: $p"
+          }
+          Write-Host "c. Silent uninstall → sentinels + nonce gone confirmed"
+          if (-not (Test-Path "$base\dks-cache.sqlite")) { throw "c. FAIL: sqlite should still exist after uninstall" }
+          $hashAfter = (Get-FileHash "$base\dks-cache.sqlite" -Algorithm SHA256).Hash
+          Write-Host "sqlite hash after uninstall: $hashAfter (before $hashBefore)"
+          if ($hashAfter -ne $hashBefore) { throw "c. FAIL: sqlite hash changed after uninstall: $hashBefore vs $hashAfter" }
+          Write-Host "c. sqlite hash unchanged: $hashAfter"
+          Write-Host "LOG: uninstall sentinels+nonce gone, sqlite hash unchanged $hashAfter"
+
+          # d. Reinstall → nonce differs from (a)
+          Write-Host "--- d. Reinstall ---"
+          & $installer /S
+          if ($LASTEXITCODE -ne 0) { throw "Reinstall failed" }
+          Start-Sleep -Seconds 8
+          $nonceB = (Get-Content -Raw "$env:APPDATA\DKS\install-nonce").Trim()
+          Write-Host "d. Reinstall → nonce differs from (a): before $nonceA after $nonceB"
+          if ($nonceA -eq $nonceB) { throw "d. FAIL: Nonce did not differ after reinstall: $nonceA" }
+          $nonceB | Out-File "$env:RUNNER_TEMP\nonce-b.txt" -Encoding utf8
+          Write-Host "d. Nonce differs confirmed: $nonceA != $nonceB"
+          Write-Host "LOG: reinstall nonce differs $nonceA -> $nonceB"
+
+          # Refresh installDir/uninstaller after reinstall
+          $installDir = "$env:LOCALAPPDATA\Programs\DKS"
+          $uninstaller = Get-ChildItem "$installDir\Uninstall*.exe" | Select-Object -First 1 -ExpandProperty FullName
+
+          # Re-plant sentinels for e
+          New-Item -ItemType Directory -Force -Path "$base\Local Storage\leveldb" | Out-Null
+          "sentinel-A2" | Out-File "$base\Local Storage\leveldb\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Session Storage" | Out-Null
+          "sentinel-B2" | Out-File "$base\Session Storage\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\IndexedDB" | Out-Null
+          "sentinel-C2" | Out-File "$base\IndexedDB\x" -Encoding ascii
+          "cookie-legacy2" | Out-File "$base\Cookies" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Network" | Out-Null
+          "cookie-current2" | Out-File "$base\Network\Cookies" -Encoding ascii
+          "dummy-sqlite-content-for-hash-v1" | Out-File "$base\dks-cache.sqlite" -Encoding ascii
+          $nonceBeforeBlock = (Get-Content -Raw "$base\install-nonce").Trim()
+          $sentinelBefore = Get-Content -Raw "$base\Local Storage\leveldb\x"
+
+          # e. Start dummy process named DKS.exe, attempt uninstall → must FAIL
+          Write-Host "--- e. Dummy DKS.exe blocks uninstall ---"
+          $dummySrc = "$env:SystemRoot\System32\cmd.exe"
+          $dummyDst = "$env:TEMP\DKS.exe"
+          Copy-Item $dummySrc $dummyDst -Force
+          $proc = Start-Process $dummyDst -ArgumentList "/c ping -t 127.0.0.1 > nul" -PassThru
+          Start-Sleep -Seconds 3
+          $task = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+          Write-Host "tasklist after starting dummy: $task"
+          if ($task -notmatch "DKS.exe") { throw "e. FAIL: Dummy DKS.exe not found in tasklist" }
+          Write-Host "e. Dummy DKS.exe running PID $($proc.Id)"
+          # Attempt uninstall — should be blocked (Abort)
+          & $uninstaller /S
+          $blockCode = $LASTEXITCODE
+          Write-Host "Uninstall with DKS.exe running exit code: $blockCode"
+          Start-Sleep -Seconds 5
+          # Must FAIL with program files, nonce and sentinels still intact
+          if (-not (Test-Path "$installDir\DKS.exe")) { throw "e. FAIL: DKS.exe should still exist after blocked uninstall" }
+          if (-not (Test-Path "$base\install-nonce")) { throw "e. FAIL: nonce should still exist after blocked uninstall" }
+          $nonceAfterBlock = (Get-Content -Raw "$base\install-nonce").Trim()
+          if ($nonceAfterBlock -ne $nonceBeforeBlock) { throw "e. FAIL: nonce changed after blocked uninstall: $nonceBeforeBlock vs $nonceAfterBlock" }
+          if (-not (Test-Path "$base\Local Storage\leveldb\x")) { throw "e. FAIL: sentinel should still exist after blocked uninstall" }
+          $sentAfter = Get-Content -Raw "$base\Local Storage\leveldb\x"
+          if ($sentAfter.Trim() -ne $sentinelBefore.Trim()) { throw "e. FAIL: sentinel content changed" }
+          Write-Host "e. Uninstall correctly FAILed with DKS.exe running — program files, nonce and sentinels still intact"
+          Write-Host "LOG: dummy DKS.exe blocked uninstall, files intact"
+
+          # Cleanup dummy and final uninstall for runner hygiene
+          try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch {}
+          try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
+          Start-Sleep -Seconds 2
+          # Final clean uninstall
+          & $uninstaller /S
+          Start-Sleep -Seconds 5
+          Write-Host "=== NSIS runtime proof completed successfully ==="
+          Write-Host "Summary: a.install-nonce non-empty, b.sentinels planted, c.uninstall cleared sentinels+nonce sqlite hash unchanged, d.nonce differs, e.blocked uninstall preserves files"
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

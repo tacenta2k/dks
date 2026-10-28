@@ -49,12 +49,11 @@
     ; Full nonce generation: CoCreateGuid creates binary GUID in memory (g .r0),
     ; StringFromGUID2 converts that binary GUID to text and stores it in $1
     ; via t .r1 (NSIS System plugin output). $1 is the GUID string used for
-    ; FileWrite. Both calls push HRESULT/length which we Pop to discard.
-    ; If GUID generation fails ($1 empty), fall back to GetTickCount.
+    ; FileWrite. System::Call without explicit return spec pushes nothing, so
+    ; no Pop is needed. If GUID generation fails ($1 empty), fall back to
+    ; GetTickCount which writes tick count to $1 via i.r1.
     System::Call 'ole32::CoCreateGuid(g .r0)'
-    Pop $2
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
-    Pop $2
     ; At this point $1 == GUID text like "{ABCD-...}" from t .r1 above.
     ${If} $1 == ""
       System::Call 'kernel32::GetTickCount() i.r1'
@@ -90,11 +89,21 @@
     ; Local Storage\leveldb files open, so RMDir would be incomplete and the
     ; next reinstall would auto-login. Use built-in Windows tasklist via nsExec
     ; (available in electron-builder's NSIS) — no external nsProcess plugin needed.
+    ; Quote: electron-builder's templates/nsis/uninstaller.nsh invokes
+    ;   Section "un.install" {
+    ;     !insertmacro customUnInstall
+    ;     # delete installed files ...
+    ;     RMDir /r $INSTDIR
+    ;   }
+    ; customUnInstall runs BEFORE file deletion, so the running-app check here
+    ; is safe. If it ran after deletion we would need customUnInit instead.
+    ; nsExec::ExecToStack pushes two values: exit code and stdout. Pop BOTH.
     nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | findstr /B /I /C:"\"DKS.exe\""'
-    Pop $0
-    Pop $1
-    ; findstr returns 0 when DKS.exe is found in tasklist output
-    ${If} $0 == 0
+    Pop $0  ; stdout (CSV line if found, empty if not)
+    Pop $1  ; exit code: 0=found (findstr matched), 1=not found
+    ; Check both pops: exit code 0 means DKS.exe is running; stdout non-empty also indicates running
+    ${If} $1 == 0
+    ${OrIf} $0 != ""
       MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running."
       Abort
     ${EndIf}

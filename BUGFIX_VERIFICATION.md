@@ -10,7 +10,7 @@
 
 Source at `v0.1.3` and `v0.1.4` tags is byte-identical for `electron/main/updater.ts` and `build/installer.nsh` (see `DIAGNOSIS_REPORT.md`), but commit `221d2c2` (“keep downloaded updates ready”) *is* in `v0.1.3`’s history, so we cannot claim “no fix was ever built” without binary evidence. Owner confirms the public `v0.1.4` installer (109840018) downloads and its SHA-512 matches `latest.yml` — asset mismatch is not established; missing CI hash checks alone do not explain the `100%` failure.
 
-This branch implements the *remaining* two-layer session isolation + real updater diagnostics, corrects the NSIS/electron storage handling for Electron 34, and adds proper release-asset verification. It is intended to become **0.1.5** via the release workflow (not by merging a pre-bumped `0.1.5`).
+This branch implements the *remaining* two-layer session isolation, **instruments** the updater to surface real error diagnostics (does not claim to fix the 100% failure), corrects the NSIS/electron storage handling for Electron 34, and adds release-asset verification as hardening. It is intended to become **0.1.5** via the release workflow (not by merging a pre-bumped `0.1.5`).
 
 ---
 
@@ -73,15 +73,15 @@ Tests: `tests/install-nonce.test.ts` covers dev skip, first launch, match, misma
 
 ---
 
-## Bug 2 — Update Fails at 100%
+## Bug 2 — Update Fails at 100% (Instrumented, Not Fixed)
 
 ### Root Cause
 
-Observed failure is in **verify-or-install**, not download. Prior workflow only checked `version:` and installer name in `latest.yml`; it did not verify same-build `sha512`/`size` or byte identity. That is a hardening gap, but owner’s download shows `v0.1.4` SHA-512 *does* match, so it does not by itself explain this failure. Separate hypothesis (stale `pending` cache, AV lock, etc.) remains.
+Observed failure is in **verify-or-install**, not download. Prior workflow only checked `version:` and installer name in `latest.yml`; it did not verify same-build `sha512`/`size` or byte identity. **However, v0.1.4 assets were proven to match `latest.yml` (owner verified 109840018 and SHA-512), so "same-build verification" is hardening, not the established root cause. Root cause remains unknown until a real log from the new instrumented build is captured.** Separate hypotheses (stale `pending` cache, AV lock, etc.) remain unproven.
 
-### Fix — Surface Real Error + Same-Build Verification
+### Instrumentation — Surface Real Error (Not a Fix) + Hardening Verification
 
-- **`electron/main/updater.ts`:** `UpdateState` carries `errorMessage` (500 chars), `errorCode`, `errorName`; `extractUpdaterError` bounds truncation; `createDefaultAdapter` forwards `autoUpdater.on('error', (e:Error)=>{log.error(...); errorListener?.(e)})`; both `checkForUpdates` and `downloadUpdate` `catch` blocks `log.error('[dks] updater check/download failed', {name,code,message,version})` and `setState({status:'error', errorKind, errorMessage: formatErrorForUi(details), errorCode, errorName})`; `cloneState` and `UpdateTransition` preserve them; `logUpdaterTransition` logs them. No raw URLs/paths beyond the message.
+- **`electron/main/updater.ts` (instrumented, not fixed):** `UpdateState` carries `errorMessage` (500 chars), `errorCode`, `errorName`; `extractUpdaterError` bounds truncation; `createDefaultAdapter` forwards `autoUpdater.on('error', (e:Error)=>{log.error(...); errorListener?.(e)})`; both `checkForUpdates` and `downloadUpdate` `catch` blocks `log.error('[dks] updater check/download failed', {name,code,message,version})` and `setState({status:'error', errorKind, errorMessage: formatErrorForUi(details), errorCode, errorName})`; `cloneState` and `UpdateTransition` preserve them; `logUpdaterTransition` logs them. The updater is **instrumented** to capture the next real failure — it is not claimed as fixed. No raw URLs/paths beyond the message.
 
 - **`electron/preload/index.ts` + `src/lib/types.ts` + `src/features/settings/SettingsPage.tsx`:** `normaliseUpdateState` forwards new fields; `updateStatusMessage` shows `Update 0.2.0 download failed: <code: message>` when present, else generic fallback. Pill and Settings share same source.
 
@@ -95,14 +95,14 @@ Observed failure is in **verify-or-install**, not download. Prior workflow only 
 
 Tests: `tests/release-workflow.test.ts` asserts `localLatestYml`, `sha512`, `installerSize`.
 
-### Updater Diagnostics — New Build Only
+### Updater Instrumented — New Build Only (Not Fixed)
 
-`error.name/code/message` exist only in the *new* build’s `UpdateState` and `main.log`. **Retrying `0.1.3 → 0.1.4` on an old install will still show the old generic pill** — it does not automatically gain new diagnostics. Updater repair status stays **unverified** until either:
+`error.name/code/message` exist only in the *new* instrumented build’s `UpdateState` and `main.log`. **Retrying `0.1.3 → 0.1.4` on an old install will still show the old generic pill** — it does not automatically gain new diagnostics. Updater status is **instrumented, not fixed**, and stays **unverified** until either:
 
 - A real `100%` failure is captured from the new build (pill + `logs/main.log` with `[dks] updater download failed` and `[dks] updater transition` containing `errorMessage/errorCode/errorName`), or
 - A packaged Windows in-app update from the manually-installed new build to the next version succeeds (download, install, About shows new version, no stale session).
 
-Until then, do not mark updater as fixed.
+Until then, updater remains **instrumented, not fixed** — do not mark as fixed.
 
 ---
 
@@ -143,7 +143,7 @@ gh release edit $tag --draft=false --latest
 - `electron/main/install-nonce.ts` — NEW; documented `['cookies','localstorage','indexdb']` + Session Storage fs, await before renderer, failure does not record nonce.
 - `electron/main/sqlite.ts` — `getInstallNonce`/`setInstallNonce`.
 - `electron/main/index.ts` — `await enforceSessionIsolation` before `createMainWindow`; fail-closed: on `clearStorageData` failure blocks window, shows dialog, quits for retry (never silently resume old session).
-- `electron/main/updater.ts` — real `error.name/code/message`, transition logging.
+- `electron/main/updater.ts` — **instrumented** to surface real `error.name/code/message` via `UpdateState` and `electron-log` (not claimed as fix; root cause unknown until log captured).
 - `electron/preload/index.ts` — forward new fields.
 - `src/lib/types.ts` — `DksUpdateState` error fields.
 - `src/features/settings/SettingsPage.tsx` — pill shows real error.
@@ -162,5 +162,5 @@ gh release edit $tag --draft=false --latest
 4. **Manually** install `DKS-0.1.5-win-x64.exe` on a clean Windows machine, run acceptance checklist above (both roles), collect `%APPDATA%\DKS\logs\main.log` excerpts and `dks-cache.sqlite` outbox counts.
 5. Publish draft (`gh release edit v0.1.5 --draft=false`), then from that manually-installed `0.1.5` trigger an in-app update to `0.1.6` (next `patch` from `main` at `0.1.5`) to prove auto-update installs.
 
-Until step 4–5 pass with logs, mark **both** Bug 1 and Bug 2 as *pending Windows verification*.
+Until step 4–5 pass with logs, mark Bug 1 as pending verification and Bug 2 as **instrumented, not fixed** (pending real log capture).
 
