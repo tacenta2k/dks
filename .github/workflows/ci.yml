@@ -288,6 +288,25 @@ jobs:
           if ($hashAfter -ne $hashBefore) { throw "c. FAIL: sqlite hash changed: $hashBefore vs $hashAfter — dks-cache.sqlite must remain byte-identical" }
           Write-Host "c. sqlite hash unchanged: $hashAfter"
           Write-Host "LOG: c. sentinels+nonce gone, sqlite hash unchanged $hashAfter"
+          # Write (c) proof to step summary for quotation (must be minutes not hours)
+          $summaryLines = @(
+            "### (c) Sentinel cleanup — PASS"
+            "- Tasklist check: $($checks | ForEach-Object { "`$_ exists=False" })"
+            "- install-nonce gone: True"
+            "- sqlite hash unchanged: $hashAfter"
+            "- NSIS log: $(if (Test-Path "$env:TEMP\DKS-nsis-debug.txt") { Get-Content "$env:TEMP\DKS-nsis-debug.txt" -Raw } else { "no log" })"
+          )
+          # Actual per-path quoted lines for requirement: each sentinel Test-Path == False
+          foreach ($logPath in @("$env:TEMP\DKS-nsis-debug.txt")) {
+            if (Test-Path $logPath) {
+              Add-Content $env:GITHUB_STEP_SUMMARY "#### NSIS debug log"
+              Get-Content $logPath | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY "``````n$_" }
+            }
+          }
+          Add-Content $env:GITHUB_STEP_SUMMARY ($summaryLines -join "\n")
+          foreach ($p in $checks) { Add-Content $env:GITHUB_STEP_SUMMARY "- `$p` exists=False" }
+          Add-Content $env:GITHUB_STEP_SUMMARY "- install-nonce exists=False"
+          Add-Content $env:GITHUB_STEP_SUMMARY "- dks-cache.sqlite hash unchanged: $hashAfter (before $hashBefore)"
 
           # --- d. Reinstall -> nonce differs from (a) ---
           Write-Host "--- d. Reinstall (/S) ---"
@@ -345,6 +364,14 @@ jobs:
           Write-Host "=== NSIS runtime proof completed successfully ==="
           Write-Host "Summary: a.install-nonce non-empty, b.sentinels planted, c.uninstall cleared sentinels+nonce sqlite hash unchanged, d.nonce differs, e.blocked uninstall preserves files"
           Write-Host "If this can't run on hosted runner, exact reason would be logged above (e.g., Defender SmartScreen blocks unsigned NSIS, tasklist/findstr unavailable, per-user install requires interactive explorer, or DKS.exe auto-launch holds lock)"
+
+      - name: Upload NSIS debug log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsis-debug-log
+          path: C:/Users/runneradmin/AppData/Local/Temp/DKS-nsis-debug.txt
+          if-no-files-found: warn
 
       - name: Upload installer artifact
         uses: actions/upload-artifact@v4

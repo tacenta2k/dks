@@ -90,7 +90,7 @@
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
       FileWrite $R0 "CHECK running.lock exists, verifying via tasklist$\r$\n"
       FileClose $R0
-      nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
+      nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "USERNAME eq %USERNAME%" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
       Pop $0
       ${If} $0 == 0
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
@@ -107,7 +107,7 @@
       ${EndIf}
     ${EndIf}
     ; Direct tasklist check even without lock (covers old installs pre-lock, or lock deleted)
-    nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
+    nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "USERNAME eq %USERNAME%" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
     Pop $0
     ${If} $0 == 0
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
