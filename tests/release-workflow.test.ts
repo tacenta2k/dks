@@ -76,7 +76,7 @@ describe('one-click Release DKS workflow', () => {
     expect(bump.type).toBe('choice');
     expect(bump.required).toBe(true);
     expect(bump.default).toBe('patch');
-    expect(bump.options).toEqual(['patch', 'minor', 'major']);
+    expect(bump.options).toEqual(['patch', 'minor', 'major', 'none']);
   });
 
   it('uses one non-cancelling Windows job with only contents: write', () => {
