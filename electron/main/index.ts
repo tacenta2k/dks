@@ -3,11 +3,14 @@ import {
   BrowserWindow,
   ipcMain,
   nativeImage,
+  session,
   shell,
 } from 'electron';
 import type { IpcMainEvent } from 'electron';
 import * as path from 'node:path';
 import log from 'electron-log';
+
+import { enforceSessionIsolation } from './install-nonce';
 
 import {
   createNotificationService,
@@ -202,11 +205,24 @@ function logUpdaterTransition(transition: UpdateTransition): void {
     ?.replace(/[\u0000-\u001f\u007f]/g, '')
     .trim()
     .slice(0, 80);
+  const errorMessage = typeof (transition as unknown as { errorMessage?: string }).errorMessage === 'string'
+    ? (transition as unknown as { errorMessage: string }).errorMessage.replace(/[\u0000-\u001f\u007f]/g, '').trim().slice(0, 500)
+    : undefined;
+  const errorCode = typeof (transition as unknown as { errorCode?: string }).errorCode === 'string'
+    ? (transition as unknown as { errorCode: string }).errorCode.trim().slice(0, 100)
+    : undefined;
+  const errorName = typeof (transition as unknown as { errorName?: string }).errorName === 'string'
+    ? (transition as unknown as { errorName: string }).errorName.trim().slice(0, 100)
+    : undefined;
   log.info('[dks] updater transition', {
     from: transition.from,
     to: transition.to,
     ...(version ? { version } : {}),
     ...(typeof transition.progress === 'number' ? { progress: transition.progress } : {}),
+    ...(transition.errorKind ? { errorKind: transition.errorKind } : {}),
+    ...(errorMessage ? { errorMessage } : {}),
+    ...(errorCode ? { errorCode } : {}),
+    ...(errorName ? { errorName } : {}),
   });
 }
 
@@ -677,6 +693,47 @@ export async function startMainProcess(): Promise<boolean> {
   log.info(`[dks] starting main process (version=${getAppVersion()}, hidden=${String(startHidden)}, packaged=${String(app.isPackaged)})`);
 
   openLocalStore();
+
+  // Bug 1 — Auto-login after uninstall/reinstall: compare the install nonce
+  // written by the NSIS installer (fresh install = new GUID, update = preserved)
+  // against the last nonce stored in SQLite. On mismatch, wipe the Chromium
+  // session storages that hold the Supabase JWT, then store the new nonce.
+  // Never touches dks-cache.sqlite. Skipped entirely when !app.isPackaged.
+  // If cleanup fails we must NOT silently resume the old session — block
+  // window creation and quit so next launch retries.
+  let isolationOk = true;
+  try {
+    const userDataPath = (() => {
+      try {
+        return app.getPath('userData');
+      } catch {
+        return '';
+      }
+    })();
+    isolationOk = await enforceSessionIsolation({
+      isPackaged: app.isPackaged,
+      userDataPath,
+      store: localStore ?? undefined,
+      session: session?.defaultSession ?? undefined,
+      logger: log,
+    });
+  } catch (error) {
+    log.warn('[dks] session isolation guard threw', error);
+    isolationOk = false;
+  }
+  if (!isolationOk && app.isPackaged) {
+    log.error('[dks] session isolation failed — blocking launch to avoid resuming old session, will retry next launch');
+    try {
+      const { dialog } = await import('electron');
+      dialog.showErrorBox(
+        'DKS — Session cleanup failed',
+        'DKS could not clear the previous login session (files may be locked). The app will close and retry on next launch. If this persists, quit DKS via the tray icon and restart.',
+      );
+    } catch {}
+    app.quit();
+    return false;
+  }
+
   notificationService = createNotificationService();
   updaterService = createUpdaterService({
     enabled: Boolean(app.isPackaged),

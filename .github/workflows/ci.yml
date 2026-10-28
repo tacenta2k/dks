@@ -1,0 +1,100 @@
+name: CI
+
+on:
+  push:
+    branches: [main, 'arena/*']
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Verify and package (Windows)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Set up Python for node-gyp
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Configure node-gyp toolchain
+        shell: pwsh
+        env:
+          SELECTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:SELECTED_PYTHON) -or -not (Test-Path -LiteralPath $env:SELECTED_PYTHON)) {
+            Write-Error "actions/setup-python did not provide an existing python-path output."
+            exit 1
+          }
+          "npm_config_python=$env:SELECTED_PYTHON" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "npm_config_msvs_version=2022" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "require('better-sqlite3')"
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "better-sqlite3 not loadable after npm ci; rebuilding."
+            npm rebuild better-sqlite3
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node -e "require('better-sqlite3')"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test -- --testTimeout=60000
+
+      - name: Vite build (renderer + electron)
+        run: npm run build
+
+      - name: Package Windows installer (no publish)
+        shell: pwsh
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          # CI packaging uses --publish never: does NOT create tag/release or upload.
+          # It verifies the installer can be built on Windows (NSIS syntax, native modules).
+          # Secrets are still required for Vite build; use dummy if missing in PR from fork.
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_URL)) {
+            $env:VITE_SUPABASE_URL = "https://example.supabase.co"
+          }
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_PUBLISHABLE_KEY)) {
+            $env:VITE_SUPABASE_PUBLISHABLE_KEY = "dummy-publishable-key-for-ci"
+          }
+          "VITE_SUPABASE_URL=$env:VITE_SUPABASE_URL" | Out-File -FilePath .env -Encoding utf8
+          "VITE_SUPABASE_PUBLISHABLE_KEY=$env:VITE_SUPABASE_PUBLISHABLE_KEY" | Out-File -FilePath .env -Append -Encoding utf8
+          npx electron-builder --win --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path "release")) {
+            Write-Error "release directory not created"
+            exit 1
+          }
+          Get-ChildItem release | Format-Table Name, Length
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DKS-win-x64-installer
+          path: release/*.exe
+          if-no-files-found: error

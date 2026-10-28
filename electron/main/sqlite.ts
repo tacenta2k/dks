@@ -1551,6 +1551,25 @@ export class SqliteStore {
     return this.getSyncStatus();
   }
 
+  /** Fresh-install nonce: set by the installer on real install, preserved on update. */
+  public getInstallNonce(): string | null {
+    this.ensureOpen();
+    const row = this.database.prepare('SELECT value FROM sync_meta WHERE key = ?').get('installNonce') as
+      | { value?: string | null }
+      | undefined;
+    const value = row?.value;
+    return typeof value === 'string' && value.trim() ? value.trim() : null;
+  }
+
+  public setInstallNonce(nonce: string): void {
+    this.ensureOpen();
+    const trimmed = typeof nonce === 'string' ? nonce.trim() : '';
+    if (!trimmed) return;
+    this.database
+      .prepare('INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('installNonce', trimmed);
+  }
+
   public setSyncStatus(
     state: SyncStatus | (Partial<SyncState> & Pick<SyncState, 'status'>),
   ): SyncState {

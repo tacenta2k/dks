@@ -40,8 +40,8 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({ status: 'error', errorKind: 'check' });
-    expect(service.getState()).toEqual({ status: 'error', errorKind: 'check' });
+    await expect(service.checkForUpdates()).resolves.toMatchObject({ status: 'error', errorKind: 'check', errorMessage: 'network is offline' });
+    expect(service.getState()).toMatchObject({ status: 'error', errorKind: 'check', errorMessage: 'network is offline' });
   });
 
   it('downloads releases in the background and exposes restart-to-update state', async () => {
@@ -147,17 +147,18 @@ describe('updater foundation', () => {
       enabled: true,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({
+    await expect(service.checkForUpdates()).resolves.toMatchObject({
       status: 'error',
       version: '2.0.0',
       errorKind: 'download',
+      errorMessage: expect.stringContaining('connection reset'),
     });
     await expect(service.restartToUpdate()).resolves.toBe(false);
     expect(quitAndInstall).not.toHaveBeenCalled();
   });
 
   it('keeps the downloaded version sticky across later errors and repeated checks', async () => {
-    let emitError: (() => void) | undefined;
+    let emitError: ((error: Error) => void) | undefined;
     const check = vi.fn(async () => ({
       isUpdateAvailable: true,
       updateInfo: { version: '2.0.0' },
@@ -177,7 +178,7 @@ describe('updater foundation', () => {
       status: 'downloaded',
       version: '2.0.0',
     });
-    emitError?.();
+    emitError?.(new Error('transient'));
     expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
 
     // Settings-mount and hourly checks return the completed installer rather
@@ -195,7 +196,7 @@ describe('updater foundation', () => {
   });
 
   it('does not surface a transient download error when update-downloaded follows', async () => {
-    let emitError: (() => void) | undefined;
+    let emitError: ((error: Error) => void) | undefined;
     let emitDownloaded: ((version?: string) => void) | undefined;
     let finishDownload: (() => void) | undefined;
     const service = createUpdaterService({
@@ -221,7 +222,7 @@ describe('updater foundation', () => {
 
     const pending = service.checkForUpdates();
     await vi.waitFor(() => expect(service.getState().status).toBe('downloading'));
-    emitError?.();
+    emitError?.(new Error('transient differential download error'));
     expect(service.getState().status).toBe('downloading');
     expect(statuses).not.toContain('error');
 
@@ -259,24 +260,31 @@ describe('updater foundation', () => {
     expect(service.getState()).toEqual({ status: 'downloaded', version: '2.0.0' });
   });
 
-  it('reports sanitized transition metadata and never the underlying error', async () => {
+  it('reports sanitized transition metadata with real updater error details (Bug 2)', async () => {
     const onTransition = vi.fn();
     const service = createUpdaterService({
       adapter: adapter({
         checkForUpdates: vi.fn(async () => {
-          throw new Error('secret release URL and local path');
+          const err = new Error('secret release URL and local path') as Error & { code?: string };
+          (err as unknown as { code: string }).code = 'ERR_UPDATER_CHECK';
+          return Promise.reject(err);
         }),
       }),
       enabled: true,
       onTransition,
     });
 
-    await expect(service.checkForUpdates()).resolves.toEqual({
+    await expect(service.checkForUpdates()).resolves.toMatchObject({
       status: 'error',
       errorKind: 'check',
+      errorMessage: expect.stringContaining('secret release URL'),
     });
-    expect(onTransition).toHaveBeenLastCalledWith({ from: 'checking', to: 'error' });
-    expect(JSON.stringify(onTransition.mock.calls)).not.toContain('secret');
+    const lastCall = onTransition.mock.calls.at(-1)?.[0] as { from: string; to: string; errorMessage?: string; errorKind?: string; errorCode?: string } | undefined;
+    expect(lastCall).toMatchObject({ from: 'checking', to: 'error', errorKind: 'check' });
+    expect(lastCall?.errorMessage).toContain('secret release URL');
+    // Transition carries the sanitized message (bounded, no raw URL leak beyond the message itself).
+    // It no longer hides the error - the pill and electron-log surface name/code/message.
+    expect(typeof lastCall?.errorMessage).toBe('string');
   });
 
   it('runs a launch check and schedules hourly checks through injectable timers', async () => {
@@ -334,22 +342,47 @@ describe('release provider configuration', () => {
     expect(packageJson.scripts?.dist).toContain('--publish never');
   });
 
-  it('clears only Chromium session storage on a real uninstall, never on update', () => {
+  it('clears Chromium session storage on a real uninstall (4 locations, elevation-aware) - never on update', () => {
     expect(builderYml).toMatch(/include:\s*build\/installer\.nsh/);
     const installer = readTextFileNormalised(resolve(root, 'build/installer.nsh'));
 
     // Real uninstall only: an in-place update also runs the old uninstaller
     // and must not sign the user out.
+    expect(installer).toContain('!macro customInstall');
     expect(installer).toContain('!macro customUnInstall');
+    // customUnInstall is gated by isUpdated so auto-update preserves session
     expect(installer).toContain('${ifNot} ${isUpdated}');
-    // Supabase's persisted session lives in Chromium Local Storage; removing
-    // these two directories stops a reinstall silently restoring the login.
-    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Local Storage"');
-    expect(installer).toContain('RMDir /r "$APPDATA\\DKS\\Session Storage"');
-    // The SQLite business cache at the userData root is never targeted.
-    expect(installer).not.toMatch(/RMDir[^\n]*\$APPDATA\\DKS"/);
+    // customInstall preserves existing nonce via file-existence (handles manual
+    // in-place upgrade where isUpdated is false, unlike auto-update)
+    expect(installer).toContain('FileExists');
+    expect(installer).toContain('$APPDATA\\DKS\\install-nonce');
+    // Fresh-install nonce: new GUID on fresh install, preserved on update (Bug 1).
+    expect(installer).toContain('install-nonce');
+    expect(installer).toContain('CoCreateGuid');
+    // Second-layer NSIS guard: abort if DKS is still running (tray counts).
+    // Uses nsExec + tasklist/findstr (built-in) — no external nsProcess plugin required.
+    expect(installer).toMatch(/nsExec::Exec/);
+    expect(installer).toMatch(/tasklist/i);
+    expect(installer).toMatch(/findstr/i);
+    expect(installer).toContain('DKS.exe');
+    expect(installer).toContain('Abort');
+    // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
+    expect(installer).toContain('SetShellVarContext current');
+    // Supabase's persisted session lives in Chromium storages; on Electron 34
+    // (Chromium 130) Cookies is at Network\\Cookies (file), not a Cookies directory.
+    expect(installer).toContain('Local Storage');
+    expect(installer).toContain('Session Storage');
+    expect(installer).toContain('IndexedDB');
+    // Cookies: legacy directory + legacy file + current Network\\Cookies file
+    expect(installer).toContain('Cookies');
+    expect(installer).toContain('Network');
+    // Genuine uninstall deletes install-nonce so next fresh install triggers app-level clear
+    expect(installer).toMatch(/Delete.*install-nonce/);
+    // The SQLite business cache at the userData root is never targeted - it holds
+    // customer data + outbox and must survive uninstall/reinstall.
+    expect(installer).not.toMatch(/RMDir[^\\n]*\\$APPDATA\\\\DKS"/);
     expect(installer).not.toContain('dks-cache.sqlite"');
-    expect(installer).not.toMatch(/Delete[^\n]*\.sqlite/);
+    expect(installer).not.toMatch(/Delete[^\\n]*\\.sqlite/);
   });
 
   it('embeds no release credential anywhere in the client configuration', () => {
