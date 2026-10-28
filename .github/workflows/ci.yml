@@ -368,7 +368,11 @@ jobs:
           try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
           Start-Sleep -Seconds 2
           $finalUninst = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if ($finalUninst) { Invoke-HangProof -FilePath "$finalUninst" -ArgumentList "/S" -Label "final cleanup uninstall" | Out-Null; Start-Sleep -Seconds 5 }
+          if ($finalUninst) {
+            Write-Host "Running final cleanup: \"$finalUninst\" /S"
+            try { $p = Start-Process -FilePath "$finalUninst" -ArgumentList "/S" -PassThru; if (-not $p.WaitForExit(30000)) { try { $p.Kill() } catch {} } } catch {}
+            Start-Sleep -Seconds 5
+          }
           # Clean APPDATA for next run
           try { Remove-Item -Recurse -Force "$env:APPDATA\DKS" -ErrorAction SilentlyContinue } catch {}
           Write-Host "=== NSIS runtime proof completed successfully ==="
