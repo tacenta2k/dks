@@ -658,7 +658,9 @@ function installLifecycleListeners(): void {
     quitting = true;
     updaterScheduler?.stop();
     closeLocalStore();
-    // Remove running.lock so uninstall can proceed after Exit
+    // Remove running.lock so uninstall can proceed after Exit. If crash leaves
+    // stale lock, uninstaller's tasklist check will delete it; startup also
+    // cleans stale locks (see startMainProcess).
     try {
       const p = path.join(app.getPath('userData'), 'running.lock');
       if (fs.existsSync(p)) fs.unlinkSync(p);
@@ -695,10 +697,16 @@ export async function startMainProcess(): Promise<boolean> {
   }
 
   const startHidden = shouldStartHidden(process.argv);
-  // Create running.lock so uninstaller can detect DKS is still running (tray counts)
+  // Create running.lock so uninstaller can detect DKS is still running (tray counts).
+  // Stale lock handling: if previous crash left lock, delete it first (singleInstanceLock
+  // already guarantees no other DKS is running, so any existing lock is stale).
+  // Uninstaller also handles stale locks via tasklist verification.
   try {
     if (app.isPackaged) {
       const p = path.join(app.getPath('userData'), 'running.lock');
+      try {
+        if (fs.existsSync(p)) fs.unlinkSync(p);
+      } catch {}
       fs.writeFileSync(p, String(process.pid), 'utf8');
     }
   } catch {}

@@ -78,29 +78,48 @@
     FileWrite $R0 "APPDATA=$APPDATA$\r$\n"
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
-    ; Debug log whether running.lock check will trigger
+    ; Running-app guard: check both tasklist and running.lock to handle
+    ; real desktops (tray counts) and stale locks after crash. Electron
+    ; creates %APPDATA%\DKS\running.lock on packaged start and removes it
+    ; on before-quit; if lock exists but tasklist shows no DKS.exe, the
+    ; lock is stale (crash) and is deleted so uninstall is not incorrectly
+    ; blocked. Pure FileExists alone would block after crash; pure tasklist
+    ; alone misses edge cases where tasklist is unavailable. Both are
+    ; Package-safe: uses electron-builder's exact tasklist|findstr pattern.
     ${If} ${FileExists} "$APPDATA\DKS\running.lock"
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "CHECK running.lock exists, aborting$\r$\n"
+      FileWrite $R0 "CHECK running.lock exists, verifying via tasklist$\r$\n"
       FileClose $R0
-      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "ABORT: DKS running.lock exists$\r$\n"
-      FileClose $R0
-      IfSilent +2
-      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
-      Abort
-    ${ElseIf} ${FileExists} "C:\Users\runneradmin\AppData\Roaming\DKS\running.lock"
-      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "CHECK running.lock exists at CI path, aborting$\r$\n"
-      FileClose $R0
-      IfSilent +2
-      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
-      Abort
-    ${Else}
-      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "CHECK running.lock not found, proceeding$\r$\n"
-      FileClose $R0
+      nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
+      Pop $0
+      ${If} $0 == 0
+        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+        FileWrite $R0 "ABORT: running.lock + tasklist confirms DKS running$\r$\n"
+        FileClose $R0
+        IfSilent +2
+        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
+        Abort
+      ${Else}
+        Delete "$APPDATA\DKS\running.lock"
+        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+        FileWrite $R0 "Stale running.lock deleted (no DKS.exe), proceeding$\r$\n"
+        FileClose $R0
+      ${EndIf}
     ${EndIf}
+    ; Direct tasklist check even without lock (covers old installs pre-lock, or lock deleted)
+    nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
+    Pop $0
+    ${If} $0 == 0
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "ABORT: tasklist shows DKS.exe running$\r$\n"
+      FileClose $R0
+      IfSilent +2
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
+      Abort
+    ${EndIf}
+    FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+    FileWrite $R0 "CHECK running guard passed, proceeding to cleanup$\r$\n"
+    FileClose $R0
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
     ; Explicitly delete the exact sentinel files used in CI proof, then directories
@@ -153,6 +172,8 @@
     nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\install-nonce"'
     Pop $0
     Pop $1
+    ; Also clean stale running.lock if it survived (should have been handled above, but ensure)
+    Delete "$APPDATA\DKS\running.lock"
     FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
     FileWrite $R0 "Delete install-nonce done$\r$\n"
     FileClose $R0

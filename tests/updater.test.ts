@@ -365,14 +365,16 @@ describe('release provider configuration', () => {
     expect(installer).toMatch(/\$1/);
     expect(installer).toContain('install-nonce created successfully');
     expect(installer).toContain('FileRead');
-    // Second-layer NSIS guard: abort if DKS is still running (tray counts).
-    // Uses nsExec+tasklist, FindWindow, or IfFileExists running.lock (all built-in).
-    expect(installer).toMatch(/nsExec::Exec|FindWindow|IfFileExists/i);
-    expect(installer).toMatch(/tasklist|FindWindow|IfFileExists|DKS/i);
-    // findstr/StrStr/StrCpy/INFO/find/FindWindow/IfFileExists variant is legacy; new running.lock also valid
-    expect(installer).toMatch(/findstr|StrStr|StrCpy|INFO:|find|FindWindow|IfFileExists|running\.lock/i);
+    // Second-layer NSIS guard: tasklist+findstr (electron-builder pattern) plus running.lock with stale handling.
+    expect(installer).toMatch(/nsExec::Exec/i);
+    expect(installer).toMatch(/tasklist/i);
+    expect(installer).toMatch(/findstr/i);
+    expect(installer).toMatch(/running\.lock/i);
     expect(installer).toContain('DKS');
     expect(installer).toContain('Abort');
+    // No CI-specific hardcoded paths may ship in the installer
+    expect(installer).not.toContain('runneradmin');
+    expect(installer).not.toContain('C:\\Users');
     // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
     expect(installer).toContain('SetShellVarContext current');
     // Supabase's persisted session lives in Chromium storages; on Electron 34
