@@ -79,7 +79,16 @@
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
 
-    ; DKS running check temporarily disabled FindWindow DKS.exe Abort tasklist FindWindow — debug package
+    nsExec::ExecToStack 'cmd /c tasklist | findstr DKS.exe'
+    Pop $0
+    Pop $1
+    ${If} $0 != ""
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "ABORT: DKS.exe still running$"
+      FileClose $R0
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
+      Abort
+    ${EndIf}
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
     ; Explicitly delete the exact sentinel files used in CI proof, then directories
