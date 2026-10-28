@@ -43,7 +43,10 @@ win:
     - nsis
   icon: build/icon.ico
   executableName: DKS
-  publisherName: DKS
+  # Unsigned build for v0.1.5 — no code signing certificate available.
+  # Do not add a signing identity: an unsigned installer must not declare a
+  # publisher for verification, otherwise auto-update fails after download.
+  # Proper code-signing is the future stronger fix.
 nsis:
   oneClick: false
   perMachine: false

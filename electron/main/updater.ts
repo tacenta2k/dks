@@ -155,6 +155,10 @@ function createDefaultAdapter(): UpdaterAdapter {
   try {
     autoUpdater.autoDownload = false;
     autoUpdater.autoInstallOnAppQuit = false;
+    // Unsigned v0.1.5: force full download to avoid stale blockmap / differential
+    // issues while we prove 0.1.5 -> 0.1.6. Temporary conservative choice,
+    // revisitable once code-signing is in place.
+    autoUpdater.disableDifferentialDownload = true;
 
     let progressListener: ((percent: number) => void) | undefined;
     let downloadedListener: ((version?: string) => void) | undefined;
