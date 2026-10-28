@@ -84,7 +84,7 @@
     Pop $1
     ${If} $0 != ""
       StrCpy $2 $0 1
-      ${If} $2 == '"'
+      ${If} $2 != "I"
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
         FileWrite $R0 "ABORT: DKS.exe still running$"
         FileClose $R0
