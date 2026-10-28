@@ -95,30 +95,53 @@
     ; Explicitly delete the exact sentinel files used in CI proof, then directories
     SetFileAttributes "$APPDATA\DKS\Local Storage\leveldb\x" NORMAL
     Delete "$APPDATA\DKS\Local Storage\leveldb\x"
-    Delete "$APPDATA\DKS\Local Storage\leveldb\*"
     RMDir /r "$APPDATA\DKS\Local Storage\leveldb"
     RMDir /r "$APPDATA\DKS\Local Storage"
+    nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\Local Storage"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\Session Storage\x" NORMAL
     Delete "$APPDATA\DKS\Session Storage\x"
-    Delete "$APPDATA\DKS\Session Storage\*"
     RMDir /r "$APPDATA\DKS\Session Storage"
+    nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\Session Storage"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\IndexedDB\x" NORMAL
     Delete "$APPDATA\DKS\IndexedDB\x"
-    Delete "$APPDATA\DKS\IndexedDB\*"
     RMDir /r "$APPDATA\DKS\IndexedDB"
+    nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\IndexedDB"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\Cookies" NORMAL
     Delete "$APPDATA\DKS\Cookies"
     RMDir /r "$APPDATA\DKS\Cookies"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\Cookies"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\Cookies-journal" NORMAL
     Delete "$APPDATA\DKS\Cookies-journal"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\Cookies-journal"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\Network\Cookies" NORMAL
     Delete "$APPDATA\DKS\Network\Cookies"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\Network\Cookies"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\Network\Cookies-journal" NORMAL
     Delete "$APPDATA\DKS\Network\Cookies-journal"
-    Delete "$APPDATA\DKS\Network\*"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\Network\Cookies-journal"'
+    Pop $0
+    Pop $1
     RMDir /r "$APPDATA\DKS\Network"
+    nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\Network"'
+    Pop $0
+    Pop $1
     SetFileAttributes "$APPDATA\DKS\install-nonce" NORMAL
     Delete "$APPDATA\DKS\install-nonce"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\install-nonce"'
+    Pop $0
+    Pop $1
     FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
     FileWrite $R0 "Delete install-nonce done$\r$\n"
     FileClose $R0
