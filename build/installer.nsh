@@ -83,7 +83,8 @@
     Pop $0  ; tasklist output (CSV line if running, INFO if not)
     Pop $1
     ${If} $0 != ""
-      ${If} $0 != "INFO: No tasks are running which match the specified criteria."
+      StrCpy $2 $0 1
+      ${If} $2 == '"'
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
         FileWrite $R0 "ABORT: DKS.exe still running$"
         FileClose $R0
