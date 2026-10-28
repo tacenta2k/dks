@@ -110,17 +110,31 @@
 
     ; Delete ONLY the Chromium session locations under the real user's
     ; %APPDATA%\DKS. Never touch dks-cache.sqlite, logs/, or other user data.
-    ; Local Storage, Session Storage, IndexedDB are directories.
+    ; Robust: delete inner files first (handles file-lock edge cases on hosted
+    ; runner where RMDir alone may silently fail if leveldb files are transiently
+    ; locked by Defender/indexer). Then RMDir the directories.
+    DetailPrint "DKS: removing session stores from $APPDATA\DKS (robust)"
+    ; Local Storage — may contain leveldb\* files
+    Delete "$APPDATA\DKS\Local Storage\leveldb\*.*"
+    Delete "$APPDATA\DKS\Local Storage\*.*"
+    RMDir /r "$APPDATA\DKS\Local Storage\leveldb"
     RMDir /r "$APPDATA\DKS\Local Storage"
+    ; Session Storage
+    Delete "$APPDATA\DKS\Session Storage\*.*"
     RMDir /r "$APPDATA\DKS\Session Storage"
+    ; IndexedDB — may contain nested files
+    Delete "$APPDATA\DKS\IndexedDB\*.*"
     RMDir /r "$APPDATA\DKS\IndexedDB"
     ; Cookies may be a directory (old) or file (legacy). Handle both.
+    Delete "$APPDATA\DKS\Cookies\*.*"
     RMDir /r "$APPDATA\DKS\Cookies"
     Delete "$APPDATA\DKS\Cookies"
     Delete "$APPDATA\DKS\Cookies-journal"
     ; Current Chromium (Electron 34 / Chromium 130) stores cookies at Network\Cookies.
+    Delete "$APPDATA\DKS\Network\*.*"
     Delete "$APPDATA\DKS\Network\Cookies"
     Delete "$APPDATA\DKS\Network\Cookies-journal"
+    RMDir /r "$APPDATA\DKS\Network"
     ; Remove install-nonce so next fresh install mints a new GUID and the
     ; app-level guard (install-nonce.ts) detects mismatch vs SQLite's old
     ; nonce and clears any leftover session. Not deleted on update
