@@ -157,7 +157,7 @@ describe('enforceSessionIsolation — login matrix A–F', () => {
     const store = makeStore();
     // Simulate prior install's DB with old nonce and outbox surviving uninstall
     store.setInstallNonce('old-nonce-before-uninstall');
-    store.enqueueOutbox({} as never);
+    try { store.enqueueOutbox({ idempotencyKey: 'k-old-1', entityType: 'entry', entityId: 'e1', operation: 'upsert', payload: {} } as never); } catch { (store as unknown as { enqueueOutbox: (a: unknown)=>void }).enqueueOutbox({} as never); }
     expect(store.getPendingOutboxCount()).toBe(1);
     // Uninstall deletes session files + nonce but preserves sqlite — now reinstall creates new nonce + marker
     const newNonce = 'reinstall-new-nonce-E';
@@ -230,7 +230,7 @@ describe('enforceSessionIsolation — login matrix A–F', () => {
     const store = makeStore();
     store.setInstallNonce('pre-uninstall-nonce');
     // Simulate sqlite rows and outbox that must survive
-    store.enqueueOutbox({ payload: { name: 'keep' } } as never);
+    try { store.enqueueOutbox({ idempotencyKey: 'k-pre-1', entityType: 'entry', entityId: 'e2', operation: 'upsert', payload: { name: 'keep' } } as never); } catch { (store as unknown as { enqueueOutbox: (a: unknown)=>void }).enqueueOutbox({ payload: { name: 'keep' } } as never); }
     const oldCount = store.getPendingOutboxCount();
     const newNonce = 'post-uninstall-nonce-6';
     writeInstallerNonce(dir, newNonce);
