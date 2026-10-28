@@ -104,7 +104,7 @@
     ; Check both pops: exit code 0 means DKS.exe is running; stdout non-empty also indicates running
     ${If} $1 == 0
     ${OrIf} $0 != ""
-      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running."
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
       Abort
     ${EndIf}
 
