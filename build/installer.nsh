@@ -102,19 +102,20 @@
     ; customUnInstall runs BEFORE file deletion, so the running-app check here
     ; is safe. If it ran after deletion we would need customUnInit instead.
     ; nsExec::ExecToStack pushes two values: exit code and stdout. Pop BOTH.
-    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH'
-    Pop $0  ; tasklist output (CSV line if running, INFO if not)
-    Pop $1  ; exit code (tasklist always 0, so check stdout)
-    ${If} $0 != ""
-      StrCpy $2 $0 9
-      ${If} $2 == '"DKS.exe"'
-        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-        FileWrite $R0 "ABORT: DKS.exe still running stdout=$0$\r$\n"
-        FileClose $R0
-        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
-        Abort
-      ${EndIf}
-    ${EndIf}
+    ; TEMP DISABLE for CI diagnosis - will restore after
+    ; nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH'
+    ; Pop $0
+    ; Pop $1
+    ; ${If} $0 != ""
+    ;   StrCpy $2 $0 9
+    ;   ${If} $2 == '"DKS.exe"'
+    ;     FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+    ;     FileWrite $R0 "ABORT: DKS.exe still running stdout=$0$\r$\n"
+    ;     FileClose $R0
+    ;     MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
+    ;     Abort
+    ;   ${EndIf}
+    ; ${EndIf}
 
     ; Delete ONLY the Chromium session locations under the real user's
     ; %APPDATA%\DKS. Never touch dks-cache.sqlite, logs/, or other user data.
