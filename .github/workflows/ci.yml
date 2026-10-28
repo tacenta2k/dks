@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: 40
         shell: pwsh
         run: |
-          # no trap for final green run
+          try {
           function Invoke-HangProof($FilePath, $ArgumentList, $Label) {
             $quoted = "`"$FilePath`" $ArgumentList"
             Write-Host "Running: $quoted"
@@ -378,6 +378,13 @@ jobs:
           Write-Host "=== NSIS runtime proof completed successfully ==="
           Write-Host "Summary: a.install-nonce non-empty, b.sentinels planted, c.uninstall cleared sentinels+nonce sqlite hash unchanged, d.nonce differs, e.blocked uninstall preserves files"
           Write-Host "If this can't run on hosted runner, exact reason would be logged above (e.g., Defender SmartScreen blocks unsigned NSIS, tasklist/findstr unavailable, per-user install requires interactive explorer, or DKS.exe auto-launch holds lock)"
+          } catch {
+            $err = $_ | Out-String
+            if (-not $err) { $err = $_.Exception.Message }
+            $err | Out-File "$env:TEMP\nsis-proof-error.txt" -Encoding utf8
+            Write-Host "NSIS proof error: $err"
+            throw
+          }
 
       - name: Report NSIS (c) failure details (no blob storage)
         if: failure()
