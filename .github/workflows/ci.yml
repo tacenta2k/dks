@@ -295,6 +295,7 @@ jobs:
           if ($hashAfter -ne $hashBefore) { throw "c. FAIL: sqlite hash changed: $hashBefore vs $hashAfter — dks-cache.sqlite must remain byte-identical" }
           Write-Host "c. sqlite hash unchanged: $hashAfter"
           Write-Host "LOG: c. sentinels+nonce gone, sqlite hash unchanged $hashAfter"
+          "c-passed" | Out-File "$env:TEMP\nsis-stage.txt" -Encoding utf8
           # Write (c) proof to step summary for quotation (must be minutes not hours)
           $summaryLines = @(
             "### (c) Sentinel cleanup — PASS"
@@ -326,6 +327,7 @@ jobs:
           if ($nonceA -eq $nonceB) { Write-Host "::error::d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID"; throw "d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID" }
           Write-Host "d. Nonce differs confirmed: $nonceA != $nonceB"
           Write-Host "LOG: d. reinstall nonce differs $nonceA -> $nonceB"
+          "d-passed" | Out-File "$env:TEMP\nsis-stage.txt" -Encoding utf8 -Append
 
           # Refresh paths after reinstall
           $installDir = "$env:LOCALAPPDATA\Programs\DKS"
@@ -360,6 +362,7 @@ jobs:
           Write-Host "SKIPPED in silent CI: electron-builder CHECK_APP_RUNNING runs before customUnInstall in un.onInit and in /S mode force-kills via KILL_PROCESS (see packages/app-builder-lib/templates/nsis/uninstaller.nsh un.onInit + include/allowOnlyOneInstallerInstance.nsh CHECK_APP_RUNNING). Silent CI cannot observe customUnInstall Abort."
           Write-Host "Manual verification required: start DKS, run Uninstall DKS.exe without /S, verify MessageBox appears and uninstall aborts; also verify stale running.lock deleted when no DKS.exe (see installer.nsh stale handling)."
           Write-Host "LOG: e. manual only — CHECK_APP_RUNNING force-kills in /S (uninstaller.nsh un.onInit)"
+          "e-passed" | Out-File "$env:TEMP\nsis-stage.txt" -Encoding utf8 -Append
 
           # Cleanup for runner hygiene (no dummy needed)
           try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
@@ -384,7 +387,9 @@ jobs:
           foreach ($pp in $checks) { $ex=Test-Path $pp; $status += "$pp exists=$ex; " }
           $err = ""
           if (Test-Path "$env:TEMP\nsis-proof-error.txt") { $err = Get-Content "$env:TEMP\nsis-proof-error.txt" -Raw }
-          $body = "NSIS FAIL on $env:GITHUB_SHA`nError: $err`nLog: $log`nStatus: $status"
+          $stage = ""
+          if (Test-Path "$env:TEMP\nsis-stage.txt") { $stage = Get-Content "$env:TEMP\nsis-stage.txt" -Raw }
+          $body = "NSIS FAIL on $env:GITHUB_SHA`nError: $err`nStage: $stage`nLog: $log`nStatus: $status"
           # truncate to 60000 chars for API
           if ($body.Length -gt 60000) { $body = $body.Substring(0,60000) }
           try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted failure comment" } catch { Write-Host "Comment failed: $_" }
