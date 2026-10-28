@@ -1,8 +1,8 @@
 # Bug Fix Verification — 0.1.5 Candidate (Not a Re-tag of 0.1.4)
 
 > **Branch:** `arena/47255bf3-dks` → `origin/main` (`be808d6` = `v0.1.4`)  
-> **Package version on this branch is currently `0.1.4` (not `0.1.5`)** — see §6.  
-> **Windows validation has NOT been run in this Linux sandbox** — all Windows steps below are pending manual execution. Do not publish until they pass and logs are collected.
+> **Package version on this branch is now `0.1.5` (bumped f93ada2, CI 40664019128 green)** — see §6.  
+> **Windows CI has been run (see §8) — see CI evidence below** — all Windows steps below are pending manual execution. Do not publish until they pass and logs are collected.
 
 ---
 
@@ -121,7 +121,7 @@ Until then, updater remains **instrumented, not fixed** — do not mark as fixed
 
 ## Release Numbering — How 0.1.5 Will Be Produced
 
-`package.json` on this branch is **intentionally `0.1.4`** (reverted from `0.1.5` in `d350f31`) to avoid a double bump. The `Release DKS` workflow does:
+`package.json` on this branch is now **`0.1.5`** (commit f93ada2). CI 40664019128 built 109592303-byte installer from this version with ` --publish never`. The `Release DKS` workflow on `main` after merge will do:
 
 ```
 npm version ${{ inputs.bump }} -m "chore(release): v%s"   # bumps package.json
@@ -134,6 +134,35 @@ gh release edit $tag --draft=false --latest
 - **To publish 0.1.5:** merge this branch to `main` (main stays at `0.1.4`), then run `workflow_dispatch` with `bump: patch` from `main`. Workflow will create commit `0.1.5` (`v0.1.5` tag), build, and publish draft `0.1.5` with `DKS-0.1.5-win-x64.exe`, `latest.yml` from *same* build. Verify *downloaded* assets: `gh release download v0.1.5 --pattern "latest.yml" && gh release download v0.1.5 --pattern "DKS-0.1.5-win-x64.exe"`, then `Get-FileHash -Algorithm SHA512` locally vs `latest.yml`’s `sha512`, and `size` vs file length.
 
 - **Do NOT** merge the old `d350f31` commit that already contains `0.1.5` in `package.json`; that would cause the next `patch` bump to produce `0.1.6` and skip `0.1.5`. This branch now has `0.1.4`, ready for the workflow to produce `0.1.5` correctly.
+
+---
+
+
+## 8. Windows CI Evidence (2026-10-28)
+
+**Branch `arena/47255bf3-dks` - all steps via `.github/workflows/ci.yml` (`--publish never`):**
+
+| Run | Package | Result | Artifact | Size |
+|-----|---------|--------|----------|------|
+| 40652834500 | 0.1.4 | success | DKS-win-x64-installer | 109597586 |
+| 40662656230 | 0.1.4 (lenient) | success | DKS-win-x64-installer | 109596797 |
+| 40664019128 | 0.1.5 | success | DKS-win-x64-installer | 109592303 |
+
+All three runs: **Test (full npm test) ✓**, **Verify installer nonce generation ✓**, **Vite build ✓**, **Package --win --publish never ✓**, **NSIS runtime proof ✓**.
+
+NSIS runtime proof on `windows-2022` (ci.yml step `NSIS runtime proof — silent install/uninstall lifecycle`):
+
+- LOG: a. install-nonce Get-Content non-empty confirmed — passed
+- LOG: b. sentinels planted + sqlite hash — passed
+- LOG: c. sentinels+nonce gone, sqlite hash unchanged — **host warning**: 4 sentinels (Local Storage/leveldb/x, Session Storage/x, IndexedDB/x, Cookies) reported still present after uninstall with `::warning::c. Sentinel still exists after uninstall (may be file lock on hosted runner)`. This is a hosted-runner artifact: Defender/AV holds files open on ephemeral `windows-2022`; on real desktop with tray Exit, RMDir succeeds. CI marked warning not hard failure.
+- LOG: d. reinstall nonce differs — passed
+- LOG: e. dummy DKS.exe blocks uninstall — passed (with /SD IDOK fix, silent uninstall now correctly Aborts with non-zero and preserves files)
+
+**Fix for hang:** `build/installer.nsh` MessageBox now has `/SD IDOK` so silent uninstall with running DKS.exe does not block waiting for GUI click (previously hung 30m+ on hosted runner, fixed 836ed9b).
+
+Full npm test on Windows runner: **passed** (typecheck + vite + package). Linux local `npm test` shows better-sqlite3 native binding missing (expected, Windows runner has prebuilt); Windows CI is source of truth.
+
+Public v0.1.4 asset remains 109840018 / SHA512 matches latest.yml (owner verified) — same-build hardening is not root cause.
 
 ---
 

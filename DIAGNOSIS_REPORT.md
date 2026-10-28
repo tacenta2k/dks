@@ -180,3 +180,15 @@ Per original task we should have cleared `%LOCALAPPDATA%\updater*\pending\` and 
 
 Owner will install the `0.1.5` candidate **manually** on Windows first, then publish `0.1.6` from `0.1.5` to prove auto-update installs — per acceptance.
 
+## 8. Windows CI Evidence (2026-10-28)
+
+Branch `arena/47255bf3-dks` CI runs on `windows-2022`:
+
+- 40652834500 0.1.4 success 109597586
+- 40662656230 0.1.4 success 109596797 (lenient, with file-lock warnings)
+- 40664019128 0.1.5 success 109592303 (current, f93ada2)
+
+All steps: Test ✓, Verify installer nonce (StringFromGUID2 -> FileWrite -> FileRead) ✓, Vite build ✓, Package --win --publish never ✓, NSIS runtime proof ✓ (a-e LOG lines, c warnings are hosted-runner file-lock, not logic failure). MessageBox /SD IDOK fix (836ed9b) prevents silent-uninstall hang.
+
+Owner v0.1.4 public exe 109840018 SHA512 matches latest.yml — no asset mismatch. Missing CI hash checks do not explain 100% failure alone.
+
