@@ -79,11 +79,12 @@
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
 
-    IfFileExists "$APPDATA\DKS\running.lock" 0 +3
+    ${If} ${FileExists} "$APPDATA\DKS\running.lock"
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
       FileWrite $R0 "ABORT: DKS running.lock exists$"
       FileClose $R0
       Abort
+    ${EndIf}
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
     ; Explicitly delete the exact sentinel files used in CI proof, then directories
