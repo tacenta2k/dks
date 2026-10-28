@@ -224,11 +224,14 @@ jobs:
           $uCode = $procU.ExitCode
           Write-Host "Silent uninstall command: \"$uninstaller\" /S"
           Write-Host "Silent uninstall exit code: $uCode"
-          if (Test-Path "$env:TEMP\\DKS-uninstall-debug.log") {
-            Write-Host "--- DKS-uninstall-debug.log (from NSIS) ---"
-            Get-Content "$env:TEMP\\DKS-uninstall-debug.log" | ForEach-Object { Write-Host $_ }
-          } else {
-            Write-Host "No DKS-uninstall-debug.log found at $env:TEMP — NSIS may not have run or isUpdated=true blocked deletion"
+          foreach ($log in @("$env:TEMP\\DKS-nsis-debug.txt", "$env:TEMP\\DKS-uninstall-debug.log")) {
+            if (Test-Path $log) {
+              Write-Host "--- NSIS log $log ---"
+              Get-Content $log | ForEach-Object { Write-Host $_ }
+            }
+          }
+          if (-not (Test-Path "$env:TEMP\\DKS-nsis-debug.txt") -and -not (Test-Path "$env:TEMP\\DKS-uninstall-debug.log")) {
+            Write-Host "No NSIS debug log found at $env:TEMP — check if guard isUpdated=true blocked deletion or installer not from this build"
           }
           Start-Sleep -Seconds 5
           Write-Host "APPDATA\\DKS after uninstall:"

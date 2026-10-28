@@ -84,6 +84,11 @@
   ${ifNot} ${isUpdated}
     ; Ensure we resolve the real user's %APPDATA%, not an elevated admin's.
     SetShellVarContext current
+    ; Minimal diagnostics for CI: log APPDATA and INSTDIR to TEMP for PowerShell to read
+    FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" w
+    FileWrite $R0 "APPDATA=$APPDATA$\r$\n"
+    FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
+    FileClose $R0
 
     ; Tray Exit must be used before uninstall — a live DKS process holds
     ; Local Storage\leveldb files open, so RMDir would be incomplete and the
@@ -114,6 +119,9 @@
     ; runner where RMDir alone may silently fail if leveldb files are transiently
     ; locked by Defender/indexer). Then RMDir the directories.
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (robust)"
+    FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+    FileWrite $R0 "Deleting session stores from $APPDATA\DKS$\r$\n"
+    FileClose $R0
     ; Local Storage — may contain leveldb\* files
     Delete "$APPDATA\DKS\Local Storage\leveldb\*.*"
     Delete "$APPDATA\DKS\Local Storage\*.*"
@@ -140,5 +148,8 @@
     ; nonce and clears any leftover session. Not deleted on update
     ; (${isUpdated} true) — there it is preserved.
     Delete "$APPDATA\DKS\install-nonce"
+    FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+    FileWrite $R0 "Delete install-nonce done$\r$\n"
+    FileClose $R0
   ${endIf}
 !macroend
