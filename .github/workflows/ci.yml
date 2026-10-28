@@ -106,6 +106,7 @@ jobs:
         timeout-minutes: 40
         shell: pwsh
         run: |
+          trap { $msg = $_ | Out-String; $msg | Out-File "$env:TEMP\nsis-proof-error.txt" -Encoding utf8; Write-Host "TRAP: $msg"; throw $_ }
           function Invoke-HangProof($FilePath, $ArgumentList, $Label) {
             $quoted = "`"$FilePath`" $ArgumentList"
             Write-Host "Running: $quoted"
@@ -381,7 +382,9 @@ jobs:
           $checks = @("$env:APPDATA\DKS\Local Storage\leveldb\x","$env:APPDATA\DKS\Session Storage\x","$env:APPDATA\DKS\IndexedDB\x","$env:APPDATA\DKS\Cookies","$env:APPDATA\DKS\Network\Cookies","$env:APPDATA\DKS\install-nonce")
           $status = ""
           foreach ($pp in $checks) { $ex=Test-Path $pp; $status += "$pp exists=$ex; " }
-          $body = "NSIS (c) FAIL on $env:GITHUB_SHA`nLog: $log`nStatus: $status"
+          $err = ""
+          if (Test-Path "$env:TEMP\nsis-proof-error.txt") { $err = Get-Content "$env:TEMP\nsis-proof-error.txt" -Raw }
+          $body = "NSIS FAIL on $env:GITHUB_SHA`nError: $err`nLog: $log`nStatus: $status"
           # truncate to 60000 chars for API
           if ($body.Length -gt 60000) { $body = $body.Substring(0,60000) }
           try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted failure comment" } catch { Write-Host "Comment failed: $_" }
