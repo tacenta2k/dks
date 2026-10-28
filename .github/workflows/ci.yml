@@ -248,11 +248,18 @@ jobs:
             if (Test-Path $p) { $failedPaths += $p }
           }
           if ($failedPaths.Count -gt 0) {
-            Write-Host "c. FAIL: Sentinels still exist after uninstall that reported exit code $uCode:"
-            $failedPaths | ForEach-Object { Write-Host "  STILL EXISTS: $_" }
-            Write-Host "This is the exact session store that must be removed to prevent auto-login. Uninstaller exit code $uCode indicates success but deletion failed."
-            Write-Host "Check: was DKS.exe holding handles? Check tasklist before uninstall and NSIS log above. If file lock, uninstaller must retry after handle release."
-            throw "c. FAIL: Sentinels still exist after uninstall (exit $uCode): $($failedPaths -join ', ') — must be removed to prevent auto-login"
+            $nsisLog = ""
+            foreach ($log in @("$env:TEMP\\DKS-nsis-debug.txt", "$env:TEMP\\DKS-uninstall-debug.log", "C:\Windows\Temp\DKS-nsis-debug.txt")) {
+              if (Test-Path $log) { $nsisLog += Get-Content $log -Raw; $nsisLog += " | " }
+            }
+            if (-not $nsisLog) { $nsisLog = "no NSIS log (guard may have blocked or installer not from this build)" }
+            $altCheck = @()
+            foreach ($alt in @("$env:LOCALAPPDATA\DKS", "$env:APPDATA\DKS", "C:\Users\runneradmin\AppData\Roaming\DKS", "C:\Windows\System32\config\systemprofile\AppData\Roaming\DKS")) {
+              if (Test-Path $alt) { $altCheck += "$alt exists" } else { $altCheck += "$alt missing" }
+            }
+            $msg = "c. FAIL: Sentinels still exist after uninstall (exit $uCode): $($failedPaths -join ', ') | NSIS log: $nsisLog | Alt paths: $($altCheck -join '; ') | Must be removed to prevent auto-login"
+            Write-Host "::error::$msg"
+            throw $msg
           }
           Write-Host "c. Silent uninstall -> sentinels + nonce gone confirmed (all 6 checked)"
           Write-Host "LOG: c. sentinels+nonce gone confirmed"
