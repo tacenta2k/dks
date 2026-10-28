@@ -357,8 +357,14 @@ describe('release provider configuration', () => {
     expect(installer).toContain('FileExists');
     expect(installer).toContain('$APPDATA\\DKS\\install-nonce');
     // Fresh-install nonce: new GUID on fresh install, preserved on update (Bug 1).
+    // Must assign GUID text to $1 via StringFromGUID2 (t .r1) and verify non-empty after write.
     expect(installer).toContain('install-nonce');
     expect(installer).toContain('CoCreateGuid');
+    expect(installer).toMatch(/StringFromGUID2.*t \.r1/);
+    expect(installer).toContain('FileWrite');
+    expect(installer).toMatch(/\$1/);
+    expect(installer).toContain('install-nonce created successfully');
+    expect(installer).toContain('FileRead');
     // Second-layer NSIS guard: abort if DKS is still running (tray counts).
     // Uses nsExec + tasklist/findstr (built-in) — no external nsProcess plugin required.
     expect(installer).toMatch(/nsExec::Exec/);

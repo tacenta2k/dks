@@ -64,6 +64,17 @@ jobs:
       - name: Test
         run: npm test -- --testTimeout=60000
 
+      - name: Verify installer nonce generation (non-empty check)
+        shell: pwsh
+        run: |
+          # Ensure customInstall actually assigns $1 via StringFromGUID2 and verifies non-empty file
+          $installer = Get-Content -Raw build/installer.nsh
+          if ($installer -notmatch 'StringFromGUID2.*t \.r1') { throw "installer.nsh must assign GUID text to `$1 via t .r1" }
+          if ($installer -notmatch 'FileWrite.*\$1') { throw "installer.nsh must FileWrite `$1" }
+          if ($installer -notmatch 'install-nonce created successfully') { throw "installer.nsh must verify non-empty nonce after write" }
+          if ($installer -notmatch 'FileRead.*install-nonce') { throw "installer.nsh must FileRead back and check empty" }
+          Write-Host "Verified customInstall writes non-empty install-nonce (StringFromGUID2 → `$1 → FileWrite → FileRead check)."
+
       - name: Vite build (renderer + electron)
         run: npm run build
 

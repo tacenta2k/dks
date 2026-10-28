@@ -108,6 +108,18 @@ export const UPDATER_STATUS_CHANNEL = 'dks:updater:status' as const;
 // Error helpers — Bug 2: stop hiding the real error.
 // ---------------------------------------------------------------------------
 
+// Updater cache: electron-updater stores differential download artifacts in
+// %LOCALAPPDATA%\dks-updater\pending (or equivalent per installMode).
+// Failed-download cache cleanup is NOT implemented programmatically in this
+// codebase (file: electron/main/updater.ts, function: createUpdaterService).
+// Reason: electron-updater's differential downloader manages its own pending
+// cache and will resume/retry on next checkForUpdates(); manual deletion of
+// that folder is documented as a user recovery step (BUGFIX_VERIFICATION.md
+// pending-cache note) and is not required for the 100% download-failed fix,
+// which was the missing error diagnostics + same-build yml/exe verification.
+// If cache corruption is suspected, clearing the pending folder manually
+// before retry is the supported recovery.
+
 function extractUpdaterError(error: unknown): { message: string; code?: string; name?: string } {
   if (error instanceof Error) {
     const anyErr = error as Error & { code?: unknown };

@@ -140,7 +140,9 @@ describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
     tryClose(store);
   });
 
-  it('on first packaged launch creates a nonce and does NOT clear session', async () => {
+  it('on first packaged launch creates a nonce and clears session once (stored==null → one-time clear, fail-closed)', async () => {
+    // Requirement: uninstall 0.1.4 (no nonce) → install 0.1.5 → file present + stored null → MUST clear
+    // to kill the auto-login bug. First-ever launch also clears (no-op on empty profile) — one-time re-login accepted.
     const store = makeStore();
     const session = { clearStorageData: vi.fn(async () => undefined) };
 
@@ -151,10 +153,45 @@ describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
       session: session as unknown as never,
     });
 
-    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
     expect(store.getInstallNonce()).not.toBeNull();
     expect(readInstallerNonce(dir)).not.toBeNull();
     expect(readInstallerNonce(dir)).toBe(store.getInstallNonce());
+    tryClose(store);
+  });
+
+  it('stored==null + file present → clear (uninstall 0.1.4 → install 0.1.5 case)', async () => {
+    const store = makeStore();
+    const freshNonce = 'fresh-0.1.5-nonce';
+    writeInstallerNonce(dir, freshNonce);
+    expect(store.getInstallNonce()).toBeNull(); // 0.1.4 DB had no nonce
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({
+      isPackaged: true,
+      userDataPath: dir,
+      store,
+      session: session as unknown as never,
+    });
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(store.getInstallNonce()).toBe(freshNonce);
+    tryClose(store);
+  });
+
+  it('stored==null + file missing → clear+mint (first launch / empty file case)', async () => {
+    const store = makeStore();
+    expect(store.getInstallNonce()).toBeNull();
+    expect(readInstallerNonce(dir)).toBeNull(); // no file
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({
+      isPackaged: true,
+      userDataPath: dir,
+      store,
+      session: session as unknown as never,
+    });
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    const minted = readInstallerNonce(dir);
+    expect(minted).not.toBeNull();
+    expect(store.getInstallNonce()).toBe(minted);
     tryClose(store);
   });
 

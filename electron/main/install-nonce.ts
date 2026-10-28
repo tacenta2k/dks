@@ -76,30 +76,30 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
   try {
     let installerNonce = readInstallerNonce(userDataPath);
 
-    // First run from an old installer that never wrote a nonce, or the file
-    // was deleted: mint one so future reinstalls are detectable.
+    // File missing (first install, or deleted): mint one so future reinstalls
+    // are detectable. Do NOT early-return when stored==null — the original
+    // auto-login bug survives the first 0.1.5 install otherwise (uninstall
+    // 0.1.4 → install 0.1.5 gives file present + stored null, must clear).
+    // One-time re-login for 0.1.4 upgraders is accepted (clear is no-op on
+    // truly empty profiles).
     if (!installerNonce) {
       const generated = generateInstallNonce();
       writeInstallerNonce(userDataPath, generated);
       installerNonce = generated;
-      const stored = tryGetStoredNonce(options.store);
-      if (!stored) {
-        // First ever launch — just record, do not wipe a non-existent session.
-        trySetStoredNonce(options.store, installerNonce);
-        logger.info('[dks] install nonce created for first launch', { nonce: installerNonce.slice(0, 8) + '…' });
-        return true;
-      }
-      // File was missing but DB already has a nonce (e.g., manual delete or
-      // old build): treat as fresh install and fall through to clear.
-      logger.info('[dks] install nonce file was missing — treating as fresh install', {
-        storedNoncePrefix: stored.slice(0, 8) + '…',
+      logger.info('[dks] install nonce file was missing — minted new nonce', {
+        noncePrefix: installerNonce.slice(0, 8) + '…',
       });
+      // Fall through to comparison/clear — stored==null must still clear.
     }
 
     const storedNonce = tryGetStoredNonce(options.store);
     if (installerNonce && storedNonce === installerNonce) {
       return true;
     }
+    // stored==null (fresh DB, or 0.1.4 DB without nonce) → clear once,
+    // fail-closed, then store. Covers:
+    //   uninstall 0.1.4 → install 0.1.5 → file present, stored null → clear
+    //   file missing + stored null → minted above, now clear+store
 
     logger.info('[dks] fresh install detected — clearing Chromium session storages', {
       hasInstallerNonce: Boolean(installerNonce),

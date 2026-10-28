@@ -46,19 +46,37 @@
     DetailPrint "DKS: preserving existing install nonce (upgrade)"
   ${Else}
     DetailPrint "DKS: creating fresh install nonce"
-    ; Generate a GUID via ole32; fall back to tick count if unavailable.
-    ; The GUID text is written verbatim to $APPDATA\DKS\install-nonce .
+    ; Full nonce generation: CoCreateGuid creates binary GUID in memory (g .r0),
+    ; StringFromGUID2 converts that binary GUID to text and stores it in $1
+    ; via t .r1 (NSIS System plugin output). $1 is the GUID string used for
+    ; FileWrite. Both calls push HRESULT/length which we Pop to discard.
+    ; If GUID generation fails ($1 empty), fall back to GetTickCount.
     System::Call 'ole32::CoCreateGuid(g .r0)'
     Pop $2
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
     Pop $2
+    ; At this point $1 == GUID text like "{ABCD-...}" from t .r1 above.
     ${If} $1 == ""
       System::Call 'kernel32::GetTickCount() i.r1'
     ${EndIf}
+    ; $1 now definitely non-empty (GUID or tick count) — write to file
     FileOpen $0 "$APPDATA\DKS\install-nonce" w
     ${If} $0 != ""
       FileWrite $0 "$1"
       FileClose $0
+    ${EndIf}
+    ; CI/runtime check: verify install-nonce exists and is non-empty
+    FileOpen $0 "$APPDATA\DKS\install-nonce" r
+    ${If} $0 != ""
+      FileRead $0 $2
+      FileClose $0
+      ${If} $2 == ""
+        DetailPrint "DKS: ERROR install-nonce is empty after write"
+      ${Else}
+        DetailPrint "DKS: install-nonce created successfully"
+      ${EndIf}
+    ${Else}
+      DetailPrint "DKS: ERROR install-nonce file missing after write"
     ${EndIf}
   ${EndIf}
 !macroend
