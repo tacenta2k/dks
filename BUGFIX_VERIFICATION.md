@@ -139,7 +139,7 @@ gh release edit $tag --draft=false --latest
 
 ## Files Changed (vs `origin/main` `0.1.4`)
 
-- `build/installer.nsh` — `SetShellVarContext current`, nonce GUID via file-existence preserve (handles manual upgrade), `nsProcess::FindProcess DKS.exe` guard, 4 locations including `Network\Cookies` + `Cookies-journal` handling, deletes `install-nonce` on genuine uninstall to trigger app-level clear, never `dks-cache.sqlite`.
+- `build/installer.nsh` — `SetShellVarContext current`, nonce GUID via file-existence preserve (handles manual upgrade), `nsExec/tasklist/findstr DKS.exe` guard (no external plugin), 4 locations including `Network\Cookies` + `Cookies-journal` handling, deletes `install-nonce` on genuine uninstall to trigger app-level clear, never `dks-cache.sqlite`.
 - `electron/main/install-nonce.ts` — NEW; documented `['cookies','localstorage','indexdb']` + Session Storage fs, await before renderer, failure does not record nonce.
 - `electron/main/sqlite.ts` — `getInstallNonce`/`setInstallNonce`.
 - `electron/main/index.ts` — `await enforceSessionIsolation` before `createMainWindow`; fail-closed: on `clearStorageData` failure blocks window, shows dialog, quits for retry (never silently resume old session).

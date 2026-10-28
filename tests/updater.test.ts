@@ -360,8 +360,12 @@ describe('release provider configuration', () => {
     expect(installer).toContain('install-nonce');
     expect(installer).toContain('CoCreateGuid');
     // Second-layer NSIS guard: abort if DKS is still running (tray counts).
-    expect(installer).toContain('nsProcess::FindProcess');
+    // Uses nsExec + tasklist/findstr (built-in) — no external nsProcess plugin required.
+    expect(installer).toMatch(/nsExec::Exec/);
+    expect(installer).toMatch(/tasklist/i);
+    expect(installer).toMatch(/findstr/i);
     expect(installer).toContain('DKS.exe');
+    expect(installer).toContain('Abort');
     // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
     expect(installer).toContain('SetShellVarContext current');
     // Supabase's persisted session lives in Chromium storages; on Electron 34

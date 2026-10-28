@@ -36,17 +36,9 @@
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
 ; The main process stores the last seen nonce in SQLite (sync_meta.installNonce)
 ; and clears session storages when the file's nonce differs or is missing.
-; customInstall runs for every install (fresh + manual upgrade + auto-update).
-; We must NOT overwrite an existing install-nonce on upgrade, otherwise a
-; manual in-place upgrade (user double-clicks new exe, not launched with
-; --updated) would mint a fresh nonce and trigger a false fresh-install clear.
-; Electron-builder's ${isUpdated} is only true when launched with --updated
-; (auto-updater path), so we use file-existence instead: preserve if present,
-; mint only if missing. This correctly handles:
-;   fresh install (no file) -> mint
-;   manual upgrade (file exists, old GUID) -> preserve
-;   auto-update (file exists, ${isUpdated} true) -> preserve
-;   legacy pre-nonce upgrade (no file, old DB) -> mint (app-level will preserve login via storedNonce null)
+; Uses FileExists check (not ${isUpdated} alone) so manual in-place upgrades
+; (user runs new exe directly) also preserve the existing nonce. ${isUpdated}
+; is only true for auto-updater's --updated launches.
 !macro customInstall
   SetShellVarContext current
   CreateDirectory "$APPDATA\DKS"
@@ -54,9 +46,11 @@
     DetailPrint "DKS: preserving existing install nonce (upgrade)"
   ${Else}
     DetailPrint "DKS: creating fresh install nonce"
-    System::Call 'ole32::CoCreateGuid(g .s)'
-    Pop $0
-    System::Call 'ole32::StringFromGUID2(g s, t .r1, i 40)'
+    ; Generate a GUID via ole32; fall back to tick count if unavailable.
+    ; The GUID text is written verbatim to $APPDATA\DKS\install-nonce .
+    System::Call 'ole32::CoCreateGuid(g .r0)'
+    Pop $2
+    System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
     Pop $2
     ${If} $1 == ""
       System::Call 'kernel32::GetTickCount() i.r1'
@@ -76,11 +70,14 @@
 
     ; Tray Exit must be used before uninstall — a live DKS process holds
     ; Local Storage\leveldb files open, so RMDir would be incomplete and the
-    ; next reinstall would auto-login.
-    nsProcess::FindProcess "DKS.exe"
-    Pop $R0
-    ${If} $R0 == 0
-      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\n$\nThe uninstaller must not remove session data while the app is running."
+    ; next reinstall would auto-login. Use built-in Windows tasklist via nsExec
+    ; (available in electron-builder's NSIS) — no external nsProcess plugin needed.
+    nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | findstr /B /I /C:"\"DKS.exe\""'
+    Pop $0
+    Pop $1
+    ; findstr returns 0 when DKS.exe is found in tasklist output
+    ${If} $0 == 0
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running."
       Abort
     ${EndIf}
 
