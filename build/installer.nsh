@@ -81,7 +81,7 @@
 
     ${If} ${FileExists} "$APPDATA\DKS\running.lock"
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "ABORT: DKS running.lock exists$"
+      FileWrite $R0 "ABORT: DKS running.lock exists$\r$\n"
       FileClose $R0
       Abort
     ${EndIf}
