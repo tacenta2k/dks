@@ -44,38 +44,55 @@
 
 !include "LogicLib.nsh"
 
-Var /GLOBAL isFreshInstall
-
-; Early detection: runs in .onInit after initMultiUser has set
-; $hasPerUserInstallation / $hasPerMachineInstallation.
-; Determines if this is a genuine fresh install vs upgrade.
-;   isUpdated == true → automatic update (electron-updater --updated) → not fresh
-;   hasPer* == 1 → existing installation (manual in-place upgrade) → not fresh
-;   otherwise → genuine fresh (first install or after genuine uninstall) → fresh
-!macro customInit
-  StrCpy $isFreshInstall "0"
-  ${If} ${isUpdated}
-    DetailPrint "DKS: customInit — isUpdated=true (auto-update) → not fresh"
-  ${ElseIf} $hasPerUserInstallation == "1"
-    DetailPrint "DKS: customInit — existing per-user install detected → not fresh (manual in-place upgrade)"
-  ${ElseIf} $hasPerMachineInstallation == "1"
-    DetailPrint "DKS: customInit — existing per-machine install detected → not fresh (manual in-place upgrade)"
-  ${Else}
-    StrCpy $isFreshInstall "1"
-    DetailPrint "DKS: customInit — no existing install detected → genuine fresh install (will create session-reset-required)"
-  ${EndIf}
-!macroend
-
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
-; For genuine fresh installs (isFreshInstall=1) also create a one-shot
-; session-reset-required marker that tells the app to clear session on next launch.
-; For upgrades (isFreshInstall=0): preserve existing nonce, or for legacy
-; 0.1.4→0.1.5 (no nonce file but existing install) mint a nonce WITHOUT marker
-; to migrate without logging out. Never infer fresh solely from FileExists.
+; For genuine fresh installs also create a one-shot session-reset-required
+; marker that tells the app to clear session on next launch.
+; For upgrades: preserve existing nonce, or for legacy 0.1.4→0.1.5 (no nonce
+; file but existing install) mint a nonce WITHOUT marker to migrate without
+; logging out. Detection:
+;   - Auto-update: ${isUpdated} is true when electron-updater launches the
+;     installer with --updated; in that case the old installer already ran
+;     its uninstaller with ${isUpdated}=true and did NOT delete session, and
+;     the new installer's ${FileExists} check will find the preserved nonce.
+;   - Manual in-place upgrade: user runs new installer over existing install;
+;     $INSTDIR\DKS.exe exists and/or nonce file exists -> preserve
+;   - Legacy upgrade: nonce file missing but $INSTDIR\DKS.exe exists -> mint without marker
+;   - Genuine fresh: neither nonce nor existing DKS.exe -> mint with marker
 !macro customInstall
   SetShellVarContext current
   CreateDirectory "$APPDATA\DKS"
-  ${If} $isFreshInstall == "1"
+  ; If nonce file already exists, this is an upgrade (auto or manual) — preserve it
+  ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
+    DetailPrint "DKS: preserving existing install nonce (upgrade)"
+    Delete "$APPDATA\DKS\session-reset-required"
+  ${ElseIf} ${FileExists} "$INSTDIR\DKS.exe"
+    ; Legacy upgrade: existing install but no nonce (0.1.4→0.1.5) — mint without marker to preserve login
+    DetailPrint "DKS: legacy upgrade detected (existing DKS.exe without nonce) — creating nonce without session reset"
+    System::Call 'ole32::CoCreateGuid(g .r0)'
+    System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
+    ${If} $1 == ""
+      System::Call 'kernel32::GetTickCount() i.r1'
+    ${EndIf}
+    FileOpen $0 "$APPDATA\DKS\install-nonce" w
+    ${If} $0 != ""
+      FileWrite $0 "$1"
+      FileClose $0
+    ${EndIf}
+    FileOpen $0 "$APPDATA\DKS\install-nonce" r
+    ${If} $0 != ""
+      FileRead $0 $2
+      FileClose $0
+      ${If} $2 == ""
+        DetailPrint "DKS: ERROR legacy install-nonce is empty after write"
+      ${Else}
+        DetailPrint "DKS: legacy install-nonce created successfully (no reset marker — login preserved)"
+      ${EndIf}
+    ${Else}
+      DetailPrint "DKS: ERROR legacy install-nonce file missing after write"
+    ${EndIf}
+    Delete "$APPDATA\DKS\session-reset-required"
+  ${Else}
+    ; Genuine fresh install (first install or after genuine uninstall) — mint with marker
     DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker"
     System::Call 'ole32::CoCreateGuid(g .r0)'
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
@@ -106,37 +123,6 @@ Var /GLOBAL isFreshInstall
       FileClose $0
       DetailPrint "DKS: session-reset-required marker created"
     ${EndIf}
-  ${Else}
-    ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
-      DetailPrint "DKS: preserving existing install nonce (upgrade)"
-      ; Ensure no stale marker lingers from a prior crash
-      Delete "$APPDATA\DKS\session-reset-required"
-    ${Else}
-      DetailPrint "DKS: legacy upgrade detected (no nonce, but existing install) — creating nonce without session reset"
-      System::Call 'ole32::CoCreateGuid(g .r0)'
-      System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
-      ${If} $1 == ""
-        System::Call 'kernel32::GetTickCount() i.r1'
-      ${EndIf}
-      FileOpen $0 "$APPDATA\DKS\install-nonce" w
-      ${If} $0 != ""
-        FileWrite $0 "$1"
-        FileClose $0
-      ${EndIf}
-      FileOpen $0 "$APPDATA\DKS\install-nonce" r
-      ${If} $0 != ""
-        FileRead $0 $2
-        FileClose $0
-        ${If} $2 == ""
-          DetailPrint "DKS: ERROR legacy install-nonce is empty after write"
-        ${Else}
-          DetailPrint "DKS: legacy install-nonce created successfully (no reset marker — login preserved)"
-        ${EndIf}
-      ${Else}
-        DetailPrint "DKS: ERROR legacy install-nonce file missing after write"
-      ${EndIf}
-      Delete "$APPDATA\DKS\session-reset-required"
-    ${EndIf}
   ${EndIf}
 !macroend
 
@@ -152,7 +138,7 @@ Var /GLOBAL isFreshInstall
     ; If DKS.exe is running → abort (interactive) / silent Abort
     ; If no DKS.exe but lock exists → stale, delete and continue
     ; If neither → continue
-    ; Handle tasklist failure explicitly: if nsExec fails (Pop $0 error), treat as check failure and abort if lock exists to be safe, or log and continue? We use explicit branch.
+    ; Handle tasklist/nsExec failure explicitly: if nsExec returns error/empty, fall back to lock check
     nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" 2>nul | findstr /I "DKS.exe"'
     Pop $0  ; exit code / exec result
     Pop $1  ; output
