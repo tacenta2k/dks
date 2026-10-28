@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
@@ -7,8 +7,10 @@ import {
   enforceSessionIsolation,
   generateInstallNonce,
   installerNoncePath,
+  resetMarkerPath,
   readInstallerNonce,
   writeInstallerNonce,
+  hasResetMarker,
 } from '../electron/main/install-nonce';
 import { createSqliteStore } from '../electron/main/sqlite';
 
@@ -24,7 +26,6 @@ function makeFakeStore(initial?: Record<string, string>) {
     setInstallNonce: (v: string) => {
       if (typeof v === 'string' && v.trim()) map.set('installNonce', v.trim());
     },
-    // Helpers to simulate outbox survival (not real DB, but verified via separate sqlite test elsewhere)
     enqueueOutbox: (..._args: unknown[]) => { outboxCount += 1; },
     getPendingOutboxCount: () => outboxCount,
     listEntries: () => [] as unknown[],
@@ -32,7 +33,6 @@ function makeFakeStore(initial?: Record<string, string>) {
 }
 
 function makeStore() {
-  // Prefer real store when native module is available; fall back to fake for CI without build.
   try {
     return createSqliteStore({ filename: ':memory:' }) as unknown as ReturnType<typeof makeFakeStore>;
   } catch {
@@ -42,14 +42,8 @@ function makeStore() {
 
 describe('install-nonce — file helpers', () => {
   let dir: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dks-nonce-'));
-  });
-
-  afterEach(() => {
-    try { rmSync(dir, { recursive: true, force: true }); } catch {}
-  });
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dks-nonce-')); });
+  afterEach(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
 
   it('writes and reads the nonce file round-trip', () => {
     const nonce = generateInstallNonce();
@@ -68,242 +62,194 @@ describe('install-nonce — file helpers', () => {
     expect(a).not.toBe(b);
     expect(a.length).toBeGreaterThan(10);
   });
-});
 
-describe('install-nonce — SQLite persistence (fake + real when available)', () => {
-  it('stores and retrieves installNonce without touching other keys', () => {
-    const store = makeFakeStore();
-    expect(store.getInstallNonce()).toBeNull();
-
-    const nonce = 'test-nonce-123';
-    store.setInstallNonce(nonce);
-    expect(store.getInstallNonce()).toBe(nonce);
-
-    // Changing nonce does not affect outbox counts.
-    store.enqueueOutbox({} as never);
-    expect(store.getPendingOutboxCount()).toBe(1);
-    expect(store.getInstallNonce()).toBe(nonce);
-
-    store.setInstallNonce('nonce-2');
-    expect(store.getInstallNonce()).toBe('nonce-2');
-    expect(store.getPendingOutboxCount()).toBe(1); // outbox survives nonce change
-  });
-
-  it('ignores empty nonce writes', () => {
-    const store = makeFakeStore();
-    store.setInstallNonce('initial');
-    store.setInstallNonce('');
-    store.setInstallNonce('   ');
-    expect(store.getInstallNonce()).toBe('initial');
-  });
-
-  it('real SQLite store round-trips when native module is available', () => {
-    let real: ReturnType<typeof makeStore> | undefined;
-    try {
-      real = createSqliteStore({ filename: ':memory:' }) as unknown as ReturnType<typeof makeFakeStore>;
-    } catch {
-      return; // Native not built in this runner — fake already verified above.
-    }
-    expect(real.getInstallNonce()).toBeNull();
-    real.setInstallNonce('real-nonce');
-    expect(real.getInstallNonce()).toBe('real-nonce');
-    // Prove outbox and sqlite file are separate: we can still use store APIs.
-    expect(real.getPendingOutboxCount()).toBe(0);
-    try { (real as unknown as { close: () => void }).close(); } catch {}
+  it('detects session-reset-required marker', () => {
+    expect(hasResetMarker(dir)).toBe(false);
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    expect(hasResetMarker(dir)).toBe(true);
+    rmSync(resetMarkerPath(dir), { force: true });
+    expect(hasResetMarker(dir)).toBe(false);
   });
 });
 
-describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
+describe('enforceSessionIsolation — login matrix A–F', () => {
   let dir: string;
-
-  beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), 'dks-isolation-'));
-  });
-
-  afterEach(() => {
-    try { rmSync(dir, { recursive: true, force: true }); } catch {}
-  });
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dks-isolation-')); });
+  afterEach(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
 
   it('skips entirely when !app.isPackaged (dev builds)', async () => {
     const store = makeStore();
     const session = { clearStorageData: vi.fn(async () => undefined) };
-
-    await enforceSessionIsolation({
-      isPackaged: false,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-
+    await enforceSessionIsolation({ isPackaged: false, userDataPath: dir, store, session: session as unknown as never });
     expect(session.clearStorageData).not.toHaveBeenCalled();
-    expect(store.getInstallNonce()).toBeNull(); // no nonce stored
-    tryClose(store);
-  });
-
-  it('on first packaged launch creates a nonce and clears session once (stored==null → one-time clear, fail-closed)', async () => {
-    // Requirement: uninstall 0.1.4 (no nonce) → install 0.1.5 → file present + stored null → MUST clear
-    // to kill the auto-login bug. First-ever launch also clears (no-op on empty profile) — one-time re-login accepted.
-    const store = makeStore();
-    const session = { clearStorageData: vi.fn(async () => undefined) };
-
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-
-    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
-    expect(store.getInstallNonce()).not.toBeNull();
-    expect(readInstallerNonce(dir)).not.toBeNull();
-    expect(readInstallerNonce(dir)).toBe(store.getInstallNonce());
-    tryClose(store);
-  });
-
-  it('stored==null + file present → clear (uninstall 0.1.4 → install 0.1.5 case)', async () => {
-    const store = makeStore();
-    const freshNonce = 'fresh-0.1.5-nonce';
-    writeInstallerNonce(dir, freshNonce);
-    expect(store.getInstallNonce()).toBeNull(); // 0.1.4 DB had no nonce
-    const session = { clearStorageData: vi.fn(async () => undefined) };
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
-    expect(store.getInstallNonce()).toBe(freshNonce);
-    tryClose(store);
-  });
-
-  it('stored==null + file missing → clear+mint (first launch / empty file case)', async () => {
-    const store = makeStore();
     expect(store.getInstallNonce()).toBeNull();
-    expect(readInstallerNonce(dir)).toBeNull(); // no file
+    tryClose(store);
+  });
+
+  it('A. quit/reopen — same nonce preserves login (no clear)', async () => {
+    const store = makeStore();
+    const nonce = 'matching-nonce-A';
+    writeInstallerNonce(dir, nonce);
+    store.setInstallNonce(nonce);
     const session = { clearStorageData: vi.fn(async () => undefined) };
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    const result = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(result).toBe(true);
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(hasResetMarker(dir)).toBe(false);
+    tryClose(store);
+  });
+
+  it('B. automatic update — preserves nonce/session (isUpdated path, marker absent)', async () => {
+    const store = makeStore();
+    const nonce = 'auto-update-nonce';
+    writeInstallerNonce(dir, nonce);
+    store.setInstallNonce(nonce);
+    // Simulate auto-update: installer preserved nonce, no marker
+    expect(hasResetMarker(dir)).toBe(false);
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(store.getInstallNonce()).toBe(nonce);
+    tryClose(store);
+  });
+
+  it('C. manual in-place upgrade — preserves nonce/session (existing install, preserved file)', async () => {
+    const store = makeStore();
+    const nonce = 'manual-inplace-nonce';
+    writeInstallerNonce(dir, nonce);
+    store.setInstallNonce(nonce);
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    tryClose(store);
+  });
+
+  it('D. legacy 0.1.4 → 0.1.5 in-place — stored null + installer nonce present, no marker → preserve and store without clearing', async () => {
+    const store = makeStore();
+    const legacyNonce = 'fresh-0.1.5-nonce-for-legacy';
+    writeInstallerNonce(dir, legacyNonce);
+    expect(store.getInstallNonce()).toBeNull();
+    expect(hasResetMarker(dir)).toBe(false);
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    const result = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(result).toBe(true);
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(store.getInstallNonce()).toBe(legacyNonce);
+    expect(hasResetMarker(dir)).toBe(false);
+    tryClose(store);
+  });
+
+  it('D2. legacy with no file and no stored nonce — mints without clearing', async () => {
+    const store = makeStore();
+    expect(readInstallerNonce(dir)).toBeNull();
+    expect(store.getInstallNonce()).toBeNull();
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).not.toHaveBeenCalled();
     const minted = readInstallerNonce(dir);
     expect(minted).not.toBeNull();
     expect(store.getInstallNonce()).toBe(minted);
+    expect(hasResetMarker(dir)).toBe(false);
     tryClose(store);
   });
 
-  it('when installer nonce matches stored nonce, does not clear', async () => {
+  it('E. genuine uninstall/reinstall — marker present + new nonce → clear session, store new nonce, remove marker, sqlite/outbox intact', async () => {
     const store = makeStore();
-    const nonce = 'matching-nonce';
+    // Simulate prior install's DB with old nonce and outbox surviving uninstall
+    store.setInstallNonce('old-nonce-before-uninstall');
+    store.enqueueOutbox({} as never);
+    expect(store.getPendingOutboxCount()).toBe(1);
+    // Uninstall deletes session files + nonce but preserves sqlite — now reinstall creates new nonce + marker
+    const newNonce = 'reinstall-new-nonce-E';
+    writeInstallerNonce(dir, newNonce);
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    expect(hasResetMarker(dir)).toBe(true);
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    const result = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(result).toBe(true);
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    const arg = (session.clearStorageData as any).mock.calls[0][0] as { storages: string[] };
+    expect(arg.storages).toEqual(expect.arrayContaining(['cookies', 'localstorage', 'indexdb']));
+    expect(store.getInstallNonce()).toBe(newNonce);
+    expect(hasResetMarker(dir)).toBe(false);
+    expect(store.getPendingOutboxCount()).toBe(1); // outbox survives
+    expect(store.listEntries()).toEqual([]);
+    tryClose(store);
+  });
+
+  it('F. first install on clean PC — marker present (genuine fresh) → clear once (harmless on empty) and store', async () => {
+    const store = makeStore();
+    const firstNonce = 'first-install-nonce-F';
+    writeInstallerNonce(dir, firstNonce);
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(store.getInstallNonce()).toBe(firstNonce);
+    expect(hasResetMarker(dir)).toBe(false);
+    tryClose(store);
+  });
+
+  it('1. stored null + explicit in-place upgrade (legacy) → preserve session and store nonce', async () => {
+    const store = makeStore();
+    const inplaceNonce = 'inplace-upgrade-nonce-1';
+    writeInstallerNonce(dir, inplaceNonce);
+    expect(store.getInstallNonce()).toBeNull();
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(store.getInstallNonce()).toBe(inplaceNonce);
+    tryClose(store);
+  });
+
+  it('2. stored null + genuine fresh-install marker → clear once and store', async () => {
+    const store = makeStore();
+    const freshNonce = 'fresh-install-nonce-2';
+    writeInstallerNonce(dir, freshNonce);
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(store.getInstallNonce()).toBe(freshNonce);
+    expect(hasResetMarker(dir)).toBe(false);
+    tryClose(store);
+  });
+
+  it('3. same nonce on quit/reopen → preserve', async () => {
+    const store = makeStore();
+    const nonce = 'same-nonce-3';
     writeInstallerNonce(dir, nonce);
     store.setInstallNonce(nonce);
-
     const session = { clearStorageData: vi.fn(async () => undefined) };
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
     expect(session.clearStorageData).not.toHaveBeenCalled();
     tryClose(store);
   });
 
-  it('when installer nonce differs from stored nonce, clears the four storages and persists new nonce', async () => {
+  it('6. uninstall/reinstall → clear session, new nonce, SQLite/outbox intact', async () => {
     const store = makeStore();
-    store.setInstallNonce('old-nonce');
-    const newNonce = 'fresh-install-nonce';
+    store.setInstallNonce('pre-uninstall-nonce');
+    // Simulate sqlite rows and outbox that must survive
+    store.enqueueOutbox({ payload: { name: 'keep' } } as never);
+    const oldCount = store.getPendingOutboxCount();
+    const newNonce = 'post-uninstall-nonce-6';
     writeInstallerNonce(dir, newNonce);
-
-    // Simulate outbox rows that must survive the wipe.
-    store.enqueueOutbox({
-      idempotencyKey: 'k-outbox',
-      operation: 'create',
-      entityType: 'entries',
-      entityId: 'e-outbox',
-      payload: { id: 'e-outbox', data: { name: 'keep me' } },
-    });
-    expect(store.getPendingOutboxCount()).toBe(1);
-
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
     const session = { clearStorageData: vi.fn(async () => undefined) };
-    const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
-
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-      logger: logger as unknown as never,
-    });
-
-    // Must have called clearStorageData with documented Electron 34 options (including indexdb).
-    // Session Storage is not a valid clearStorageData storage; it is removed via fs separately.
-    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
-    const arg = (session.clearStorageData as any).mock.calls[0][0] as { storages: string[] };
-    expect(arg.storages).toEqual(expect.arrayContaining(['localstorage', 'cookies']));
-    expect(arg.storages).toEqual(expect.arrayContaining(['cookies', 'localstorage', 'indexdb']));
-    expect(arg.storages).not.toContain('sessionstorage');
-    expect(arg.storages).not.toContain('indexeddb');
-
-    // New nonce persisted; outbox untouched.
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).toHaveBeenCalled();
     expect(store.getInstallNonce()).toBe(newNonce);
-    expect(store.getPendingOutboxCount()).toBe(1);
-
-    // dks-cache.sqlite was never deleted — we can still read entries (none yet) and the store is open.
-    expect(store.listEntries()).toEqual([]);
-
+    expect(store.getPendingOutboxCount()).toBe(oldCount);
+    expect(hasResetMarker(dir)).toBe(false);
     tryClose(store);
   });
 
-  it('when stored nonce is missing (reinstall after manual DB delete is not the case — DB exists but nonce cleared), clears and stores', async () => {
+  it('7. cleanup failure → renderer does not open and reset marker remains', async () => {
     const store = makeStore();
-    // No stored nonce yet, but installer nonce exists (fresh install after uninstall left DB).
-    const freshNonce = 'reinstall-nonce';
-    writeInstallerNonce(dir, freshNonce);
-    expect(store.getInstallNonce()).toBeNull();
-
-    const session = { clearStorageData: vi.fn(async () => undefined) };
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-
-    expect(session.clearStorageData).toHaveBeenCalled();
-    expect(store.getInstallNonce()).toBe(freshNonce);
-    tryClose(store);
-  });
-
-  it('when installer nonce file is missing but DB has a nonce (old installer), mints new nonce, clears, and recovers', async () => {
-    const store = makeStore();
-    store.setInstallNonce('old-stored');
-    // No file on disk.
-
-    const session = { clearStorageData: vi.fn(async () => undefined) };
-    await enforceSessionIsolation({
-      isPackaged: true,
-      userDataPath: dir,
-      store,
-      session: session as unknown as never,
-    });
-
-    expect(session.clearStorageData).toHaveBeenCalled();
-    const newFileNonce = readInstallerNonce(dir);
-    expect(newFileNonce).not.toBeNull();
-    expect(newFileNonce).toBe(store.getInstallNonce());
-    expect(newFileNonce).not.toBe('old-stored');
-    tryClose(store);
-  });
-
-  it('never silently resumes old session if cleanup fails — does not record new nonce', async () => {
-    const store = makeFakeStore();
-    store.setInstallNonce('old-nonce');
-    writeInstallerNonce(dir, 'new-nonce');
+    store.setInstallNonce('old-nonce-7');
+    const newNonce = 'new-nonce-7';
+    writeInstallerNonce(dir, newNonce);
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
     const failingSession = { clearStorageData: vi.fn(async () => { throw new Error('EBUSY: leveldb locked'); }) };
     const logger = { info: vi.fn(), warn: vi.fn(), error: vi.fn() };
     const result = await enforceSessionIsolation({
@@ -315,10 +261,34 @@ describe('enforceSessionIsolation — Bug 1 second layer (app-level)', () => {
     });
     expect(result).toBe(false);
     expect(failingSession.clearStorageData).toHaveBeenCalled();
-    // New nonce must NOT be recorded so next launch retries
-    expect(store.getInstallNonce()).toBe('old-nonce');
+    expect(store.getInstallNonce()).toBe('old-nonce-7'); // not updated
+    expect(hasResetMarker(dir)).toBe(true); // marker retained for retry
+    expect(readInstallerNonce(dir)).toBe(newNonce); // file still has new nonce, mismatch persists for retry
     expect(logger.error).toHaveBeenCalled();
-    // Installer nonce file still has new-nonce (written by installer), but DB still old — mismatch persists for retry
-    expect(readInstallerNonce(dir)).toBe('new-nonce');
+  });
+
+  it('when installer nonce differs without marker — unexpected mismatch → clear fail-closed', async () => {
+    const store = makeStore();
+    store.setInstallNonce('old-nonce-mismatch');
+    writeInstallerNonce(dir, 'new-nonce-mismatch');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    expect(session.clearStorageData).toHaveBeenCalled();
+    expect(store.getInstallNonce()).toBe('new-nonce-mismatch');
+    tryClose(store);
+  });
+
+  it('uses documented Electron 34 storages (cookies, localstorage, indexdb) — no sessionstorage/indexeddb', async () => {
+    const store = makeStore();
+    store.setInstallNonce('old-nonce');
+    writeInstallerNonce(dir, 'new-nonce-storage-check');
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as unknown as never });
+    const arg = (session.clearStorageData as any).mock.calls[0][0];
+    expect(arg.storages).toEqual(expect.arrayContaining(['cookies', 'localstorage', 'indexdb']));
+    expect(arg.storages).not.toContain('sessionstorage');
+    expect(arg.storages).not.toContain('indexeddb');
+    tryClose(store);
   });
 });

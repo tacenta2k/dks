@@ -102,30 +102,101 @@ jobs:
           Get-ChildItem release | Format-Table Name, Length
           Write-Host "LOG: electron-builder --win --publish never succeeded"
 
-      - name: Verify app-update.yml has no publisherName (unsigned v0.1.5)
+      - name: Verify packaged app-update.yml has no publisherName (unsigned v0.1.5)
         shell: pwsh
         run: |
           Write-Host "Checking electron-builder.yml does not declare publisherName"
           $cfg = Get-Content -Raw "electron-builder.yml"
-          if ($cfg -match "^\s*publisherName\s*:") { throw "electron-builder.yml must NOT contain publisherName for unsigned build (would cause 100% download verification failure)" }
+          if ($cfg -match "^\\s*publisherName\\s*:") { throw "electron-builder.yml must NOT contain publisherName for unsigned build (would cause 100% download verification failure)" }
           Write-Host "electron-builder.yml ok — no publisherName key"
-          $ymls = @("release/latest.yml") + @(Get-ChildItem "release" -Filter "*.yml" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }) + @(Get-ChildItem "dist" -Recurse -Filter "app-update.yml" -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })
+          $candidates = @(
+            "release/win-unpacked/resources/app-update.yml",
+            "dist/win-unpacked/resources/app-update.yml"
+          )
           $found = $false
-          foreach ($ymlPath in $ymls) {
-            if (Test-Path $ymlPath) {
+          foreach ($cand in $candidates) {
+            if (Test-Path $cand) {
               $found = $true
-              Write-Host "--- $ymlPath ---"
-              $content = Get-Content -Raw $ymlPath
+              Write-Host "--- $cand (actual packaged app-update.yml) ---"
+              $content = Get-Content -Raw $cand
               Write-Host $content
-              if ($content -match "publisherName") { throw "$ymlPath must NOT contain publisherName for unsigned build — installer is unsigned and verification would fail at 100% download" }
+              if ($content -match "publisherName") { throw "$cand must NOT contain publisherName for unsigned build — installer is unsigned and verification would fail at 100% download" }
+              if ($content -notmatch "owner:\\s*tacenta2k") { Write-Host "WARNING: owner not tacenta2k in $cand" }
+              if ($content -notmatch "repo:\\s*dks") { Write-Host "WARNING: repo not dks in $cand" }
+              Write-Host "Confirmed $cand has no publisherName and has owner/repo (sanitized)"
             }
           }
           if (-not $found) {
-            Write-Host "No yml found yet — listing release/"
-            Get-ChildItem release -ErrorAction SilentlyContinue | Format-Table Name, Length
+            Write-Host "win-unpacked not found — trying to extract from installer via 7z"
+            $exe = Get-ChildItem "release/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($exe -and (Get-Command 7z -ErrorAction SilentlyContinue)) {
+              $tmp = Join-Path $env:RUNNER_TEMP "dks-extract-app-update"
+              New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+              & 7z x "$exe" "-o$tmp" "resources/app-update.yml" -y | Out-Null
+              $extracted = Join-Path $tmp "resources/app-update.yml"
+              if (Test-Path $extracted) {
+                $found = $true
+                Write-Host "--- $extracted (extracted from installer) ---"
+                $content = Get-Content -Raw $extracted
+                Write-Host $content
+                if ($content -match "publisherName") { throw "extracted resources/app-update.yml must NOT contain publisherName for unsigned build" }
+                Write-Host "Confirmed extracted resources/app-update.yml has no publisherName"
+              } else {
+                Write-Host "7z extraction did not produce $extracted — listing tmp"
+                Get-ChildItem $tmp -Recurse | Format-Table FullName
+              }
+            } else {
+              Write-Host "No installer or 7z not available — checking release/*.yml as fallback"
+              Get-ChildItem "release" -Filter "*.yml" | ForEach-Object { Write-Host "Found $($_.FullName)"; Get-Content $_.FullName | Write-Host }
+            }
           }
-          Write-Host "app-update.yml verification passed — no publisherName"
-          Write-Host "Document: proper code-signing is the future stronger fix; v0.1.5 ships unsigned with differential download disabled."
+          if (-not $found) { throw "No packaged app-update.yml found to verify — build may have failed to produce win-unpacked/resources/app-update.yml" }
+          Write-Host "app-update.yml verification passed — no publisherName, proper code-signing is future stronger fix; v0.1.5 ships unsigned with disableDifferentialDownload=true"
+
+      - name: Investigate old releases (v0.1.3 app-update.yml and v0.1.4 Authenticode) — no mutation
+        shell: pwsh
+        run: |
+          Write-Host "=== Investigating historical updater failure (read-only, no mutation) ==="
+          try {
+            $oldDir = Join-Path $env:RUNNER_TEMP "dks-old-investigate"
+            New-Item -ItemType Directory -Force -Path $oldDir | Out-Null
+            Write-Host "Downloading v0.1.3 installer via gh release download"
+            & gh release download v0.1.3 --repo tacenta2k/dks --pattern "*.exe" --dir $oldDir --clobber 2>&1 | Write-Host
+            $oldExe = Get-ChildItem "$oldDir/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($oldExe) {
+              Write-Host "Found v0.1.3 installer: $oldExe (size $((Get-Item $oldExe).Length))"
+              if (Get-Command 7z -ErrorAction SilentlyContinue) {
+                $extractOld = Join-Path $oldDir "extract-v013"
+                New-Item -ItemType Directory -Force -Path $extractOld | Out-Null
+                & 7z x "$oldExe" "-o$extractOld" "resources/app-update.yml" -y 2>&1 | Write-Host
+                $oldYml = Join-Path $extractOld "resources/app-update.yml"
+                if (Test-Path $oldYml) {
+                  $ymlContent = Get-Content -Raw $oldYml
+                  Write-Host "--- v0.1.3 packaged resources/app-update.yml ---"
+                  Write-Host $ymlContent
+                  if ($ymlContent -match "publisherName:\\s*\n?\\s*-\\s*DKS") { Write-Host "CONFIRMED: v0.1.3 app-update.yml declared publisherName: DKS" }
+                  elseif ($ymlContent -match "publisherName") { Write-Host "v0.1.3 app-update.yml contains publisherName" }
+                  else { Write-Host "v0.1.3 app-update.yml has no publisherName" }
+                }
+              }
+            } else { Write-Host "v0.1.3 installer not downloaded" }
+          } catch { Write-Host "v0.1.3 investigate error: $_" }
+          try {
+            $v14Dir = Join-Path $env:RUNNER_TEMP "dks-v014-check"
+            New-Item -ItemType Directory -Force -Path $v14Dir | Out-Null
+            & gh release download v0.1.4 --repo tacenta2k/dks --pattern "*.exe" --dir $v14Dir --clobber 2>&1 | Write-Host
+            $v14Exe = Get-ChildItem "$v14Dir/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+            if ($v14Exe) {
+              Write-Host "Found v0.1.4 installer: $v14Exe"
+              $sig = Get-AuthenticodeSignature -FilePath $v14Exe
+              Write-Host "v0.1.4 Authenticode Status: $($sig.Status)"
+              Write-Host "v0.1.4 StatusMessage: $($sig.StatusMessage)"
+              if ($sig.Status -eq "NotSigned") { Write-Host "CONFIRMED: public v0.1.4 installer is NotSigned (unsigned)" }
+            }
+          } catch { Write-Host "v0.1.4 Authenticode check error: $_" }
+          Write-Host "In electron-updater, when app-update.yml contains publisherName DKS, the updater verifies the downloaded installer's Authenticode signature against that publisher. If remote installer is NotSigned (as v0.1.4 was), verification fails at 100%. Historical v0.1.3 expected DKS + v0.1.4 NotSigned = strong evidence. Original hidden error was not captured, so diagnosis is based on packaged config + updater behavior, not original error log."
+          Write-Host "Do not claim updater fully fixed until real Windows 0.1.5->0.1.6 succeeds and About shows 0.1.6"
+
 
       - name: NSIS runtime proof — silent install/uninstall lifecycle (quoted in report)
         timeout-minutes: 40
@@ -380,29 +451,48 @@ jobs:
           # Abort path — that path requires manual verification (see below).
           Write-Host "--- e. Stale running.lock (no DKS.exe) -> uninstall must proceed ---"
           "stale-lock-pid-12345" | Out-File "$base\running.lock" -Encoding ascii
-          Write-Host "Created stale running.lock at $base\running.lock (simulates crash leftover)"
-          $staleExists = Test-Path "$base\running.lock"
-          Write-Host "Stale lock exists=$staleExists"
+          Write-Host "Created stale running.lock at $base\\running.lock (simulates crash leftover)"
+          $staleLockPath = "$base\\running.lock"
+          if (-not (Test-Path $staleLockPath)) { throw "e. FAIL: expected stale running.lock to exist before uninstall at $staleLockPath — test setup failed" }
+          Write-Host "1. Stale running.lock exists before uninstall: True (verified at $staleLockPath)"
+          $taskCheckPre = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+          if ($taskCheckPre -match "DKS.exe") { throw "e. FAIL: DKS.exe is running before stale uninstall — expected no process (tasklist: $taskCheckPre)" }
+          Write-Host "2. No DKS.exe running before uninstall: True (tasklist check passed)"
           Assert-NoDKSRunning "pre-stale-e" | Out-Null
-          $staleUninst = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          $staleUninst = Get-ChildItem "$installDir\\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
           if (-not $staleUninst) { throw "e. FAIL: uninstaller not found for stale test at $installDir" }
           Write-Host "Running stale-lock uninstall: $staleUninst /S (tasklist should show no DKS.exe, installer should delete stale lock)"
           $procStale = Invoke-HangProof -FilePath "$staleUninst" -ArgumentList "/S" -Label "e. stale lock uninstall"
           $staleCode = $procStale.ExitCode
-          Write-Host "Stale uninstall exit code: $staleCode"
+          Write-Host "3. Silent uninstall executed with timeout (exit code: $staleCode)"
           if ($staleCode -ne 0) { throw "e. FAIL: stale-lock uninstall failed with $staleCode — uninstall must proceed when no DKS.exe is running even if lock file exists" }
           Start-Sleep -Seconds 5
-          $checksStale = @("$base\Local Storage\leveldb\x","$base\Session Storage\x","$base\IndexedDB\x","$base\Cookies","$base\Network\Cookies","$base\install-nonce")
+          $labelMap = @(
+            @{ path="$base\\Local Storage\\leveldb\\x"; label="Local Storage sentinel" },
+            @{ path="$base\\Session Storage\\x"; label="Session Storage sentinel" },
+            @{ path="$base\\IndexedDB\\x"; label="IndexedDB sentinel" },
+            @{ path="$base\\Cookies"; label="Cookies sentinel" },
+            @{ path="$base\\Network\\Cookies"; label="Network Cookies sentinel" },
+            @{ path="$base\\install-nonce"; label="install-nonce" },
+            @{ path="$staleLockPath"; label="running.lock" }
+          )
           $failedStale = @()
-          foreach ($pp in $checksStale) { if (Test-Path $pp) { $failedStale += $pp } }
-          if ($failedStale.Count -gt 0) { throw "e. FAIL: stale-lock uninstall did not clean sentinels: $($failedStale -join ', ') — even with stale lock, uninstall must delete session paths" }
-          Write-Host "e. Stale lock uninstall -> sentinels + nonce gone confirmed (stale lock did not block)"
+          foreach ($item in $labelMap) {
+            $exists = Test-Path $item.path
+            Write-Host "  $($item.label) exists=$exists ($($item.path))"
+            if ($exists) { $failedStale += "$($item.label) at $($item.path)" }
+          }
+          $hashAfterStale = (Get-FileHash "$base\\dks-cache.sqlite" -Algorithm SHA256 -ErrorAction SilentlyContinue).Hash
+          $hashOk = $hashAfterStale -eq $hashBefore
+          Write-Host "  dks-cache.sqlite hash unchanged=$hashOk (before $hashBefore after $hashAfterStale)"
+          if (-not $hashOk) { throw "e. FAIL: dks-cache.sqlite hash changed after stale uninstall: $hashBefore vs $hashAfterStale — sqlite must survive" }
+          if ($failedStale.Count -gt 0) { throw "e. FAIL: stale-lock uninstall did not clean expected paths: $($failedStale -join ', ') — even with stale lock, uninstall must delete session paths and marker" }
+          Write-Host "e. Stale lock hard-test PASSED — all sentinels, install-nonce, running.lock absent, sqlite intact"
           $staleLog = ""
-          foreach ($log in @("$env:TEMP\DKS-nsis-debug.txt","$env:TEMP\DKS-uninstall-debug.log","C:\Windows\Temp\DKS-nsis-debug.txt")) { if (Test-Path $log) { $staleLog += Get-Content $log -Raw; $staleLog += " | " } }
-          Write-Host "Stale NSIS log: $staleLog"
-          if ($staleLog -notmatch "Stale running.lock deleted") { Write-Host "::warning::e. expected 'Stale running.lock deleted' not found in NSIS log — check installer.nsh stale handling (tasklist/findstr)" }
-          else { Write-Host "e. Stale handling confirmed via NSIS log: Stale running.lock deleted" }
-          Write-Host "LOG: e. stale running.lock + no DKS.exe -> uninstall proceeded, sentinels deleted"
+          foreach ($log in @("$env:TEMP\\DKS-nsis-debug.txt","$env:TEMP\\DKS-uninstall-debug.log","C:\\Windows\\Temp\\DKS-nsis-debug.txt")) { if (Test-Path $log) { $staleLog += Get-Content $log -Raw; $staleLog += " | " } }
+          Write-Host "Stale NSIS log (sanitized): $staleLog"
+          if ($staleLog -match "Stale running.lock deleted") { Write-Host "e. Stale handling log confirmed: Stale running.lock deleted" } else { Write-Host "e. Note: Stale log message not found, but postconditions prove behavior (hard pass)" }
+          Write-Host "LOG: e. stale running.lock + no DKS.exe -> uninstall proceeded, all sentinels deleted, sqlite unchanged — hard assertion passed"
           # Reinstall for manual-path documentation (need valid install for final cleanup)
           Write-Host "Reinstalling for e-manual documentation state..."
           $procRe2 = Invoke-HangProof -FilePath "$installer" -ArgumentList "/S" -Label "e. reinstall for manual doc"

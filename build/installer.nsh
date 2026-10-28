@@ -34,28 +34,49 @@
 ;   2) App-level nonce guard in electron/main/install-nonce.ts: first layer —
 ;      on every packaged launch compares the install nonce written here (new
 ;      GUID on fresh install, preserved on update) against the last nonce
-;      stored in SQLite. On mismatch it calls session.defaultSession
-;      .clearStorageData({ storages: ['cookies','localstorage','indexdb'] })
-;      plus Session Storage fs cleanup, before loading the renderer. If
-;      cleanup fails it does NOT record the new nonce, so next launch retries
-;      and never silently resumes an old session.
+;      stored in SQLite, plus a one-shot session-reset-required marker for
+;      genuine fresh installs only. On genuine uninstall/reinstall the marker
+;      triggers a fail-closed clear of cookies/localstorage/indexdb + Session
+;      Storage before renderer loads. Legacy 0.1.4→0.1.5 migration (existing
+;      install without nonce) mints a nonce without clearing. See matrix A–F
+;      in install-nonce.ts for full behavior.
 ; Both layers skip when !app.isPackaged (dev builds).
 
 !include "LogicLib.nsh"
 
+Var /GLOBAL isFreshInstall
+
+; Early detection: runs in .onInit after initMultiUser has set
+; $hasPerUserInstallation / $hasPerMachineInstallation.
+; Determines if this is a genuine fresh install vs upgrade.
+;   isUpdated == true → automatic update (electron-updater --updated) → not fresh
+;   hasPer* == 1 → existing installation (manual in-place upgrade) → not fresh
+;   otherwise → genuine fresh (first install or after genuine uninstall) → fresh
+!macro customInit
+  StrCpy $isFreshInstall "0"
+  ${If} ${isUpdated}
+    DetailPrint "DKS: customInit — isUpdated=true (auto-update) → not fresh"
+  ${ElseIf} $hasPerUserInstallation == "1"
+    DetailPrint "DKS: customInit — existing per-user install detected → not fresh (manual in-place upgrade)"
+  ${ElseIf} $hasPerMachineInstallation == "1"
+    DetailPrint "DKS: customInit — existing per-machine install detected → not fresh (manual in-place upgrade)"
+  ${Else}
+    StrCpy $isFreshInstall "1"
+    DetailPrint "DKS: customInit — no existing install detected → genuine fresh install (will create session-reset-required)"
+  ${EndIf}
+!macroend
+
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
-; The main process stores the last seen nonce in SQLite (sync_meta.installNonce)
-; and clears session storages when the file's nonce differs or is missing.
-; Uses FileExists check (not ${isUpdated} alone) so manual in-place upgrades
-; (user runs new exe directly) also preserve the existing nonce. ${isUpdated}
-; is only true for auto-updater's --updated launches.
+; For genuine fresh installs (isFreshInstall=1) also create a one-shot
+; session-reset-required marker that tells the app to clear session on next launch.
+; For upgrades (isFreshInstall=0): preserve existing nonce, or for legacy
+; 0.1.4→0.1.5 (no nonce file but existing install) mint a nonce WITHOUT marker
+; to migrate without logging out. Never infer fresh solely from FileExists.
 !macro customInstall
   SetShellVarContext current
   CreateDirectory "$APPDATA\DKS"
-  ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
-    DetailPrint "DKS: preserving existing install nonce (upgrade)"
-  ${Else}
-    DetailPrint "DKS: creating fresh install nonce"
+  ${If} $isFreshInstall == "1"
+    DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker"
     System::Call 'ole32::CoCreateGuid(g .r0)'
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
     ${If} $1 == ""
@@ -78,6 +99,44 @@
     ${Else}
       DetailPrint "DKS: ERROR install-nonce file missing after write"
     ${EndIf}
+    ; One-shot marker: app clears session then removes this file
+    FileOpen $0 "$APPDATA\DKS\session-reset-required" w
+    ${If} $0 != ""
+      FileWrite $0 "1"
+      FileClose $0
+      DetailPrint "DKS: session-reset-required marker created"
+    ${EndIf}
+  ${Else}
+    ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
+      DetailPrint "DKS: preserving existing install nonce (upgrade)"
+      ; Ensure no stale marker lingers from a prior crash
+      Delete "$APPDATA\DKS\session-reset-required"
+    ${Else}
+      DetailPrint "DKS: legacy upgrade detected (no nonce, but existing install) — creating nonce without session reset"
+      System::Call 'ole32::CoCreateGuid(g .r0)'
+      System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
+      ${If} $1 == ""
+        System::Call 'kernel32::GetTickCount() i.r1'
+      ${EndIf}
+      FileOpen $0 "$APPDATA\DKS\install-nonce" w
+      ${If} $0 != ""
+        FileWrite $0 "$1"
+        FileClose $0
+      ${EndIf}
+      FileOpen $0 "$APPDATA\DKS\install-nonce" r
+      ${If} $0 != ""
+        FileRead $0 $2
+        FileClose $0
+        ${If} $2 == ""
+          DetailPrint "DKS: ERROR legacy install-nonce is empty after write"
+        ${Else}
+          DetailPrint "DKS: legacy install-nonce created successfully (no reset marker — login preserved)"
+        ${EndIf}
+      ${Else}
+        DetailPrint "DKS: ERROR legacy install-nonce file missing after write"
+      ${EndIf}
+      Delete "$APPDATA\DKS\session-reset-required"
+    ${EndIf}
   ${EndIf}
 !macroend
 
@@ -89,25 +148,46 @@
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
     ; Running-app guard: running.lock is helper, tasklist is authority.
-    ; If lock exists but no DKS.exe process is running, delete stale lock.
-    ; If DKS.exe is running, abort (interactive MessageBox, silent Abort).
-    ${If} ${FileExists} "$APPDATA\DKS\running.lock"
-      nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" 2>nul | findstr /I "DKS.exe"'
-      Pop $0
-      Pop $1
-      ${If} $0 == "0"
-        ; DKS.exe is running — block uninstall
+    ; Check for real DKS.exe process regardless of lock.
+    ; If DKS.exe is running → abort (interactive) / silent Abort
+    ; If no DKS.exe but lock exists → stale, delete and continue
+    ; If neither → continue
+    ; Handle tasklist failure explicitly: if nsExec fails (Pop $0 error), treat as check failure and abort if lock exists to be safe, or log and continue? We use explicit branch.
+    nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" 2>nul | findstr /I "DKS.exe"'
+    Pop $0  ; exit code / exec result
+    Pop $1  ; output
+    ${If} $0 == "error"
+    ${OrIf} $0 == ""
+      ; tasklist/nsExec failed — log and fall back to lock file check
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "WARN: tasklist check failed (nsExec error), falling back to lock file$\r$\n"
+      FileClose $R0
+      ${If} ${FileExists} "$APPDATA\DKS\running.lock"
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-        FileWrite $R0 "ABORT: running.lock exists and DKS.exe is running$\r$\n"
+        FileWrite $R0 "ABORT: running.lock exists and process check failed — aborting safely$\r$\n"
         FileClose $R0
         IfSilent +2
-        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
+        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running or cannot be checked. Please exit via tray before uninstalling." /SD IDOK
         Abort
-      ${Else}
-        ; No DKS.exe — stale lock, delete and continue
+      ${EndIf}
+    ${ElseIf} $0 == "0"
+      ; DKS.exe is running — block uninstall
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "ABORT: DKS.exe is running (tasklist found it), blocking uninstall$\r$\n"
+      FileClose $R0
+      IfSilent +2
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
+      Abort
+    ${Else}
+      ; $0 == "1" → no DKS.exe found
+      ${If} ${FileExists} "$APPDATA\DKS\running.lock"
         Delete "$APPDATA\DKS\running.lock"
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
         FileWrite $R0 "Stale running.lock deleted - no DKS.exe process$\r$\n"
+        FileClose $R0
+      ${Else}
+        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+        FileWrite $R0 "No DKS.exe and no running.lock — proceeding$\r$\n"
         FileClose $R0
       ${EndIf}
     ${EndIf}
@@ -164,6 +244,11 @@
     SetFileAttributes "$APPDATA\DKS\install-nonce" NORMAL
     Delete "$APPDATA\DKS\install-nonce"
     nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\install-nonce"'
+    Pop $0
+    Pop $1
+    SetFileAttributes "$APPDATA\DKS\session-reset-required" NORMAL
+    Delete "$APPDATA\DKS\session-reset-required"
+    nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\session-reset-required"'
     Pop $0
     Pop $1
     Delete "$APPDATA\DKS\running.lock"
