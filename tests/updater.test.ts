@@ -366,10 +366,11 @@ describe('release provider configuration', () => {
     expect(installer).toContain('install-nonce created successfully');
     expect(installer).toContain('FileRead');
     // Second-layer NSIS guard: abort if DKS is still running (tray counts).
-    // Uses nsExec + tasklist/findstr (built-in) — no external nsProcess plugin required.
+    // Uses nsExec + tasklist (built-in) — no external nsProcess plugin required.
     expect(installer).toMatch(/nsExec::Exec/);
     expect(installer).toMatch(/tasklist/i);
-    expect(installer).toMatch(/findstr/i);
+    // findstr variant is legacy; new StrStr variant also valid (both check DKS.exe via tasklist)
+    expect(installer).toMatch(/findstr|StrStr/i);
     expect(installer).toContain('DKS.exe');
     expect(installer).toContain('Abort');
     // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
