@@ -79,18 +79,15 @@
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
 
-    nsExec::ExecToStack 'tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH'
-    Pop $0  ; tasklist output (CSV line if running, INFO if not)
+    nsExec::ExecToStack 'cmd /c tasklist | find "DKS.exe"'
+    Pop $0  ; find output (line if running, empty if not)
     Pop $1
     ${If} $0 != ""
-      StrCpy $2 $0 1
-      ${If} $2 != "I"
-        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-        FileWrite $R0 "ABORT: DKS.exe still running$"
-        FileClose $R0
-        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
-        Abort
-      ${EndIf}
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "ABORT: DKS.exe still running$"
+      FileClose $R0
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
+      Abort
     ${EndIf}
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
