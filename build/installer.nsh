@@ -126,22 +126,25 @@
     RMDir /r "$APPDATA\DKS\Local Storage\leveldb"
     RMDir /r "$APPDATA\DKS\Local Storage"
     ${If} ${FileExists} "$APPDATA\DKS\Local Storage\*"
-      Sleep 800
-      RMDir /r "$APPDATA\DKS\Local Storage"
+      nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\Local Storage"'
+      Pop $0
+      Pop $1
     ${EndIf}
     ; Session Storage
     Delete "$APPDATA\DKS\Session Storage\*"
     RMDir /r "$APPDATA\DKS\Session Storage"
     ${If} ${FileExists} "$APPDATA\DKS\Session Storage\*"
-      Sleep 800
-      RMDir /r "$APPDATA\DKS\Session Storage"
+      nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\Session Storage"'
+      Pop $0
+      Pop $1
     ${EndIf}
     ; IndexedDB
     Delete "$APPDATA\DKS\IndexedDB\*"
     RMDir /r "$APPDATA\DKS\IndexedDB"
     ${If} ${FileExists} "$APPDATA\DKS\IndexedDB\*"
-      Sleep 800
-      RMDir /r "$APPDATA\DKS\IndexedDB"
+      nsExec::ExecToStack 'cmd /c rmdir /s /q "$APPDATA\DKS\IndexedDB"'
+      Pop $0
+      Pop $1
     ${EndIf}
     ; Cookies may be a directory (old) or file (legacy). Handle both.
     Delete "$APPDATA\DKS\Cookies\*"
@@ -150,6 +153,11 @@
     Delete "$APPDATA\DKS\Cookies"
     SetFileAttributes "$APPDATA\DKS\Cookies-journal" NORMAL
     Delete "$APPDATA\DKS\Cookies-journal"
+    ${If} ${FileExists} "$APPDATA\DKS\Cookies*"
+      nsExec::ExecToStack 'powershell -Command "Remove-Item -Force \'$APPDATA\DKS\Cookies\' -ErrorAction SilentlyContinue; Remove-Item -Force \'$APPDATA\DKS\Cookies-journal\' -ErrorAction SilentlyContinue"'
+      Pop $0
+      Pop $1
+    ${EndIf}
     ; Current Chromium (Electron 34 / Chromium 130) stores cookies at Network\Cookies.
     Delete "$APPDATA\DKS\Network\*"
     SetFileAttributes "$APPDATA\DKS\Network\Cookies" NORMAL
@@ -157,6 +165,11 @@
     SetFileAttributes "$APPDATA\DKS\Network\Cookies-journal" NORMAL
     Delete "$APPDATA\DKS\Network\Cookies-journal"
     RMDir /r "$APPDATA\DKS\Network"
+    ${If} ${FileExists} "$APPDATA\DKS\Network\Cookies"
+      nsExec::ExecToStack 'powershell -Command "Remove-Item -Force \'$APPDATA\DKS\Network\Cookies\' -ErrorAction SilentlyContinue; Remove-Item -Force \'$APPDATA\DKS\Network\Cookies-journal\' -ErrorAction SilentlyContinue"'
+      Pop $0
+      Pop $1
+    ${EndIf}
     ; Remove install-nonce so next fresh install mints a new GUID and the
     ; app-level guard (install-nonce.ts) detects mismatch vs SQLite's old
     ; nonce and clears any leftover session. Not deleted on update
