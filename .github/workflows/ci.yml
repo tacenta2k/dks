@@ -277,6 +277,12 @@ jobs:
             }
             $msg = "c. FAIL: Sentinels still exist after uninstall (exit $uCode): $($failedPaths -join ', ') | NSIS log: $nsisLog | Alt paths: $($altCheck -join '; ') | Must be removed to prevent auto-login"
             Write-Host "::error::$msg"
+            # Also write to step summary for quotation without needing logs.zip
+            Add-Content $env:GITHUB_STEP_SUMMARY "### (c) FAIL"
+            foreach ($pp in $checks) { $ex=Test-Path $pp; Add-Content $env:GITHUB_STEP_SUMMARY "- $pp exists=$ex" }
+            Add-Content $env:GITHUB_STEP_SUMMARY "- NSIS log: $nsisLog"
+            Add-Content $env:GITHUB_STEP_SUMMARY "- Alt: $($altCheck -join '; ')"
+            if (Test-Path "$env:TEMP\DKS-nsis-debug.txt") { Add-Content $env:GITHUB_STEP_SUMMARY "#### NSIS debug"; Get-Content "$env:TEMP\DKS-nsis-debug.txt" | ForEach-Object { Add-Content $env:GITHUB_STEP_SUMMARY $_ } }
             throw $msg
           }
           Write-Host "c. Silent uninstall -> sentinels + nonce gone confirmed (all 6 checked)"
