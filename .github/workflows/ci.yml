@@ -306,6 +306,9 @@ jobs:
           Copy-Item $dummySrc $dummyDst -Force
           $procDummy = Start-Process $dummyDst -ArgumentList "/c ping -t 127.0.0.1 > nul" -PassThru
           Start-Sleep -Seconds 3
+          # Create running.lock so NSIS IfFileExists check blocks uninstall (real app does this)
+          "running" | Out-File "$env:APPDATA\DKS\running.lock" -Encoding ascii
+          Write-Host "Created $env:APPDATA\DKS\running.lock for block test"
           $task = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
           Write-Host "tasklist after starting dummy: $task"
           if ($task -notmatch "DKS.exe") {
@@ -340,6 +343,7 @@ jobs:
           Write-Host "LOG: e. dummy DKS.exe blocked uninstall, files intact"
 
           # Cleanup dummy and final uninstall for runner hygiene
+          try { Remove-Item -Force "$env:APPDATA\DKS\running.lock" -ErrorAction SilentlyContinue } catch {}
           try { Stop-Process -Id $procDummy.Id -Force -ErrorAction SilentlyContinue } catch {}
           try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
           Start-Sleep -Seconds 2

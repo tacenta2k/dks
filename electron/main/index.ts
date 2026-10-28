@@ -7,6 +7,7 @@ import {
   shell,
 } from 'electron';
 import type { IpcMainEvent } from 'electron';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import log from 'electron-log';
 
@@ -657,6 +658,11 @@ function installLifecycleListeners(): void {
     quitting = true;
     updaterScheduler?.stop();
     closeLocalStore();
+    // Remove running.lock so uninstall can proceed after Exit
+    try {
+      const p = path.join(app.getPath('userData'), 'running.lock');
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    } catch {}
   });
 
   app.on('window-all-closed', () => {
@@ -689,6 +695,13 @@ export async function startMainProcess(): Promise<boolean> {
   }
 
   const startHidden = shouldStartHidden(process.argv);
+  // Create running.lock so uninstaller can detect DKS is still running (tray counts)
+  try {
+    if (app.isPackaged) {
+      const p = path.join(app.getPath('userData'), 'running.lock');
+      fs.writeFileSync(p, String(process.pid), 'utf8');
+    }
+  } catch {}
   configureAutoLaunch(true);
   log.info(`[dks] starting main process (version=${getAppVersion()}, hidden=${String(startHidden)}, packaged=${String(app.isPackaged)})`);
 
