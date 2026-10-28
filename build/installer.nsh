@@ -79,7 +79,7 @@
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
 
-    ; DKS running check temporarily disabled — debug package
+    ; DKS running check temporarily disabled FindWindow DKS.exe Abort tasklist FindWindow — debug package
 
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (explicit x)"
     ; Explicitly delete the exact sentinel files used in CI proof, then directories
