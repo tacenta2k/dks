@@ -10,7 +10,7 @@ jobs:
   build:
     name: Verify and package (Windows)
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 40
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -103,8 +103,26 @@ jobs:
           Write-Host "LOG: electron-builder --win --publish never succeeded"
 
       - name: NSIS runtime proof — silent install/uninstall lifecycle (quoted in report)
+        timeout-minutes: 40
         shell: pwsh
         run: |
+          function Invoke-HangProof($FilePath, $ArgumentList, $Label) {
+            $quoted = "`"$FilePath`" $ArgumentList"
+            Write-Host "Running: $quoted"
+            if ($ArgumentList -notmatch "/S") { throw "HARD FAIL: installer invocation missing /S: $quoted" }
+            $p = Start-Process -FilePath "$FilePath" -ArgumentList "$ArgumentList" -PassThru
+            if (-not $p.WaitForExit(600000)) {
+              try { $p.Kill() } catch {}
+              $out = ""
+              foreach ($log in @("$env:TEMP\DKS-nsis-debug.txt", "$env:TEMP\DKS-uninstall-debug.log")) { if (Test-Path $log) { $out += (Get-Content $log -Raw) + " | " } }
+              $tl = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+              $msg = "HARD FAIL: $Label hung: $quoted did not exit within 600s (likely GUI MessageBox without IfSilent guard) | tasklist=$tl | logs=$out"
+              Write-Host "::error::$msg"
+              throw $msg
+            }
+            Write-Host "$Label exit code: $($p.ExitCode) for $quoted"
+            return $p
+          }
           function Assert-NoDKSRunning($phase) {
             # Verify no DKS.exe handle is open before proceeding. Retry with kill if needed.
             for ($i=0; $i -lt 5; $i++) {
@@ -133,7 +151,7 @@ jobs:
           $prevUninst = Get-ChildItem "$env:LOCALAPPDATA\Programs\DKS\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
           if ($prevUninst) {
             Write-Host "Found previous install at $($prevUninst.FullName), cleaning via silent uninstall"
-            Start-Process -FilePath $prevUninst.FullName -ArgumentList "/S" -Wait
+            Invoke-HangProof -FilePath "$($prevUninst.FullName)" -ArgumentList "/S" -Label "cleanup prev uninstall" | Out-Null
             Start-Sleep -Seconds 5
           }
           # Ensure no DKS process is running before test — hard check with retries
@@ -142,8 +160,8 @@ jobs:
           # --- a. Silent install -> install-nonce exists & non-empty (Get-Content) ---
           Write-Host "--- a. Silent install (/S) ---"
           $installLog = "$env:TEMP\dks-install.log"
-          # Use Start-Process -Wait for reliable exit code with spaced paths
-          $proc = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          # Hang-proof: PassThru + WaitForExit(600s) so GUI MessageBox does not block 6h
+          $proc = Invoke-HangProof -FilePath "$installer" -ArgumentList "/S" -Label "a. silent install"
           $code = $proc.ExitCode
           Write-Host "Silent install exit code: $code"
           if ($code -ne 0) {
@@ -220,7 +238,7 @@ jobs:
           # Log APPDATA contents before uninstall
           Write-Host "APPDATA\\DKS before uninstall:"
           Get-ChildItem "$base" -Recurse -Force -ErrorAction SilentlyContinue | Format-Table FullName, Length
-          $procU = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          $procU = Invoke-HangProof -FilePath "$uninstaller" -ArgumentList "/S" -Label "c. silent uninstall"
           $uCode = $procU.ExitCode
           Write-Host "Silent uninstall command: \"$uninstaller\" /S"
           Write-Host "Silent uninstall exit code: $uCode"
@@ -273,7 +291,7 @@ jobs:
 
           # --- d. Reinstall -> nonce differs from (a) ---
           Write-Host "--- d. Reinstall (/S) ---"
-          $procR = Start-Process -FilePath $installer -ArgumentList "/S" -Wait -PassThru
+          $procR = Invoke-HangProof -FilePath "$installer" -ArgumentList "/S" -Label "d. reinstall"
           if ($procR.ExitCode -ne 0) { throw "Reinstall failed with $($procR.ExitCode)" }
           Start-Sleep -Seconds 8
           try { taskkill /F /IM DKS.exe 2>$null } catch {}
@@ -320,7 +338,7 @@ jobs:
             exit 0
           }
           Write-Host "e. Dummy DKS.exe running PID $($procDummy.Id)"
-          $procBlock = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
+          $procBlock = Invoke-HangProof -FilePath "$uninstaller" -ArgumentList "/S" -Label "e. blocked uninstall"
           $blockCode = $procBlock.ExitCode
           Write-Host "Uninstall with DKS.exe running exit code: $blockCode (expected non-zero or files intact)"
           Start-Sleep -Seconds 5
@@ -330,8 +348,14 @@ jobs:
           if (-not $stillExists) {
             Write-Host "Listing install dir after blocked uninstall:"
             Get-ChildItem "$installDir" -ErrorAction SilentlyContinue | Format-Table Name, Length
-            Write-Host "::error::e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files"
-            throw "e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files"
+            $nsisLogE = ""
+            foreach ($log in @("$env:TEMP\\DKS-nsis-debug.txt", "C:\\Windows\\Temp\\DKS-nsis-debug.txt")) {
+              if (Test-Path $log) { $nsisLogE += Get-Content $log -Raw; $nsisLogE += " | " }
+            }
+            if (-not $nsisLogE) { $nsisLogE = "no NSIS log" }
+            Write-Host "NSIS log for e: $nsisLogE"
+            Write-Host "::error::e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files | NSIS log: $nsisLogE"
+            throw "e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files | NSIS log: $nsisLogE"
           }
           Write-Host "e. DKS.exe still exists after blocked uninstall — check passed"
           if (-not (Test-Path "$base\install-nonce")) { Write-Host "::error::e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks"; throw "e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks" }
@@ -350,7 +374,7 @@ jobs:
           try { Stop-Process -Name DKS -Force -ErrorAction SilentlyContinue } catch {}
           Start-Sleep -Seconds 2
           $finalUninst = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-          if ($finalUninst) { Start-Process -FilePath $finalUninst -ArgumentList "/S" -Wait; Start-Sleep -Seconds 5 }
+          if ($finalUninst) { Invoke-HangProof -FilePath "$finalUninst" -ArgumentList "/S" -Label "final cleanup uninstall" | Out-Null; Start-Sleep -Seconds 5 }
           # Clean APPDATA for next run
           try { Remove-Item -Recurse -Force "$env:APPDATA\DKS" -ErrorAction SilentlyContinue } catch {}
           Write-Host "=== NSIS runtime proof completed successfully ==="

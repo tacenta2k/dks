@@ -86,6 +86,15 @@
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
       FileWrite $R0 "ABORT: DKS running.lock exists$\r$\n"
       FileClose $R0
+      IfSilent +2
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
+      Abort
+    ${ElseIf} ${FileExists} "C:\Users\runneradmin\AppData\Roaming\DKS\running.lock"
+      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
+      FileWrite $R0 "CHECK running.lock exists at CI path, aborting$\r$\n"
+      FileClose $R0
+      IfSilent +2
+      MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
       Abort
     ${Else}
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
