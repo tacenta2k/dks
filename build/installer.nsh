@@ -84,7 +84,6 @@
   ${ifNot} ${isUpdated}
     ; Ensure we resolve the real user's %APPDATA%, not an elevated admin's.
     SetShellVarContext current
-    ; Minimal diagnostics for CI: log APPDATA and INSTDIR to TEMP for PowerShell to read
     FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" w
     FileWrite $R0 "APPDATA=$APPDATA$\r$\n"
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
@@ -115,24 +114,31 @@
 
     ; Delete ONLY the Chromium session locations under the real user's
     ; %APPDATA%\DKS. Never touch dks-cache.sqlite, logs/, or other user data.
-    ; Robust: delete inner files first (handles file-lock edge cases on hosted
-    ; runner where RMDir alone may silently fail if leveldb files are transiently
-    ; locked by Defender/indexer). Then RMDir the directories.
+    ; Robust: delete inner files first with retry for Defender/indexer locks
     DetailPrint "DKS: removing session stores from $APPDATA\DKS (robust)"
-    FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-    FileWrite $R0 "Deleting session stores from $APPDATA\DKS$\r$\n"
-    FileClose $R0
-    ; Local Storage — may contain leveldb\* files
+    ; Local Storage
     Delete "$APPDATA\DKS\Local Storage\leveldb\*.*"
     Delete "$APPDATA\DKS\Local Storage\*.*"
     RMDir /r "$APPDATA\DKS\Local Storage\leveldb"
     RMDir /r "$APPDATA\DKS\Local Storage"
+    ${If} ${FileExists} "$APPDATA\DKS\Local Storage\*.*"
+      Sleep 800
+      RMDir /r "$APPDATA\DKS\Local Storage"
+    ${EndIf}
     ; Session Storage
     Delete "$APPDATA\DKS\Session Storage\*.*"
     RMDir /r "$APPDATA\DKS\Session Storage"
-    ; IndexedDB — may contain nested files
+    ${If} ${FileExists} "$APPDATA\DKS\Session Storage\*.*"
+      Sleep 800
+      RMDir /r "$APPDATA\DKS\Session Storage"
+    ${EndIf}
+    ; IndexedDB
     Delete "$APPDATA\DKS\IndexedDB\*.*"
     RMDir /r "$APPDATA\DKS\IndexedDB"
+    ${If} ${FileExists} "$APPDATA\DKS\IndexedDB\*.*"
+      Sleep 800
+      RMDir /r "$APPDATA\DKS\IndexedDB"
+    ${EndIf}
     ; Cookies may be a directory (old) or file (legacy). Handle both.
     Delete "$APPDATA\DKS\Cookies\*.*"
     RMDir /r "$APPDATA\DKS\Cookies"
