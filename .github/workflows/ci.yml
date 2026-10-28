@@ -279,7 +279,7 @@ jobs:
           try { taskkill /F /IM DKS.exe 2>$null } catch {}
           $nonceB = (Get-Content -Raw "$env:APPDATA\DKS\install-nonce").Trim()
           Write-Host "d. Reinstall -> nonce differs from (a): before $nonceA after $nonceB"
-          if ($nonceA -eq $nonceB) { throw "d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID" }
+          if ($nonceA -eq $nonceB) { Write-Host "::error::d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID"; throw "d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID" }
           Write-Host "d. Nonce differs confirmed: $nonceA != $nonceB"
           Write-Host "LOG: d. reinstall nonce differs $nonceA -> $nonceB"
 
@@ -326,14 +326,15 @@ jobs:
           if (-not $stillExists) {
             Write-Host "Listing install dir after blocked uninstall:"
             Get-ChildItem "$installDir" -ErrorAction SilentlyContinue | Format-Table Name, Length
+            Write-Host "::error::e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files"
             throw "e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files"
           }
           Write-Host "e. DKS.exe still exists after blocked uninstall — check passed"
-          if (-not (Test-Path "$base\install-nonce")) { throw "e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks" }
+          if (-not (Test-Path "$base\install-nonce")) { Write-Host "::error::e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks"; throw "e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks" }
           $nonceAfterBlock = (Get-Content -Raw "$base\install-nonce").Trim()
-          if ($nonceAfterBlock -ne $nonceBeforeBlock) { throw "e. FAIL: nonce changed after blocked uninstall ($nonceBeforeBlock -> $nonceAfterBlock)" }
+          if ($nonceAfterBlock -ne $nonceBeforeBlock) { Write-Host "::error::e. FAIL: nonce changed after blocked uninstall ($nonceBeforeBlock -> $nonceAfterBlock)"; throw "e. FAIL: nonce changed after blocked uninstall ($nonceBeforeBlock -> $nonceAfterBlock)" }
           Write-Host "e. nonce unchanged after blocked uninstall — check passed"
-          if (-not (Test-Path "$base\Local Storage\leveldb\x")) { throw "e. FAIL: sentinel missing after blocked uninstall — must be preserved when DKS.exe blocks" }
+          if (-not (Test-Path "$base\Local Storage\leveldb\x")) { Write-Host "::error::e. FAIL: sentinel missing after blocked uninstall — must be preserved when DKS.exe blocks"; throw "e. FAIL: sentinel missing after blocked uninstall — must be preserved when DKS.exe blocks" }
           Write-Host "e. sentinel still exists after blocked uninstall — check passed"
           Write-Host "e. Uninstall correctly FAILed with DKS.exe running — program files, nonce and sentinels still intact"
           Write-Host "LOG: e. dummy DKS.exe blocked uninstall, files intact"
