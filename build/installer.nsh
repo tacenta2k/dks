@@ -108,7 +108,7 @@ ${StrStr}
     Pop $0  ; tasklist output (CSV line if running, INFO if not)
     Pop $1  ; exit code (tasklist always 0, so check stdout)
     ${If} $0 != ""
-      StrStr $2 $0 "DKS.exe"
+      ${StrStr} $2 $0 "DKS.exe"
       ${If} $2 != ""
         FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
         FileWrite $R0 "ABORT: DKS.exe still running stdout=$0$\r$\n"
