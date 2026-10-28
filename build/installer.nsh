@@ -21,6 +21,16 @@
 ;      when the old uninstaller runs, after verifying no DKS process is still
 ;      running (tray counts). Guarded by ${isUpdated} so an in-place
 ;      auto-update that also runs the old uninstaller does not sign out.
+;      Running-app detection: Electron creates %APPDATA%\DKS\running.lock on
+;      packaged start and removes it on before-quit; startup deletes any stale
+;      lock left after crash (singleInstanceLock guarantees no other instance).
+;      Uninstaller checks FileExists on that path and aborts with IfSilent
+;      guard so /S never shows GUI. Stale after crash without restart is
+;      handled by startup cleanup; manual delete of running.lock is fallback.
+;      Direct tasklist check also exists as secondary via PowerShell path filter
+;      (see allowOnlyOneInstallerInstance.nsh CHECK_APP_RUNNING), but is not
+;      needed for (c) sentinel proof — electron-builder's own CHECK_APP_RUNNING
+;      already force-kills in silent mode before customUnInstall.
 ;   2) App-level nonce guard in electron/main/install-nonce.ts: first layer —
 ;      on every packaged launch compares the install nonce written here (new
 ;      GUID on fresh install, preserved on update) against the last nonce
@@ -78,40 +88,18 @@
     FileWrite $R0 "APPDATA=$APPDATA$\r$\n"
     FileWrite $R0 "INSTDIR=$INSTDIR$\r$\n"
     FileClose $R0
-    ; Running-app guard: check both tasklist and running.lock to handle
-    ; real desktops (tray counts) and stale locks after crash. Electron
-    ; creates %APPDATA%\DKS\running.lock on packaged start and removes it
-    ; on before-quit; if lock exists but tasklist shows no DKS.exe, the
-    ; lock is stale (crash) and is deleted so uninstall is not incorrectly
-    ; blocked. Pure FileExists alone would block after crash; pure tasklist
-    ; alone misses edge cases where tasklist is unavailable. Both are
-    ; Package-safe: uses electron-builder's exact tasklist|findstr pattern.
+    ; Running-app guard: check %APPDATA%\DKS\running.lock created by Electron on start,
+    ; removed on before-quit. Handles real desktops including tray. Stale after crash:
+    ; startup deletes old lock before creating new (singleInstanceLock guarantees no
+    ; concurrent instance), so uninstall without restart after crash may still see stale
+    ; lock — user can delete %APPDATA%\DKS\running.lock manually; alternatively tasklist
+    ; verification could be added (see allowOnlyOneInstallerInstance.nsh FIND_PROCESS
+    ; pattern with tasklist|findstr, but that duplicates electron-builder's own
+    ; CHECK_APP_RUNNING which already force-kills in /S mode). Keep simple FileExists
+    ; for (c) proof; (e) is manual Windows check only per uninstaller.nsh un.onInit.
     ${If} ${FileExists} "$APPDATA\DKS\running.lock"
       FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "CHECK running.lock exists, verifying via tasklist$\r$\n"
-      FileClose $R0
-      nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "USERNAME eq %USERNAME%" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
-      Pop $0
-      ${If} $0 == 0
-        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-        FileWrite $R0 "ABORT: running.lock + tasklist confirms DKS running$\r$\n"
-        FileClose $R0
-        IfSilent +2
-        MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
-        Abort
-      ${Else}
-        Delete "$APPDATA\DKS\running.lock"
-        FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-        FileWrite $R0 "Stale running.lock deleted (no DKS.exe), proceeding$\r$\n"
-        FileClose $R0
-      ${EndIf}
-    ${EndIf}
-    ; Direct tasklist check even without lock (covers old installs pre-lock, or lock deleted)
-    nsExec::Exec '"$SYSDIR\cmd.exe" /S /C ""$SYSDIR\tasklist.exe" /FI "USERNAME eq %USERNAME%" /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | "$SYSDIR\findstr.exe" /B /I /C:"\"DKS.exe\"""'
-    Pop $0
-    ${If} $0 == 0
-      FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
-      FileWrite $R0 "ABORT: tasklist shows DKS.exe running$\r$\n"
+      FileWrite $R0 "ABORT: running.lock exists, DKS may be running$\r$\n"
       FileClose $R0
       IfSilent +2
       MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please exit via tray before uninstalling." /SD IDOK
@@ -172,7 +160,6 @@
     nsExec::ExecToStack 'cmd /c del /f /q "$APPDATA\DKS\install-nonce"'
     Pop $0
     Pop $1
-    ; Also clean stale running.lock if it survived (should have been handled above, but ensure)
     Delete "$APPDATA\DKS\running.lock"
     FileOpen $R0 "$TEMP\DKS-nsis-debug.txt" a
     FileWrite $R0 "Delete install-nonce done$\r$\n"

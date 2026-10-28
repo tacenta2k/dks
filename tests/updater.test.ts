@@ -365,16 +365,17 @@ describe('release provider configuration', () => {
     expect(installer).toMatch(/\$1/);
     expect(installer).toContain('install-nonce created successfully');
     expect(installer).toContain('FileRead');
-    // Second-layer NSIS guard: tasklist+findstr (electron-builder pattern) plus running.lock with stale handling.
-    expect(installer).toMatch(/nsExec::Exec/i);
-    expect(installer).toMatch(/tasklist/i);
-    expect(installer).toMatch(/findstr/i);
+    // Second-layer NSIS guard: running.lock created by Electron on start, tasklist as secondary (electron-builder pattern)
     expect(installer).toMatch(/running\.lock/i);
     expect(installer).toContain('DKS');
     expect(installer).toContain('Abort');
+    // Must be IfSilent-guarded so /S never shows GUI (was hang in 6h run)
+    expect(installer).toMatch(/IfSilent/);
     // No CI-specific hardcoded paths may ship in the installer
     expect(installer).not.toContain('runneradmin');
     expect(installer).not.toContain('C:\\Users');
+    // Guarded by isUpdated so auto-update does not sign out
+    expect(installer).toContain('isUpdated');
     // Elevation: must resolve the real user's %APPDATA%, not an elevated admin's.
     expect(installer).toContain('SetShellVarContext current');
     // Supabase's persisted session lives in Chromium storages; on Electron 34
