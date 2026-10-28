@@ -85,13 +85,6 @@
     ; Ensure we resolve the real user's %APPDATA%, not an elevated admin's.
     SetShellVarContext current
 
-    ; --- Diagnostics: log exact uninstall state to $TEMP for CI proof ---
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" w
-    ${If} $9 != ""
-      FileWrite $9 "DKS-uninstall start isUpdated=${isUpdated} APPDATA=$APPDATA INSTDIR=$INSTDIR$\r$\n"
-      FileClose $9
-    ${EndIf}
-
     ; Tray Exit must be used before uninstall — a live DKS process holds
     ; Local Storage\leveldb files open, so RMDir would be incomplete and the
     ; next reinstall would auto-login. Use built-in Windows tasklist via nsExec
@@ -108,103 +101,30 @@
     nsExec::ExecToStack 'cmd /c tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH | findstr /B /I /C:"\"DKS.exe\""'
     Pop $0  ; stdout (CSV line if found, empty if not)
     Pop $1  ; exit code: 0=found (findstr matched), 1=not found
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "tasklist check stdout=$0 exitCode=$1$\r$\n"
-      FileClose $9
-    ${EndIf}
     ; Check both pops: exit code 0 means DKS.exe is running; stdout non-empty also indicates running
     ${If} $1 == 0
     ${OrIf} $0 != ""
-      FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-      ${If} $9 != ""
-        FileWrite $9 "ABORT: DKS.exe still running, blocking uninstall$\r$\n"
-        FileClose $9
-      ${EndIf}
       MessageBox MB_OK|MB_ICONEXCLAMATION "DKS is still running. Please right-click the DKS tray icon and choose Exit, then try again.$\r$\n$\r$\nThe uninstaller cannot remove session data while the app is running." /SD IDOK
       Abort
     ${EndIf}
 
     ; Delete ONLY the Chromium session locations under the real user's
     ; %APPDATA%\DKS. Never touch dks-cache.sqlite, logs/, or other user data.
-    DetailPrint "DKS: removing session stores from $APPDATA\DKS"
-    ; Local Storage — may contain leveldb\* files
-    ${If} ${FileExists} "$APPDATA\DKS\Local Storage\*.*"
-      DetailPrint "DKS: deleting Local Storage"
-    ${EndIf}
+    ; Local Storage, Session Storage, IndexedDB are directories.
     RMDir /r "$APPDATA\DKS\Local Storage"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "RMDir Local Storage$\r$\n"
-      FileClose $9
-    ${EndIf}
-    ; Session Storage
-    ${If} ${FileExists} "$APPDATA\DKS\Session Storage\*.*"
-      DetailPrint "DKS: deleting Session Storage"
-    ${EndIf}
     RMDir /r "$APPDATA\DKS\Session Storage"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "RMDir Session Storage$\r$\n"
-      FileClose $9
-    ${EndIf}
-    ; IndexedDB
-    ${If} ${FileExists} "$APPDATA\DKS\IndexedDB\*.*"
-      DetailPrint "DKS: deleting IndexedDB"
-    ${EndIf}
     RMDir /r "$APPDATA\DKS\IndexedDB"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "RMDir IndexedDB$\r$\n"
-      FileClose $9
-    ${EndIf}
     ; Cookies may be a directory (old) or file (legacy). Handle both.
     RMDir /r "$APPDATA\DKS\Cookies"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "RMDir Cookies dir$\r$\n"
-      FileClose $9
-    ${EndIf}
     Delete "$APPDATA\DKS\Cookies"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "Delete Cookies file$\r$\n"
-      FileClose $9
-    ${EndIf}
     Delete "$APPDATA\DKS\Cookies-journal"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "Delete Cookies-journal$\r$\n"
-      FileClose $9
-    ${EndIf}
     ; Current Chromium (Electron 34 / Chromium 130) stores cookies at Network\Cookies.
     Delete "$APPDATA\DKS\Network\Cookies"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "Delete Network\Cookies$\r$\n"
-      FileClose $9
-    ${EndIf}
     Delete "$APPDATA\DKS\Network\Cookies-journal"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "Delete Network\Cookies-journal$\r$\n"
-      FileClose $9
-    ${EndIf}
     ; Remove install-nonce so next fresh install mints a new GUID and the
     ; app-level guard (install-nonce.ts) detects mismatch vs SQLite's old
     ; nonce and clears any leftover session. Not deleted on update
     ; (${isUpdated} true) — there it is preserved.
     Delete "$APPDATA\DKS\install-nonce"
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "Delete install-nonce$\r$\n"
-      FileClose $9
-    ${EndIf}
-    ; Final diagnostic
-    FileOpen $9 "$TEMP\DKS-uninstall-debug.log" a
-    ${If} $9 != ""
-      FileWrite $9 "DKS-uninstall done$\r$\n"
-      FileClose $9
-    ${EndIf}
   ${endIf}
 !macroend
