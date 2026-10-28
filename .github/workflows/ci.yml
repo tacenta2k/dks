@@ -106,7 +106,7 @@ jobs:
         timeout-minutes: 40
         shell: pwsh
         run: |
-          trap { $msg = $_ | Out-String; $msg | Out-File "$env:TEMP\nsis-proof-error.txt" -Encoding utf8; Write-Host "TRAP: $msg"; throw $_ }
+          # no trap for final green run
           function Invoke-HangProof($FilePath, $ArgumentList, $Label) {
             $quoted = "`"$FilePath`" $ArgumentList"
             Write-Host "Running: $quoted"
