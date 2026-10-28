@@ -65,14 +65,19 @@ jobs:
         shell: pwsh
         run: |
           npm test -- --testTimeout=60000 2>&1 | Tee-Object test-output.txt
+          $testExit = $LASTEXITCODE
           $out = Get-Content -Raw test-output.txt
-          if ($out -match "Test Files\s+(\d+)\s+passed") { Write-Host "Test Files: $($matches[1]) passed" } else { Write-Host "Test Files line not found" }
-          if ($out -match "Tests\s+(\d+)\s+passed") { Write-Host "Tests: $($matches[1]) passed" } else { Write-Host "Tests line not found" }
-          # Also print totals line for log quoting
-          Select-String -Path test-output.txt -Pattern "Test Files|Tests" | ForEach-Object { Write-Host $_.Line }
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Write-Host "=== Full npm test completed ==="
-
+          $filesLine = Select-String -Path test-output.txt -Pattern "Test Files" | Select-Object -Last 1
+          $testsLine = Select-String -Path test-output.txt -Pattern "Tests " | Select-Object -Last 1
+          if ($filesLine) { Write-Host "LOG: $($filesLine.Line.Trim())" } else { Write-Host "Test Files line not found" }
+          if ($testsLine) { Write-Host "LOG: $($testsLine.Line.Trim())" } else { Write-Host "Tests line not found" }
+          if ($out -match "Test Files\\s+(\\d+)\\s+passed") { Write-Host "Test Files: $($matches[1]) passed" } else { Write-Host "Test Files pattern not matched" }
+          if ($out -match "Tests\\s+(\\d+)\\s+passed") { Write-Host "Tests: $($matches[1]) passed" } else { Write-Host "Tests pattern not matched" }
+          if ($filesLine -and $testsLine) {
+            "$($filesLine.Line.Trim()) | $($testsLine.Line.Trim())" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+          }
+          if ($testExit -ne 0) { Write-Host "npm test failed with exit $testExit"; exit $testExit }
+          Write-Host "=== Full npm test completed (full repository suite) ==="
       - name: Verify installer nonce generation (non-empty check)
         shell: pwsh
         run: |
@@ -106,6 +111,24 @@ jobs:
       - name: NSIS runtime proof — silent install/uninstall lifecycle (quoted in report)
         shell: pwsh
         run: |
+          function Assert-NoDKSRunning($phase) {
+            # Verify no DKS.exe handle is open before proceeding. Retry with kill if needed.
+            for ($i=0; $i -lt 5; $i++) {
+              $tl = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+              Write-Host "[$phase] tasklist attempt $($i+1): $tl"
+              if ($tl -notmatch "DKS.exe") { Write-Host "[$phase] No DKS.exe running — OK"; return $true }
+              Write-Host "[$phase] DKS.exe still running, killing (attempt $($i+1))..."
+              try { taskkill /F /IM DKS.exe 2>$null } catch {}
+              Start-Sleep -Seconds 2
+            }
+            $final = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+            Write-Host "[$phase] FINAL tasklist: $final"
+            if ($final -match "DKS.exe") {
+              Write-Host "[$phase] DKS.exe still running after retries — will proceed but uninstall may block and FAIL as expected for step e, or may leave handles for step c"
+              return $false
+            }
+            return $true
+          }
           Write-Host "=== NSIS runtime proof on Windows runner (ci.yml quote below) ==="
           Write-Host "ci.yml step: NSIS runtime proof — silent install/uninstall lifecycle"
           $installer = Get-ChildItem release/*.exe | Select-Object -First 1 -ExpandProperty FullName
@@ -119,8 +142,8 @@ jobs:
             Start-Process -FilePath $prevUninst.FullName -ArgumentList "/S" -Wait
             Start-Sleep -Seconds 5
           }
-          # Ensure no DKS process is running before test
-          try { taskkill /F /IM DKS.exe 2>$null; Start-Sleep 2 } catch {}
+          # Ensure no DKS process is running before test — hard check with retries
+          Assert-NoDKSRunning "pre-test" | Out-Null
 
           # --- a. Silent install -> install-nonce exists & non-empty (Get-Content) ---
           Write-Host "--- a. Silent install (/S) ---"
@@ -197,22 +220,52 @@ jobs:
 
           # --- c. Silent uninstall -> sentinels + nonce gone, sqlite hash unchanged ---
           Write-Host "--- c. Silent uninstall (/S) ---"
+          Write-Host "Running: Start-Process '$uninstaller' /S -Wait (logs to TEMP\\DKS-uninstall-debug.log)"
+          # Ensure no handle is open before uninstall — retry with wait
+          Assert-NoDKSRunning "pre-uninstall-c" | Out-Null
+          # Log APPDATA contents before uninstall
+          Write-Host "APPDATA\\DKS before uninstall:"
+          Get-ChildItem "$base" -Recurse -Force -ErrorAction SilentlyContinue | Format-Table FullName, Length
           $procU = Start-Process -FilePath $uninstaller -ArgumentList "/S" -Wait -PassThru
           $uCode = $procU.ExitCode
+          Write-Host "Silent uninstall command: \"$uninstaller\" /S"
           Write-Host "Silent uninstall exit code: $uCode"
+          if (Test-Path "$env:TEMP\\DKS-uninstall-debug.log") {
+            Write-Host "--- DKS-uninstall-debug.log (from NSIS) ---"
+            Get-Content "$env:TEMP\\DKS-uninstall-debug.log" | ForEach-Object { Write-Host $_ }
+          } else {
+            Write-Host "No DKS-uninstall-debug.log found at $env:TEMP — NSIS may not have run or isUpdated=true blocked deletion"
+          }
           Start-Sleep -Seconds 5
-          $checks = @("$base\Local Storage\leveldb\x","$base\Session Storage\x","$base\IndexedDB\x","$base\Cookies","$base\Network\Cookies","$base\install-nonce")
-          $cFailed = $false
+          Write-Host "APPDATA\\DKS after uninstall:"
+          Get-ChildItem "$base" -Recurse -Force -ErrorAction SilentlyContinue | Format-Table FullName, Length
+          Write-Host "Checking individual sentinels after uninstall (expected gone):"
+          $checks = @("$base\\Local Storage\\leveldb\\x","$base\\Session Storage\\x","$base\\IndexedDB\\x","$base\\Cookies","$base\\Network\\Cookies","$base\\install-nonce")
           foreach ($p in $checks) {
-            if (Test-Path $p) { Write-Host "::warning::c. Sentinel still exists after uninstall: $p (may be file lock on hosted runner)"; $cFailed = $true } else { Write-Host "Verified gone: $p" }
+            $exists = Test-Path $p
+            Write-Host "  $p exists=$exists"
           }
-          if ($cFailed) { Write-Host "LOG: c. sentinels check had warnings (see above), nonce/sentinel logic may need local verification" } else { Write-Host "c. Silent uninstall -> sentinels + nonce gone confirmed" }
-          if (-not (Test-Path "$base\dks-cache.sqlite")) { Write-Host "::warning::c. sqlite missing after uninstall (should be preserved)" } else {
-            $hashAfter = (Get-FileHash "$base\dks-cache.sqlite" -Algorithm SHA256).Hash
-            Write-Host "sqlite hash after uninstall: $hashAfter (before $hashBefore)"
-            if ($hashAfter -ne $hashBefore) { Write-Host "::warning::c. sqlite hash changed: $hashBefore vs $hashAfter (host may have touched file)" } else { Write-Host "c. sqlite hash unchanged: $hashAfter" }
-            Write-Host "LOG: c. sentinels+nonce gone, sqlite hash $hashAfter (before $hashBefore)"
+          # HARD FAIL if any session sentinel or install-nonce remains after successful uninstall
+          $failedPaths = @()
+          foreach ($p in $checks) {
+            if (Test-Path $p) { $failedPaths += $p }
           }
+          if ($failedPaths.Count -gt 0) {
+            Write-Host "c. FAIL: Sentinels still exist after uninstall that reported exit code $uCode:"
+            $failedPaths | ForEach-Object { Write-Host "  STILL EXISTS: $_" }
+            Write-Host "This is the exact session store that must be removed to prevent auto-login. Uninstaller exit code $uCode indicates success but deletion failed."
+            Write-Host "Check: was DKS.exe holding handles? Check tasklist before uninstall and NSIS log above. If file lock, uninstaller must retry after handle release."
+            throw "c. FAIL: Sentinels still exist after uninstall (exit $uCode): $($failedPaths -join ', ') — must be removed to prevent auto-login"
+          }
+          Write-Host "c. Silent uninstall -> sentinels + nonce gone confirmed (all 6 checked)"
+          Write-Host "LOG: c. sentinels+nonce gone confirmed"
+          # Preserve hard requirement: dks-cache.sqlite remains byte-identical
+          if (-not (Test-Path "$base\\dks-cache.sqlite")) { throw "c. FAIL: dks-cache.sqlite missing after uninstall — must remain" }
+          $hashAfter = (Get-FileHash "$base\\dks-cache.sqlite" -Algorithm SHA256).Hash
+          Write-Host "sqlite hash after uninstall: $hashAfter (before $hashBefore)"
+          if ($hashAfter -ne $hashBefore) { throw "c. FAIL: sqlite hash changed: $hashBefore vs $hashAfter — dks-cache.sqlite must remain byte-identical" }
+          Write-Host "c. sqlite hash unchanged: $hashAfter"
+          Write-Host "LOG: c. sentinels+nonce gone, sqlite hash unchanged $hashAfter"
 
           # --- d. Reinstall -> nonce differs from (a) ---
           Write-Host "--- d. Reinstall (/S) ---"
@@ -222,8 +275,9 @@ jobs:
           try { taskkill /F /IM DKS.exe 2>$null } catch {}
           $nonceB = (Get-Content -Raw "$env:APPDATA\DKS\install-nonce").Trim()
           Write-Host "d. Reinstall -> nonce differs from (a): before $nonceA after $nonceB"
-          if ($nonceA -eq $nonceB) { Write-Host "::warning::d. Nonce did not differ after reinstall: $nonceA (may be cached on host)" } else { Write-Host "d. Nonce differs confirmed: $nonceA != $nonceB" }
-          Write-Host "LOG: d. reinstall nonce differs $nonceA -> $nonceB (if same, check local GUI run)"
+          if ($nonceA -eq $nonceB) { throw "d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID" }
+          Write-Host "d. Nonce differs confirmed: $nonceA != $nonceB"
+          Write-Host "LOG: d. reinstall nonce differs $nonceA -> $nonceB"
 
           # Refresh paths after reinstall
           $installDir = "$env:LOCALAPPDATA\Programs\DKS"
@@ -268,13 +322,15 @@ jobs:
           if (-not $stillExists) {
             Write-Host "Listing install dir after blocked uninstall:"
             Get-ChildItem "$installDir" -ErrorAction SilentlyContinue | Format-Table Name, Length
-            Write-Host "::warning::e. DKS.exe missing after blocked uninstall — running-app check may not have Aborted (check local GUI)"
-          } else { Write-Host "e. DKS.exe still exists after blocked uninstall — check passed" }
-          if (-not (Test-Path "$base\install-nonce")) { Write-Host "::warning::e. nonce missing after blocked uninstall (should be preserved)" } else {
-            $nonceAfterBlock = (Get-Content -Raw "$base\install-nonce").Trim()
-            if ($nonceAfterBlock -ne $nonceBeforeBlock) { Write-Host "::warning::e. nonce changed after blocked uninstall" } else { Write-Host "e. nonce unchanged after blocked uninstall" }
+            throw "e. FAIL: DKS.exe missing after blocked uninstall — running-app check must Abort and preserve files"
           }
-          if (-not (Test-Path "$base\Local Storage\leveldb\x")) { Write-Host "::warning::e. sentinel missing after blocked uninstall (should be preserved)" } else { Write-Host "e. sentinel still exists after blocked uninstall — check passed" }
+          Write-Host "e. DKS.exe still exists after blocked uninstall — check passed"
+          if (-not (Test-Path "$base\install-nonce")) { throw "e. FAIL: nonce missing after blocked uninstall — must be preserved when DKS.exe blocks" }
+          $nonceAfterBlock = (Get-Content -Raw "$base\install-nonce").Trim()
+          if ($nonceAfterBlock -ne $nonceBeforeBlock) { throw "e. FAIL: nonce changed after blocked uninstall ($nonceBeforeBlock -> $nonceAfterBlock)" }
+          Write-Host "e. nonce unchanged after blocked uninstall — check passed"
+          if (-not (Test-Path "$base\Local Storage\leveldb\x")) { throw "e. FAIL: sentinel missing after blocked uninstall — must be preserved when DKS.exe blocks" }
+          Write-Host "e. sentinel still exists after blocked uninstall — check passed"
           Write-Host "e. Uninstall correctly FAILed with DKS.exe running — program files, nonce and sentinels still intact"
           Write-Host "LOG: e. dummy DKS.exe blocked uninstall, files intact"
 

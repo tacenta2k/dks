@@ -12,6 +12,7 @@ on:
           - patch
           - minor
           - major
+          - none
 
 concurrency:
   group: release-dks
@@ -157,16 +158,33 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          npm version ${{ inputs.bump }} -m "chore(release): v%s"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-
-          $version = (node -p "require('./package.json').version").Trim()
-          if ([string]::IsNullOrWhiteSpace($version)) {
-            Write-Error "Could not read the bumped version from package.json."
-            exit 1
+          if ("${{ inputs.bump }}" -eq "none") {
+            $version = (node -p "require('./package.json').version").Trim()
+            if ([string]::IsNullOrWhiteSpace($version)) {
+              Write-Error "Could not read version from package.json."
+              exit 1
+            }
+            $tag = "v$version"
+            # Verify tag does not already exist
+            $existing = git tag -l $tag
+            if ($existing) {
+              Write-Error "Tag $tag already exists — cannot publish existing version twice. Bump instead."
+              exit 1
+            }
+            git tag -a $tag -m "chore(release): $tag"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Write-Host "Using existing version $version (bump=none), created tag $tag."
+          } else {
+            npm version ${{ inputs.bump }} -m "chore(release): v%s"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $version = (node -p "require('./package.json').version").Trim()
+            if ([string]::IsNullOrWhiteSpace($version)) {
+              Write-Error "Could not read the bumped version from package.json."
+              exit 1
+            }
+            $tag = "v$version"
           }
 
-          $tag = "v$version"
           $installer = "DKS-$version-win-x64.exe"
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
