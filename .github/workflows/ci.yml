@@ -67,16 +67,10 @@ jobs:
           npm test -- --testTimeout=60000 2>&1 | Tee-Object test-output.txt
           $testExit = $LASTEXITCODE
           $out = Get-Content -Raw test-output.txt
-          $filesLine = Select-String -Path test-output.txt -Pattern "Test Files" | Select-Object -Last 1
-          $testsLine = Select-String -Path test-output.txt -Pattern "Tests " | Select-Object -Last 1
-          if ($filesLine) { Write-Host "LOG: $($filesLine.Line.Trim())" } else { Write-Host "Test Files line not found" }
-          if ($testsLine) { Write-Host "LOG: $($testsLine.Line.Trim())" } else { Write-Host "Tests line not found" }
-          if ($out -match "Test Files\\s+(\\d+)\\s+passed") { Write-Host "Test Files: $($matches[1]) passed" } else { Write-Host "Test Files pattern not matched" }
-          if ($out -match "Tests\\s+(\\d+)\\s+passed") { Write-Host "Tests: $($matches[1]) passed" } else { Write-Host "Tests pattern not matched" }
-          if ($filesLine -and $testsLine) {
-            "$($filesLine.Line.Trim()) | $($testsLine.Line.Trim())" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-          }
-          if ($testExit -ne 0) { Write-Host "npm test failed with exit $testExit"; exit $testExit }
+          if ($out -match "Test Files\s+(\d+)\s+passed") { Write-Host "Test Files: $($matches[1]) passed" } else { Write-Host "Test Files line not found" }
+          if ($out -match "Tests\s+(\d+)\s+passed") { Write-Host "Tests: $($matches[1]) passed" } else { Write-Host "Tests line not found" }
+          Select-String -Path test-output.txt -Pattern "Test Files|Tests" | ForEach-Object { Write-Host "LOG: $($_.Line.Trim())" }
+          if ($testExit -ne 0) { exit $testExit }
           Write-Host "=== Full npm test completed (full repository suite) ==="
       - name: Verify installer nonce generation (non-empty check)
         shell: pwsh
