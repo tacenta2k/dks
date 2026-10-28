@@ -131,7 +131,7 @@ jobs:
               Write-Host "[$phase] tasklist attempt $($i+1): $tl"
               if ($tl -notmatch "DKS.exe") { Write-Host "[$phase] No DKS.exe running — OK"; return $true }
               Write-Host "[$phase] DKS.exe still running, killing (attempt $($i+1))..."
-              try { taskkill /F /IM DKS.exe 2>$null } catch {}
+              try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
               Start-Sleep -Seconds 2
             }
             $final = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
@@ -177,7 +177,7 @@ jobs:
           }
           Start-Sleep -Seconds 10
           # Kill DKS if it auto-launched (oneClick false shouldn't, but check)
-          try { taskkill /F /IM DKS.exe 2>$null; Start-Sleep 1 } catch {}
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0; Start-Sleep 1 } catch {}
           $installDir = "$env:LOCALAPPDATA\Programs\DKS"
           if (-not (Test-Path "$installDir\DKS.exe")) {
             Write-Host "DKS.exe not at $installDir, searching..."
@@ -321,7 +321,7 @@ jobs:
           $procR = Invoke-HangProof -FilePath "$installer" -ArgumentList "/S" -Label "d. reinstall"
           if ($procR.ExitCode -ne 0) { throw "Reinstall failed with $($procR.ExitCode)" }
           Start-Sleep -Seconds 8
-          try { taskkill /F /IM DKS.exe 2>$null } catch {}
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
           $nonceB = (Get-Content -Raw "$env:APPDATA\DKS\install-nonce").Trim()
           Write-Host "d. Reinstall -> nonce differs from (a): before $nonceA after $nonceB"
           if ($nonceA -eq $nonceB) { Write-Host "::error::d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID"; throw "d. FAIL: Nonce did not differ after reinstall: $nonceA — reinstall must mint new GUID" }
@@ -385,6 +385,7 @@ jobs:
           Write-Host "=== NSIS runtime proof completed successfully ==="
           Write-Host "Summary: a.install-nonce non-empty, b.sentinels planted, c.uninstall cleared sentinels+nonce sqlite hash unchanged, d.nonce differs, e.blocked uninstall preserves files"
           Write-Host "If this can't run on hosted runner, exact reason would be logged above (e.g., Defender SmartScreen blocks unsigned NSIS, tasklist/findstr unavailable, per-user install requires interactive explorer, or DKS.exe auto-launch holds lock)"
+          $global:LASTEXITCODE = 0; $LASTEXITCODE = 0
       - name: Report NSIS (c) failure details (no blob storage)
         if: failure()
         shell: pwsh
