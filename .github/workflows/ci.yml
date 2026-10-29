@@ -349,6 +349,161 @@ jobs:
           # Clean up D sentinels for next proof but keep nonce/marker for app logic
           # We keep APPDATA\DKS for stale test which will reinstall anyway
 
+      - name: NSIS case E — electron-updater install invocation over a real v0.1.6 install (Issue A, hard)
+        timeout-minutes: 20
+        shell: pwsh
+        run: |
+          # Reproduces the 0.1.6 -> 0.1.7 in-app update EXACTLY as electron-updater 6.8.12 runs it:
+          #   AppUpdater.quitAndInstall() (no args) -> isSilent=false, isForceRunAfter=autoRunAppAfterInstall=true
+          #   NsisUpdater.doInstall -> args ["--updated", "--force-run"]  (no /S, no /D=, no --package-file)
+          # E1 = that exact invocation (assisted UI, stops on the Finish page)
+          # E2 = the silent form quitAndInstall(true, true) would use: --updated /S --force-run
+          # Both run over a REAL published v0.1.6 install whose app has already consumed its fresh-install
+          # marker and stored the nonce in SQLite (launched once), with planted session sentinels.
+          $ErrorActionPreference = "Stop"
+          $pkgVersion = (Get-Content -Raw package.json | ConvertFrom-Json).version
+          $base = "$env:APPDATA\DKS"
+          $installDir = "$env:LOCALAPPDATA\Programs\DKS"
+          $logPath = "$base\logs\main.log"
+          $installer = Get-ChildItem "release/*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "No installer exe found in release/" }
+
+          Write-Host "=== E0. Evidence: how electron-builder defines and passes --updated ==="
+          $cacheRoot = "$env:LOCALAPPDATA\electron-builder\Cache\nsis"
+          $defs = Get-ChildItem $cacheRoot -Recurse -Include *.nsh,*.nsi -ErrorAction SilentlyContinue |
+            Select-String -Pattern "macro _isUpdated|define isUpdated|macro _isForceRun|define isForceRun" -Context 0,4
+          if ($defs) { $defs | ForEach-Object { Write-Host "$($_.Path):$($_.LineNumber)"; Write-Host $_.Line; $_.Context.PostContext | ForEach-Object { Write-Host "    $_" } } }
+          else { Write-Host "::warning::isUpdated macro definition not found under $cacheRoot" }
+          Select-String -Path "node_modules/app-builder-lib/templates/nsis/include/installUtil.nsh" -Pattern 'StrCpy \$0 "\$0 --updated"|ExecWait .*old-uninstaller|ExecWait .*KEEP_APP_DATA' | ForEach-Object { Write-Host "installUtil.nsh:$($_.LineNumber): $($_.Line.Trim())" }
+          Select-String -Path "node_modules/electron-updater/out/NsisUpdater.js" -Pattern '"--updated"|"/S"|"--force-run"' | ForEach-Object { Write-Host "NsisUpdater.js:$($_.LineNumber): $($_.Line.Trim())" }
+
+          function Get-LogText { if (Test-Path $logPath) { return [IO.File]::ReadAllText($logPath) } return "" }
+          function Get-LogSince([int]$offset) { $t = Get-LogText; if ($t.Length -le $offset) { return "" } return $t.Substring($offset) }
+          function Wait-Log([int]$offset, [string]$pattern, [int]$seconds) {
+            for ($i = 0; $i -lt $seconds; $i++) { $seg = Get-LogSince $offset; if ($seg -match $pattern) { return $seg }; Start-Sleep -Seconds 1 }
+            return $null
+          }
+          function Stop-DKS { try { taskkill /F /IM DKS.exe 2>$null | Out-Null } catch {}; $global:LASTEXITCODE = 0; Start-Sleep -Seconds 2 }
+          function Get-DisplayVersion {
+            $k = Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*" -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -like "DKS*" } | Select-Object -First 1
+            if ($k) { return $k.DisplayVersion } return $null
+          }
+          $sentinels = @("$base\Local Storage\leveldb\dks-ci-session-sentinel", "$base\IndexedDB\dks-ci-session-sentinel", "$base\Network\dks-ci-cookie-sentinel")
+          function Assert-UpdatePreserved([string]$label, [string]$expectedNonce) {
+            $marker = Test-Path "$base\session-reset-required"
+            $fresh = Test-Path "$base\.dks-isFresh"
+            $nonceNow = if (Test-Path "$base\install-nonce") { (Get-Content -Raw "$base\install-nonce").Trim() } else { $null }
+            Write-Host "$label session-reset-required exists=$marker .dks-isFresh exists=$fresh nonce unchanged=$($nonceNow -eq $expectedNonce)"
+            if ($marker) { throw "$label FAIL: session-reset-required EXISTS after an updater-style install — update must preserve login" }
+            if ($fresh) { throw "$label FAIL: .dks-isFresh left behind — customInit classified the update as fresh" }
+            if ($nonceNow -ne $expectedNonce) { throw "$label FAIL: install-nonce changed ($expectedNonce -> $nonceNow) — update must preserve the nonce" }
+            foreach ($s in $sentinels) { if (-not (Test-Path $s)) { throw "$label FAIL: session sentinel deleted: $s — the old uninstaller ran its session cleanup during an update" } }
+            Write-Host "$label PASS: marker absent, .dks-isFresh absent, nonce unchanged, all session sentinels present"
+          }
+          function Assert-AppPreserved([string]$label, [int]$offset, [string]$version) {
+            $seg = Wait-Log $offset "starting main process \(version=$([regex]::Escape($version))" 120
+            if (-not $seg) { throw "$label FAIL: DKS $version did not start (no 'starting main process' in main.log)" }
+            $seg = Wait-Log $offset "install nonce matches stored nonce|session-reset marker present|nonce mismatch without reset marker|present but unreadable|stale session-reset marker" 60
+            Write-Host "--- $label main.log [dks] lines since launch ---"
+            (Get-LogSince $offset) -split "`n" | Where-Object { $_ -match "\[dks\]" } | Select-Object -First 25 | ForEach-Object { Write-Host "  $_" }
+            if (-not $seg) { throw "$label FAIL: no session-isolation decision logged" }
+            if ($seg -match "session-reset marker present|nonce mismatch without reset marker") { throw "$label FAIL: app CLEARED the session on the first launch after an update" }
+            if ($seg -notmatch "install nonce matches stored nonce — preserving session") { throw "$label FAIL: expected the 'nonce matches — preserving session' decision" }
+            foreach ($s in $sentinels) { if (-not (Test-Path $s)) { throw "$label FAIL: session sentinel deleted after app launch: $s" } }
+            Write-Host "$label PASS: app logged 'install nonce matches stored nonce — preserving session'; no clear"
+          }
+
+          Write-Host "=== E-setup. Clean machine, then install the PUBLISHED v0.1.6 ==="
+          Stop-DKS
+          $prev = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($prev) { $p = Start-Process $prev.FullName -ArgumentList "/S" -PassThru; if (-not $p.WaitForExit(300000)) { $p.Kill(); throw "cleanup uninstall hung" }; Start-Sleep -Seconds 5 }
+          if (Test-Path $base) { Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue }
+          $oldDir = Join-Path $env:RUNNER_TEMP "dks-v016"
+          New-Item -ItemType Directory -Force -Path $oldDir | Out-Null
+          & gh release download v0.1.6 --repo tacenta2k/dks --pattern "DKS-0.1.6-win-x64.exe" --dir $oldDir --clobber
+          if ($LASTEXITCODE -ne 0) { throw "could not download the published v0.1.6 installer" }
+          $old = Join-Path $oldDir "DKS-0.1.6-win-x64.exe"
+          $p = Start-Process $old -ArgumentList "/S" -PassThru
+          if (-not $p.WaitForExit(600000)) { $p.Kill(); throw "v0.1.6 install hung" }
+          if ($p.ExitCode -ne 0) { throw "v0.1.6 install failed: exit $($p.ExitCode)" }
+          Start-Sleep -Seconds 5; Stop-DKS
+          Write-Host "Installed DisplayVersion=$(Get-DisplayVersion)"
+          if (-not (Test-Path "$base\session-reset-required")) { throw "setup FAIL: v0.1.6 fresh install did not create the reset marker" }
+
+          Write-Host "E-setup: first v0.1.6 launch consumes the fresh-install marker and stores the nonce in SQLite"
+          $offset = (Get-LogText).Length
+          Start-Process "$installDir\DKS.exe" -ArgumentList "--hidden" | Out-Null
+          if (-not (Wait-Log $offset "genuine fresh install — session cleared, new nonce stored, marker removed" 120)) {
+            (Get-LogSince $offset) | Write-Host
+            throw "setup FAIL: v0.1.6 did not consume the reset marker"
+          }
+          Start-Sleep -Seconds 3; Stop-DKS
+          if (Test-Path "$base\session-reset-required") { throw "setup FAIL: marker still present after first launch" }
+          $nonce0 = (Get-Content -Raw "$base\install-nonce").Trim()
+          Write-Host "E-setup: nonce=$($nonce0.Substring(0,8))… marker consumed"
+          foreach ($s in $sentinels) { New-Item -ItemType Directory -Force -Path (Split-Path $s) | Out-Null; "signed-in-session" | Out-File $s -Encoding ascii }
+          Write-Host "E-setup: planted session sentinels: $($sentinels -join ', ')"
+          $debugFile = "$env:TEMP\DKS-nsis-debug.txt"
+          $debugBefore = if (Test-Path $debugFile) { (Get-Item $debugFile).LastWriteTimeUtc } else { $null }
+
+          Write-Host "=== E1. EXACT electron-updater invocation: `"$installer`" --updated --force-run (v0.1.6 running, like the user) ==="
+          $offset = (Get-LogText).Length
+          Start-Process "$installDir\DKS.exe" -ArgumentList "--hidden" | Out-Null
+          if (-not (Wait-Log $offset "starting main process \(version=0\.1\.6" 90)) { throw "E1 setup FAIL: v0.1.6 did not start" }
+          Start-Sleep -Seconds 5
+          $offset = (Get-LogText).Length
+          $p = Start-Process $installer -ArgumentList "--updated --force-run" -PassThru
+          $installed = $false
+          for ($i = 0; $i -lt 300; $i++) {
+            if ((Get-DisplayVersion) -eq $pkgVersion) { $installed = $true; break }
+            if ($p.HasExited) { break }
+            Start-Sleep -Seconds 1
+          }
+          if (-not $installed) { try { $p.Kill() } catch {}; throw "E1 FAIL: installer did not register $pkgVersion (exited=$($p.HasExited) code=$(if ($p.HasExited) { $p.ExitCode }))" }
+          # customInstall runs right after registryAddInstallInfo; then the assisted UI stops on the Finish page.
+          Start-Sleep -Seconds 10
+          $clickedFinish = $false
+          if (-not $p.HasExited) {
+            Write-Host "E1: installer is on the Finish page (non-silent, as for the user) — pressing Finish (Run DKS is checked by default)"
+            try {
+              $ws = New-Object -ComObject WScript.Shell
+              if ($ws.AppActivate($p.Id)) { Start-Sleep -Milliseconds 500; $ws.SendKeys("{ENTER}") }
+            } catch { Write-Host "SendKeys unavailable: $_" }
+            if ($p.WaitForExit(20000)) { $clickedFinish = $true } else { Write-Host "E1: Finish could not be pressed on this runner — closing the installer and launching DKS like StartApp does (--updated)"; try { $p.Kill() } catch {} }
+          } else { Write-Host "E1: installer exited by itself with code $($p.ExitCode)" }
+          Start-Sleep -Seconds 3
+          $debugAfter = if (Test-Path $debugFile) { (Get-Item $debugFile).LastWriteTimeUtc } else { $null }
+          Write-Host "E1: old uninstaller session-cleanup debug file rewritten=$($debugAfter -ne $debugBefore) (customUnInstall writes it only when NOT isUpdated)"
+          if ($debugAfter -ne $debugBefore) { throw "E1 FAIL: the old v0.1.6 uninstaller ran its session cleanup during the update (DKS-nsis-debug.txt rewritten)" }
+          Assert-UpdatePreserved "E1 (installer layer)" $nonce0
+          if (-not $clickedFinish -or -not (Get-Process DKS -ErrorAction SilentlyContinue)) {
+            Stop-DKS
+            Start-Process "$installDir\DKS.exe" -ArgumentList "--updated --hidden" | Out-Null
+          }
+          Assert-AppPreserved "E1 (app layer)" $offset $pkgVersion
+          Stop-DKS
+
+          Write-Host "=== E2. Silent updater form: `"$installer`" --updated /S --force-run ==="
+          $offset = (Get-LogText).Length
+          $p = Start-Process $installer -ArgumentList "--updated /S --force-run" -PassThru
+          if (-not $p.WaitForExit(600000)) { $p.Kill(); throw "E2 FAIL: silent updater install hung" }
+          Write-Host "E2: exit code $($p.ExitCode)"
+          if ($p.ExitCode -ne 0) { throw "E2 FAIL: exit $($p.ExitCode)" }
+          Assert-UpdatePreserved "E2 (installer layer)" $nonce0
+          # Silent + --force-run: installSection.nsh doStartApp launches DKS itself with --updated.
+          Assert-AppPreserved "E2 (app layer)" $offset $pkgVersion
+          Stop-DKS
+
+          Write-Host "=== E3. Uninstall still clears (not weakened) ==="
+          $un = Get-ChildItem "$installDir\Uninstall*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          $p = Start-Process $un -ArgumentList "/S" -PassThru
+          if (-not $p.WaitForExit(300000)) { $p.Kill(); throw "E3 uninstall hung" }
+          Start-Sleep -Seconds 5
+          $left = @($sentinels + "$base\install-nonce") | Where-Object { Test-Path $_ }
+          if ($left.Count -gt 0) { throw "E3 FAIL: genuine uninstall left session data / nonce: $($left -join ', ')" }
+          Write-Host "E3 PASS: genuine uninstall removed session sentinels and install-nonce"
+          Write-Host "=== Case E PASSED: updater invocations (--updated --force-run and --updated /S --force-run) preserve marker/nonce/session; uninstall still clears ==="
+
       - name: Investigate old releases (v0.1.3 app-update.yml and v0.1.4 Authenticode) — no mutation
         shell: pwsh
         run: |

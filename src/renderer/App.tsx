@@ -3,6 +3,7 @@ import { useStore } from 'zustand';
 
 import { createAuthService, AuthService } from '../features/auth/auth-service';
 import { AuthScreen } from '../features/auth/AuthScreen';
+import { RESTORE_UNREACHABLE_CODE } from '../features/auth/auth-errors';
 import { OfficeApprovalGate } from '../features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../features/admin/OfficeApprovalsPanel';
 import { createOfficeApprovalService, type OfficeApprovalService } from '../features/auth/office-approval-service';
@@ -27,7 +28,7 @@ import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell, type SyncPendingItem } from './components/AppShell';
 import { StartupSplash } from './components/StartupSplash';
-import { createAppStore } from '../lib/store';
+import { createAppStore, type AppStoreOptions } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
 import type { DksSettings, PartialSettings } from '../features/settings/SettingsPage';
@@ -75,6 +76,8 @@ import {
 } from '../features/sync/live-sheet-realtime';
 
 export interface AppProps {
+  /** Store tuning (tests shorten the transient-restore back-off). */
+  storeOptions?: AppStoreOptions;
   initialView?: AppView;
   initialThemePreference?: ThemePreference;
   startInWorkspace?: boolean;
@@ -117,12 +120,13 @@ export function App({
   demoMode,
   sheetRepository: providedSheetRepository,
   updater: providedUpdater,
+  storeOptions,
 }: AppProps) {
   const [authService] = useState(() => providedAuthService ?? createAuthService());
   const [approvalService] = useState(() => providedApprovalService === undefined
     ? createOfficeApprovalService()
     : providedApprovalService);
-  const [appStore] = useState(() => createAppStore(authService, approvalService));
+  const [appStore] = useState(() => createAppStore(authService, approvalService, storeOptions));
   const [baseSheetRepository] = useState<SheetRepository>(
     () => providedSheetRepository ?? createElectronSheetRepository({ role: 'office' }),
   );
@@ -1091,6 +1095,9 @@ export function App({
         health={health}
         demoAvailable={demoAvailable}
         onDemoContinue={() => appStore.getState().setDemoSession()}
+        onRetrySession={authError?.code === RESTORE_UNREACHABLE_CODE
+          ? () => appStore.getState().restoreSession()
+          : undefined}
       />
     );
   }

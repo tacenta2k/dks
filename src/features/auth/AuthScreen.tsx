@@ -12,6 +12,12 @@ export interface AuthScreenProps {
   authError?: string | null;
   health?: SupabaseHealth;
   demoAvailable?: boolean;
+  /**
+   * v0.1.8 (Issue A): shown when the saved session could not be restored
+   * because the server was unreachable — the session is still on disk, so
+   * "Retry" restores it without a password. The form stays usable.
+   */
+  onRetrySession?: () => Promise<void> | void;
   onDemoContinue?: () => void;
 }
 
@@ -27,7 +33,9 @@ export function AuthScreen({
   },
   demoAvailable = false,
   onDemoContinue,
+  onRetrySession,
 }: AuthScreenProps) {
+  const [retrying, setRetrying] = useState(false);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   // Password visibility toggle: the input keeps id/name/autoComplete so
@@ -116,6 +124,26 @@ export function AuthScreen({
           <div className="placeholder-callout" role="alert">
             <span>{errorMessage}</span>
           </div>
+        ) : null}
+
+        {onRetrySession && !validationError ? (
+          <button
+            className="button button--wide"
+            type="button"
+            disabled={retrying || isSubmitting}
+            aria-busy={retrying}
+            style={{ marginBottom: 14 }}
+            onClick={async () => {
+              setRetrying(true);
+              try {
+                await onRetrySession();
+              } finally {
+                setRetrying(false);
+              }
+            }}
+          >
+            {retrying ? 'Reconnecting…' : 'Retry saved sign-in'}
+          </button>
         ) : null}
 
         <form onSubmit={handleSubmit} noValidate>

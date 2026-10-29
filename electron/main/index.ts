@@ -653,10 +653,42 @@ function createDksTray(): Tray | null {
   }
 }
 
+/**
+ * v0.1.8 (Issue A) — persist the signed-in session BEFORE the update installer
+ * starts. Supabase keeps the session (and its rotating refresh token) in
+ * Chromium localStorage; Chromium commits DOMStorage to LevelDB lazily. The
+ * NSIS installer started by quitAndInstall() force-kills a DKS.exe that has not
+ * exited ~2–3 s after it starts (taskkill, then taskkill /f — electron-builder
+ * allowOnlyOneInstallerInstance.nsh). Anything still in memory at that moment
+ * is lost; a lost refresh-token rotation means the token on disk was already
+ * used and Supabase rejects it → email/password again. Flushing here closes
+ * that window. Exported for tests.
+ */
+export async function flushSessionStorageBeforeInstall(): Promise<void> {
+  quitting = true;
+  const ses = session?.defaultSession;
+  if (!ses) return;
+  const started = Date.now();
+  try {
+    ses.flushStorageData();
+  } catch (error) {
+    log.warn('[dks] flushStorageData before update failed', error);
+  }
+  try {
+    await ses.cookies?.flushStore?.();
+  } catch (error) {
+    log.warn('[dks] cookie flush before update failed', error);
+  }
+  log.info(`[dks] session storage flushed before update install (${Date.now() - started} ms)`);
+}
+
 function installLifecycleListeners(): void {
   app.on('before-quit', () => {
     quitting = true;
     updaterScheduler?.stop();
+    // v0.1.8: commit DOMStorage (Supabase session) synchronously on every quit
+    // path — tray Exit, OS shutdown and the updater's own app.quit().
+    safeInvoke(() => session?.defaultSession?.flushStorageData());
     closeLocalStore();
     // Remove running.lock so uninstall can proceed after Exit. If crash leaves
     // stale lock, uninstaller's tasklist check will delete it; startup also
@@ -759,6 +791,7 @@ export async function startMainProcess(): Promise<boolean> {
   updaterService = createUpdaterService({
     enabled: Boolean(app.isPackaged),
     onTransition: logUpdaterTransition,
+    beforeQuitAndInstall: flushSessionStorageBeforeInstall,
   });
   updaterService.onStatus((state) => {
     sendToRenderer(UPDATER_STATUS_CHANNEL, state);

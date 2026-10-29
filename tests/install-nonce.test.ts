@@ -292,3 +292,100 @@ describe('enforceSessionIsolation — login matrix A–F', () => {
     tryClose(store);
   });
 });
+
+describe('enforceSessionIsolation — v0.1.8 auto-update hardening (Issue A)', () => {
+  let dir: string;
+  beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'dks-isolation-018-')); });
+  afterEach(() => { try { rmSync(dir, { recursive: true, force: true }); } catch {} });
+  const quietLogger = () => ({ info: vi.fn(), warn: vi.fn(), error: vi.fn() });
+
+  it('readInstallerNonceDetailed distinguishes missing (ENOENT) from unreadable', async () => {
+    const { readInstallerNonceDetailed } = await import('../electron/main/install-nonce');
+    expect(readInstallerNonceDetailed(dir)).toEqual({ status: 'missing' });
+    writeFileSync(installerNoncePath(dir), '   ', 'utf8');
+    expect(readInstallerNonceDetailed(dir)).toEqual({ status: 'missing' });
+    rmSync(installerNoncePath(dir));
+    mkdirSync(installerNoncePath(dir)); // EISDIR — exists but cannot be read
+    const read = readInstallerNonceDetailed(dir, 1);
+    expect(read.status).toBe('unreadable');
+    writeFileSync(join(dir, 'probe'), 'x');
+    rmSync(installerNoncePath(dir), { recursive: true, force: true });
+    writeInstallerNonce(dir, '{GUID-1}');
+    expect(readInstallerNonceDetailed(dir)).toEqual({ status: 'ok', nonce: '{GUID-1}' });
+  });
+
+  it('nonce file present but unreadable (transient lock after update) → preserves session, records nothing', async () => {
+    const store = makeStore();
+    store.setInstallNonce('{STORED}');
+    mkdirSync(installerNoncePath(dir));
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    const logger = quietLogger();
+    const ok = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as never, logger });
+    expect(ok).toBe(true);
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(store.getInstallNonce()).toBe('{STORED}');
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('present but unreadable'), expect.anything());
+    tryClose(store);
+  });
+
+  it('stale marker (stored === installer nonce, marker could not be removed last launch) → removes marker, does NOT clear again', async () => {
+    const store = makeStore();
+    writeInstallerNonce(dir, '{SAME}');
+    store.setInstallNonce('{SAME}');
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    const ok = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as never, logger: quietLogger() });
+    expect(ok).toBe(true);
+    expect(session.clearStorageData).not.toHaveBeenCalled();
+    expect(hasResetMarker(dir)).toBe(false);
+    expect(store.getInstallNonce()).toBe('{SAME}');
+    tryClose(store);
+  });
+
+  it('genuine reinstall is NOT weakened: marker + NEW nonce (≠ stored) still clears', async () => {
+    const store = makeStore();
+    store.setInstallNonce('{OLD-INSTALL}');
+    writeInstallerNonce(dir, '{NEW-INSTALL}');
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    const ok = await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as never, logger: quietLogger() });
+    expect(ok).toBe(true);
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(store.getInstallNonce()).toBe('{NEW-INSTALL}');
+    expect(hasResetMarker(dir)).toBe(false);
+    tryClose(store);
+  });
+
+  it('genuine reinstall after uninstall (nonce deleted → missing) + marker still clears', async () => {
+    const store = makeStore();
+    store.setInstallNonce('{OLD-INSTALL}');
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as never, logger: quietLogger() });
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    expect(store.getInstallNonce()).not.toBe('{OLD-INSTALL}');
+    tryClose(store);
+  });
+
+  it('a whole update cycle (reset once, then N restarts/updates) clears exactly once', async () => {
+    const store = makeStore();
+    writeInstallerNonce(dir, '{INSTALL}');
+    writeFileSync(resetMarkerPath(dir), '1', 'utf8');
+    const session = { clearStorageData: vi.fn(async () => undefined) };
+    for (let launch = 0; launch < 4; launch += 1) {
+      // Every later launch = restart or auto-update: the installer preserved the file.
+      await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: session as never, logger: quietLogger() });
+    }
+    expect(session.clearStorageData).toHaveBeenCalledTimes(1);
+    tryClose(store);
+  });
+
+  it('nonce match logs a positive "preserving session" line (used by the CI updater-invocation case)', async () => {
+    const store = makeStore();
+    writeInstallerNonce(dir, '{MATCH}');
+    store.setInstallNonce('{MATCH}');
+    const logger = quietLogger();
+    await enforceSessionIsolation({ isPackaged: true, userDataPath: dir, store, session: { clearStorageData: vi.fn() } as never, logger });
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('install nonce matches stored nonce — preserving session'), expect.anything());
+  });
+});

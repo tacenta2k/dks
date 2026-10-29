@@ -79,7 +79,19 @@ export interface UpdaterServiceOptions {
   downloadInBackground?: boolean;
   /** Receives state metadata only — never Error objects, URLs or file paths. */
   onTransition?: (transition: UpdateTransition) => void;
+  /**
+   * v0.1.8 (Issue A) — runs right before quitAndInstall(). The main process
+   * uses it to flush Chromium DOMStorage (where the Supabase session and its
+   * rotating refresh token live) and the cookie store to disk. electron-
+   * builder's installer, launched with --updated, gives the old process only
+   * ~1.3 s before `taskkill` and then `taskkill /f` (allowOnlyOneInstallerInstance.nsh
+   * _CHECK_APP_RUNNING), so nothing may be left in memory. Bounded by
+   * BEFORE_INSTALL_TIMEOUT_MS; a failure is logged and never blocks the install.
+   */
+  beforeQuitAndInstall?: () => Promise<void> | void;
 }
+
+export const BEFORE_INSTALL_TIMEOUT_MS = 3_000;
 
 export interface UpdaterService {
   checkForUpdates: () => Promise<UpdateState>;
@@ -197,7 +209,18 @@ function createDefaultAdapter(): UpdaterAdapter {
       downloadUpdate: () => autoUpdater.downloadUpdate(),
       // Explicit user action only: quit, install, relaunch. Local SQLite
       // data lives in userData and is untouched by the installer.
-      quitAndInstall: () => autoUpdater.quitAndInstall(),
+      //
+      // Arguments are spelled out (they equal electron-updater 6.8.12's
+      // defaults): isSilent=false, isForceRunAfter=true. NsisUpdater then
+      // spawns `<installer> --updated --force-run` — the assisted installer
+      // skips its pages because ${isUpdated} is set and stops on the Finish
+      // page ("Run DKS"). CI (ci.yml, case E) runs exactly these arguments.
+      quitAndInstall: () => {
+        try {
+          log.info('[dks] quitAndInstall(isSilent=false, isForceRunAfter=true) → installer args: --updated --force-run');
+        } catch {}
+        autoUpdater.quitAndInstall(false, true);
+      },
       onDownloadProgress: (listener) => {
         progressListener = listener;
       },
@@ -436,6 +459,29 @@ export function createUpdaterService(options: UpdaterServiceOptions = {}): Updat
   const restartToUpdate = async (): Promise<boolean> => {
     if (state.status !== 'downloaded' || !adapter.quitAndInstall) {
       return false;
+    }
+
+    if (options.beforeQuitAndInstall) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.resolve().then(() => options.beforeQuitAndInstall?.()),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(() => {
+              try {
+                log.warn('[dks] pre-install flush exceeded timeout — installing anyway');
+              } catch {}
+              resolve();
+            }, BEFORE_INSTALL_TIMEOUT_MS);
+          }),
+        ]);
+      } catch (error) {
+        try {
+          log.warn('[dks] pre-install flush failed — installing anyway', error);
+        } catch {}
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+      }
     }
 
     try {
