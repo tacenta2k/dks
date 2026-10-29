@@ -170,6 +170,53 @@ export function isDuplicateColumnNameError(message: string): boolean {
 }
 
 /**
+ * v0.1.8 — local purge of a column the server no longer returns.
+ *
+ * Reached only from the `app_columns_pkey` path, i.e. on POSITIVE proof: the
+ * server just told us a row with this exact id exists, yet the SELECT a moment
+ * ago did not return it. Under the SELECT policy
+ *   using (is_admin() or (not deleted and is_office() and office_session_is_approved()))
+ * and with sync running only for a cleared session, the one reason a row can
+ * exist and be invisible is that it is soft-deleted — an administrator deleted
+ * the column. The local copy is soft-deleted to match (nothing is hard-deleted;
+ * entry values are untouched, exactly as on the server).
+ *
+ * Safeguards:
+ *  - an EMPTY column list is never treated as proof (a transient/unauthorised
+ *    SELECT returns nothing at all), so nothing is purged in that case;
+ *  - the column's own `updated_at` is kept, so if this were ever wrong the
+ *    server copy (equal or newer) wins last-write-wins on the next sync and the
+ *    column is restored locally — a purge can never be pushed as a delete;
+ *  - applied through the remote path, so it creates no outbox echo.
+ */
+async function purgeServerDeletedColumn(
+  options: SupabaseSyncOptions,
+  column: DksLocalColumn,
+  remoteColumnCount: number,
+  now: () => string,
+): Promise<boolean> {
+  if (column.deleted === true || remoteColumnCount === 0 || !options.local.applyRemoteSnapshot) {
+    return false;
+  }
+  try {
+    const source = column as unknown as Record<string, unknown>;
+    const keptUpdatedAt = stringValue(source.updated_at ?? source.updatedAt) || undefined;
+    const record = toLocalColumn({
+      ...toRemoteColumn(column, now()),
+      deleted: true,
+      deleted_at: now(),
+      ...(keptUpdatedAt ? { updated_at: keptUpdatedAt } : {}),
+    }, column.id);
+    await options.local.applyRemoteSnapshot({ rows: [], columns: [record] });
+    console.info('[sync] A column deleted by an administrator was removed from this device.');
+    return true;
+  } catch {
+    // Best effort: the column simply stays visible until the next sync.
+    return false;
+  }
+}
+
+/**
  * v0.1.7 — the column's OWN id already exists on the server:
  *   23505 duplicate key value violates unique constraint "app_columns_pkey".
  *
@@ -1046,6 +1093,13 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       }
       const remote = remoteColumnById.get(local.id)
         ?? remoteColumnByName.get(nameKey);
+      if (!remote && local.deleted === true && bookkeeping.pending('column', local.id).length === 0) {
+        // v0.1.8 — a locally deleted column that is not on the server and has
+        // nothing queued (typically one purged below after an administrator
+        // deleted it) has nothing to push. Re-INSERTing it every sync only
+        // produced a 23505 round trip per column per run.
+        continue;
+      }
       if (!remote) {
         columnPushes.push({ column: local, mode: 'insert' });
         continue;
@@ -1136,6 +1190,9 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
             console.info('[sync] Queued column create already exists on the server; acknowledging the create.');
             pushedColumns += 1;
             await bookkeeping.markSynced('column', column.id);
+            if (await purgeServerDeletedColumn(options, column, remoteColumns.length, now)) {
+              appliedColumns += 1;
+            }
           } catch (updateCaught) {
             if (updateCaught instanceof SyncClearanceError) throw updateCaught;
             requireClearance(options);
