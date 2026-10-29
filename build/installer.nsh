@@ -65,10 +65,10 @@
 ; a genuine fresh install because installApplicationFiles just copied it. Classification must be in
 ; customInit (pre-copy) and the result preserved in a Var until customInstall.
 
-Var isFreshInstall
-
 !macro customInit
-  StrCpy $isFreshInstall "0"
+  SetShellVarContext current
+  ; Preserve classification safely via file (register $R9 could be clobbered between .onInit and Section)
+  Delete "$APPDATA\DKS\.dks-isFresh"
   ${If} ${isUpdated}
     DetailPrint "DKS: customInit — isUpdated=true (auto-update) → not fresh (preserve session)"
   ${ElseIf} $hasPerUserInstallation == "1"
@@ -81,8 +81,13 @@ Var isFreshInstall
     ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
       DetailPrint "DKS: customInit — APPDATA nonce exists but no registry entry → treating as upgrade (preserve)"
     ${Else}
-      StrCpy $isFreshInstall "1"
-      DetailPrint "DKS: customInit — no existing install detected → genuine fresh (will create session-reset marker)"
+      CreateDirectory "$APPDATA\DKS"
+      FileOpen $0 "$APPDATA\DKS\.dks-isFresh" w
+      ${If} $0 != ""
+        FileWrite $0 "1"
+        FileClose $0
+        DetailPrint "DKS: customInit — no existing install detected → genuine fresh (will create session-reset marker, wrote .dks-isFresh)"
+      ${EndIf}
     ${EndIf}
   ${EndIf}
 !macroend
@@ -96,9 +101,10 @@ Var isFreshInstall
 !macro customInstall
   SetShellVarContext current
   CreateDirectory "$APPDATA\DKS"
-  ${If} $isFreshInstall == "1"
+  ${If} ${FileExists} "$APPDATA\DKS\.dks-isFresh"
     ; Genuine fresh install (first install or after genuine uninstall) — mint with marker
-    DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker (isFreshInstall=1)"
+    Delete "$APPDATA\DKS\.dks-isFresh"
+    DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker (pre-copy proven via .dks-isFresh)"
     System::Call 'ole32::CoCreateGuid(g .r0)'
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
     ${If} $1 == ""
@@ -131,10 +137,12 @@ Var isFreshInstall
   ${Else}
     ; Existing install → preserve or legacy-mint
     ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
-      DetailPrint "DKS: preserving existing install nonce (upgrade, isFreshInstall=0)"
+      DetailPrint "DKS: preserving existing install nonce (upgrade, pre-copy not fresh)"
+      Delete "$APPDATA\DKS\.dks-isFresh"
       Delete "$APPDATA\DKS\session-reset-required"
     ${Else}
       ; Legacy upgrade: existing install but no nonce (0.1.4→0.1.5) — mint without marker to preserve login
+      Delete "$APPDATA\DKS\.dks-isFresh"
       DetailPrint "DKS: legacy upgrade detected (no nonce, but existing install) — creating nonce without session reset"
       System::Call 'ole32::CoCreateGuid(g .r0)'
       System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'

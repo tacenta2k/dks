@@ -117,6 +117,21 @@ jobs:
           path: ${{ runner.temp }}/build.log
           if-no-files-found: warn
 
+      - name: Post build log as comment (on failure, no blob needed)
+        if: failure()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $logPath = "$env:RUNNER_TEMP/build.log"
+          if (Test-Path $logPath) {
+            $content = Get-Content -Raw $logPath -ErrorAction SilentlyContinue
+            if ($content) {
+              $body = "Build log (first 50000 chars) for $env:GITHUB_SHA`n``````n" + $content.Substring(0, [Math]::Min(50000, $content.Length)) + "`n``````"
+              try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted build log comment" } catch { Write-Host "Comment failed: $_" }
+            }
+          }
+
       - name: Verify packaged app-update.yml has no publisherName (unsigned v0.1.5)
         shell: pwsh
         run: |
