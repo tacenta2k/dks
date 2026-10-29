@@ -102,11 +102,20 @@ jobs:
           if ($buildExit -ne 0) {
             Write-Host "::error::electron-builder failed with $buildExit — printing build.log"
             Get-Content "$env:RUNNER_TEMP\build.log" | ForEach-Object { Write-Host "BUILD: $_" }
+            # Upload build log for API-visible artifact download
             exit $buildExit
           }
           if (-not (Test-Path "release")) { Write-Error "release directory not created"; exit 1 }
           Get-ChildItem release | Format-Table Name, Length
           Write-Host "LOG: electron-builder --win --publish never succeeded"
+
+      - name: Upload build log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: ${{ runner.temp }}/build.log
+          if-no-files-found: warn
 
       - name: Verify packaged app-update.yml has no publisherName (unsigned v0.1.5)
         shell: pwsh
