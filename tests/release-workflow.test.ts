@@ -76,7 +76,7 @@ describe('one-click Release DKS workflow', () => {
     expect(bump.type).toBe('choice');
     expect(bump.required).toBe(true);
     expect(bump.default).toBe('patch');
-    expect(bump.options).toEqual(['patch', 'minor', 'major']);
+    expect(bump.options).toEqual(['patch', 'minor', 'major', 'none']);
   });
 
   it('uses one non-cancelling Windows job with only contents: write', () => {
@@ -278,6 +278,10 @@ describe('one-click Release DKS workflow', () => {
     expect(verifyRun).toContain('gh release download');
     expect(verifyRun).toContain('^version:');
     expect(verifyRun).toContain('INSTALLER_NAME');
+    // Bug 2: latest.yml must be from the SAME electron-builder run as the exe — verify sha512/size + byte identity.
+    expect(verifyRun).toContain('localLatestYml');
+    expect(verifyRun).toContain('sha512');
+    expect(verifyRun).toContain('installerSize');
 
     expect(releaseIndex).toBeLessThan(verifyIndex);
     expect(verifyIndex).toBeLessThan(publishIndex);

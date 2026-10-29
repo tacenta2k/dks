@@ -133,10 +133,21 @@ export function updateStatusMessage(state: DksUpdateState): string {
       return `Update${version} is ready to install.`;
     case 'not-available':
       return 'DKS is up to date.';
-    case 'error':
+    case 'error': {
+      // Bug 2: surface the real updater error (name/code/message) in the pill.
+      // Falls back to the generic copy only when no details are available.
+      const rawDetail =
+        [state.errorName, state.errorCode, state.errorMessage].filter(Boolean).join(' — ') || state.errorMessage;
+      const detail = typeof rawDetail === 'string' ? rawDetail.trim().slice(0, 500) : '';
+      if (detail) {
+        return state.errorKind === 'download'
+          ? `Update${version} download failed: ${detail}`
+          : `Could not check for updates: ${detail}`;
+      }
       return state.errorKind === 'download'
         ? `Update${version} download failed. Check your internet connection and try again.`
         : 'Could not check for updates. Check your internet connection and try again.';
+    }
     case 'disabled':
       return 'Update checks are unavailable right now.';
     case 'idle':

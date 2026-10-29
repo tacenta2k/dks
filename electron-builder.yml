@@ -43,13 +43,19 @@ win:
     - nsis
   icon: build/icon.ico
   executableName: DKS
-  publisherName: DKS
+  # Unsigned build for v0.1.5 — no code signing certificate available.
+  # Do not add a signing identity: an unsigned installer must not declare a
+  # publisher for verification, otherwise auto-update fails after download.
+  # Proper code-signing is the future stronger fix.
 nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  # Keep userData (including dks-cache.sqlite); build/installer.nsh removes
-  # only Chromium Local/Session Storage on a real uninstall, never on update.
+  # Keep userData (including dks-cache.sqlite + outbox); build/installer.nsh
+  # removes the four Chromium session storages (Local Storage, Session Storage,
+  # IndexedDB, Cookies) on a real uninstall, never on update. The SQLite file
+  # is never touched. See build/installer.nsh + electron/main/install-nonce.ts
+  # for the two-layer fresh-install guard.
   deleteAppDataOnUninstall: false
   include: build/installer.nsh
   createDesktopShortcut: true
