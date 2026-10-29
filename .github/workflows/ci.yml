@@ -477,7 +477,7 @@ jobs:
             foreach ($w in $wins) {
               $found += @($w.FindAll([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))))
             }
-            return ,$found
+            return $found
           }
           function Get-WizardText([int]$procId) {
             $A = [System.Windows.Automation.AutomationElement]
@@ -491,7 +491,7 @@ jobs:
             return (($names | Select-Object -Unique) -join " | ")
           }
           function Invoke-WizardButton([int]$procId, [string]$pattern) {
-            foreach ($b in (Get-WizardButtons $procId)) {
+            foreach ($b in @(Get-WizardButtons $procId)) {
               $name = $b.Current.Name -replace '&', ''
               if ($name -match $pattern -and $b.Current.IsEnabled) {
                 try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $name } catch {}
@@ -518,8 +518,8 @@ jobs:
               $clicked = try { Invoke-WizardButton $p.Id '^(Next|Install)' } catch { $null }
               if ($clicked) { Write-Host "E1: pressed '$clicked' (default selection kept, as the user would)" }
             }
-            if (-not $sawUi -and $i -ge 60 -and -not $installed) {
-              Write-Host "::warning::E1: no installer window is visible to UI Automation on this runner; falling back to the updater arguments plus --currentuser (equivalent to pressing Next on the default 'Only for me')"
+            if (-not $deviation -and -not $installed -and $i -ge 90) {
+              Write-Host "::warning::E1: the wizard could not be driven through UI Automation on this runner (window seen=$sawUi); falling back to the updater arguments plus --currentuser (equivalent to pressing Next on the default 'Only for me')"
               try { $p.Kill() } catch {}; Start-Sleep -Seconds 3
               $p = Start-UpdaterInstall "--updated --force-run --currentuser"; $deviation = $true; $sawUi = $true
             }

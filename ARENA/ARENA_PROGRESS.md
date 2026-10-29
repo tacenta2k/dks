@@ -3536,3 +3536,98 @@ ship as the next patch (the Release workflow's `patch` bump → 0.1.8).
 4. Settings → Notifications opens instantly the second time; offline shows a
    Retry button after ≤8 s.
 5. Scroll a long page (Audit Log, Settings) — sidebar and top bar stay put.
+
+## §41 Login kept across in-app updates, faster "Signing in…", Office column purge — 2026-10-29 (LLM agent)
+
+Branch `arena/a520278f-dks`, on top of `be1aad9` (PR #24, v0.1.7 code). Ships
+as **0.1.8** via the Release workflow `bump=patch`; v0.1.7 is not moved or
+reused. Not published by the agent.
+
+### Issue A — login asked again after the 0.1.6 → 0.1.7 in-app update
+
+Evidence (electron-updater 6.8.12 / app-builder-lib 25.1.8):
+
+- `NsisUpdater.doInstall`: `const args = ["--updated"]`, `/S` only if silent,
+  `--force-run` if force-run. `quitAndInstall()` with no arguments → non-silent,
+  `isForceRunAfter = autoRunAppAfterInstall = true` → `--updated --force-run`.
+- `${isUpdated}` is generated at build time (`nsisScriptGenerator.flags`) as
+  `${StdUtils.TestParameter} $R9 "updated"` → true for that invocation.
+- The new installer runs the old uninstaller with
+  `/S /KEEP_APP_DATA --updated` (`installUtil.nsh`), so `customUnInstall`
+  skips its session cleanup.
+- `build/installer.nsh` `customInit` never writes `.dks-isFresh` when
+  `${isUpdated}`; `customInstall` then preserves the nonce and deletes any
+  `session-reset-required`. The installer layer therefore did NOT classify
+  the update as fresh.
+- App layer weaknesses that could lose the session on the first launch
+  after an update (fixed): nonce file read error treated as mismatch (clear);
+  a consumed marker re-clearing; the rotated Supabase refresh token not
+  flushed before the installer kills the app (`flushSessionStorageBeforeInstall`,
+  updater `beforeQuitAndInstall`, before-quit flush); a transient network
+  error during restore showing the login form (restore retry 1/2/4/8 s +
+  "Retry saved sign-in"); the auth listener racing sign-in; a
+  TOKEN_REFRESHED blip ejecting the user.
+- CI case E (after the A–D matrix) installs the PUBLISHED v0.1.6, launches it
+  once, plants session sentinels, then runs the new installer exactly as the
+  updater does: E1 `--updated --force-run` (assisted wizard driven through UI
+  Automation — the install-mode page is not skipped on update), E2
+  `--updated /S --force-run`; asserts no `session-reset-required`, no
+  `.dks-isFresh`, nonce unchanged, sentinels kept, and the new app logging
+  `install nonce matches stored nonce — preserving session`. E3: a genuine
+  uninstall still clears session data and the nonce.
+- Proven in CI (run 40924769069, page text captured by UI Automation): the
+  in-app update is NOT a silent install for users. The exact updater
+  invocation stops on "Choose Installation Options — Who should this
+  application be installed for? … Only for me (default) … There is already a
+  per-user installation … Will reinstall/upgrade." The assisted wizard only
+  skips the license/directory pages on update (`skipPageIfUpdated`); the
+  install-mode page is skipped only by `--currentuser`/`--allusers`, which
+  electron-updater never passes. Not a session-loss cause, but every update
+  asks the user this question. Proposal (not implemented): a
+  `customInstallMode` macro in `build/installer.nsh` setting
+  `$isForceCurrentInstall = "1"` when `${isUpdated}` and
+  `$hasPerUserInstallation == "1"`.
+
+### Issue B — slow "Signing in…"
+
+- Instrumentation (`src/lib/timing.ts`, forwarded to `main.log` by
+  `forwardRendererDiagnostics`): `[dks:timing] signin auth=… profile=…
+  total=… outcome=… role=… warm=…`, plus `restore`, `office-approval`,
+  `office-open`, `workspace-open`. Durations and allow-listed enums only — no
+  email, password, token, uuid or names (asserted in tests).
+- Measured with real supabase-js + real store against an injected-latency
+  fetch (RTT 200 ms; server 250/30/40 ms) — simulated, not field data:
+  - Admin before: token → 2 identical profile GETs; 692 ms.
+  - Office before: token → 2× profile → my_office_signin →
+    request_office_signin; 1168 ms (4 serial round trips). After: 926 ms (3).
+  - The password grant is ~65 % of the button time even on a warm connection,
+    and in the packaged app it is also the cold first request (DNS/TCP/TLS +
+    CORS preflight).
+- Fixes: listener ownership (commit 1) removed the duplicate profile read and
+  the extra Office RPC; `prewarmSupabaseConnection` (unauthenticated
+  `GET /auth/v1/health`, public key only, throttled 1/min, 5 s abort, errors
+  ignored, never awaited) runs when the sign-in form mounts and on
+  email/password focus. Auth and approval checks are unchanged.
+- Tests: `tests/signin-timing.test.ts`, `tests/signin-prewarm.test.tsx`,
+  `tests/signin-waterfall.test.ts` (pins the request sequence).
+
+### Follow-ups on the §40 fixes
+
+- (a) **Implemented**: local purge of a column an Admin deleted, on Office.
+  Only on positive proof (our INSERT hits `app_columns_pkey` while the SELECT
+  did not return the row ⇒ soft-deleted under the RLS SELECT policy).
+  Soft-deleted locally through the remote path (no outbox echo). Safeguards:
+  an empty column list is never proof; the column's `updated_at` is kept, so a
+  wrong purge is reverted by last-write-wins and can never be pushed as a
+  delete. Office's UPDATE policy (`using … not deleted`) already made the old
+  fallback UPDATE a no-op — it could not resurrect the column.
+- (b) The 20 s splash fallback renders the normal login form; restore retries
+  total 15 s < 20 s; "Retry saved sign-in" re-runs the restore
+  (`tests/session-restore-resilience.test.tsx`, `tests/startup-splash.test.tsx`).
+- (c) Manual checks added to `docs/FIXES_UI.md` §15 (Global / Recycle Bin /
+  Settings).
+
+### Verification
+
+- `npx tsc --noEmit -p .` clean; `npx vitest run` 912 passed / 3 skipped (94
+  files); `npm run build` OK.
