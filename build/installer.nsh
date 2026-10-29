@@ -44,56 +44,61 @@
 
 !include "LogicLib.nsh"
 
+; ── Hook-order proof ──
+; electron-builder template: node_modules/app-builder-lib/templates/nsis/installer.nsi
+;   Function .onInit
+;     !insertmacro initMultiUser      ; sets $hasPerUserInstallation / $hasPerMachineInstallation from registry
+;     !ifmacrodef customInit
+;       !insertmacro customInit       ; ← pre-copy hook (runs BEFORE any files are copied)
+;     !endif
+;   FunctionEnd
+;   Section "install" INSTALL_SECTION_ID
+;     !insertmacro installApplicationFiles   ; copies new DKS.exe, app.asar, etc. to $INSTDIR
+;     !insertmacro registryAddInstallInfo
+;     !insertmacro addStartMenuLink
+;     !insertmacro addDesktopLink
+;     !ifmacrodef customInstall
+;       !insertmacro customInstall          ; ← post-copy hook (runs AFTER new DKS.exe is on disk)
+;     !endif
+;   SectionEnd
+; Therefore FileExists "$INSTDIR\DKS.exe" inside customInstall is INVALID — it will be true even on
+; a genuine fresh install because installApplicationFiles just copied it. Classification must be in
+; customInit (pre-copy) and the result preserved in a Var until customInstall.
+
+Var isFreshInstall
+
+!macro customInit
+  StrCpy $isFreshInstall "0"
+  ${If} ${isUpdated}
+    DetailPrint "DKS: customInit — isUpdated=true (auto-update) → not fresh (preserve session)"
+  ${ElseIf} $hasPerUserInstallation == "1"
+    DetailPrint "DKS: customInit — existing per-user install detected → not fresh (manual in-place upgrade, preserve session)"
+  ${ElseIf} $hasPerMachineInstallation == "1"
+    DetailPrint "DKS: customInit — existing per-machine install detected → not fresh (manual in-place upgrade, preserve session)"
+  ${Else}
+    ; No registry entry and not an auto-update → genuine fresh (first install or after genuine uninstall)
+    ; Check FileExists on APPDATA nonce as additional guard (legacy installs have registry but no nonce)
+    ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
+      DetailPrint "DKS: customInit — APPDATA nonce exists but no registry entry → treating as upgrade (preserve)"
+    ${Else}
+      StrCpy $isFreshInstall "1"
+      DetailPrint "DKS: customInit — no existing install detected → genuine fresh (will create session-reset marker)"
+    ${EndIf}
+  ${EndIf}
+!macroend
+
 ; Fresh install: mint a new install nonce, preserved verbatim on update.
-; For genuine fresh installs also create a one-shot session-reset-required
-; marker that tells the app to clear session on next launch.
-; For upgrades: preserve existing nonce, or for legacy 0.1.4→0.1.5 (no nonce
-; file but existing install) mint a nonce WITHOUT marker to migrate without
-; logging out. Detection:
-;   - Auto-update: ${isUpdated} is true when electron-updater launches the
-;     installer with --updated; in that case the old installer already ran
-;     its uninstaller with ${isUpdated}=true and did NOT delete session, and
-;     the new installer's ${FileExists} check will find the preserved nonce.
-;   - Manual in-place upgrade: user runs new installer over existing install;
-;     $INSTDIR\DKS.exe exists and/or nonce file exists -> preserve
-;   - Legacy upgrade: nonce file missing but $INSTDIR\DKS.exe exists -> mint without marker
-;   - Genuine fresh: neither nonce nor existing DKS.exe -> mint with marker
+; For genuine fresh installs (isFreshInstall=1) also create a one-shot
+; session-reset-required marker that tells the app to clear session on next launch.
+; For upgrades (isFreshInstall=0): preserve existing nonce, or for legacy
+; 0.1.4→0.1.5 (no nonce file but existing install) mint a nonce WITHOUT marker
+; to migrate without logging out.
 !macro customInstall
   SetShellVarContext current
   CreateDirectory "$APPDATA\DKS"
-  ; If nonce file already exists, this is an upgrade (auto or manual) — preserve it
-  ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
-    DetailPrint "DKS: preserving existing install nonce (upgrade)"
-    Delete "$APPDATA\DKS\session-reset-required"
-  ${ElseIf} ${FileExists} "$INSTDIR\DKS.exe"
-    ; Legacy upgrade: existing install but no nonce (0.1.4→0.1.5) — mint without marker to preserve login
-    DetailPrint "DKS: legacy upgrade detected (existing DKS.exe without nonce) — creating nonce without session reset"
-    System::Call 'ole32::CoCreateGuid(g .r0)'
-    System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
-    ${If} $1 == ""
-      System::Call 'kernel32::GetTickCount() i.r1'
-    ${EndIf}
-    FileOpen $0 "$APPDATA\DKS\install-nonce" w
-    ${If} $0 != ""
-      FileWrite $0 "$1"
-      FileClose $0
-    ${EndIf}
-    FileOpen $0 "$APPDATA\DKS\install-nonce" r
-    ${If} $0 != ""
-      FileRead $0 $2
-      FileClose $0
-      ${If} $2 == ""
-        DetailPrint "DKS: ERROR legacy install-nonce is empty after write"
-      ${Else}
-        DetailPrint "DKS: legacy install-nonce created successfully (no reset marker — login preserved)"
-      ${EndIf}
-    ${Else}
-      DetailPrint "DKS: ERROR legacy install-nonce file missing after write"
-    ${EndIf}
-    Delete "$APPDATA\DKS\session-reset-required"
-  ${Else}
+  ${If} $isFreshInstall == "1"
     ; Genuine fresh install (first install or after genuine uninstall) — mint with marker
-    DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker"
+    DetailPrint "DKS: genuine fresh install — creating nonce and session-reset marker (isFreshInstall=1)"
     System::Call 'ole32::CoCreateGuid(g .r0)'
     System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
     ${If} $1 == ""
@@ -122,6 +127,38 @@
       FileWrite $0 "1"
       FileClose $0
       DetailPrint "DKS: session-reset-required marker created"
+    ${EndIf}
+  ${Else}
+    ; Existing install → preserve or legacy-mint
+    ${If} ${FileExists} "$APPDATA\DKS\install-nonce"
+      DetailPrint "DKS: preserving existing install nonce (upgrade, isFreshInstall=0)"
+      Delete "$APPDATA\DKS\session-reset-required"
+    ${Else}
+      ; Legacy upgrade: existing install but no nonce (0.1.4→0.1.5) — mint without marker to preserve login
+      DetailPrint "DKS: legacy upgrade detected (no nonce, but existing install) — creating nonce without session reset"
+      System::Call 'ole32::CoCreateGuid(g .r0)'
+      System::Call 'ole32::StringFromGUID2(g r0, t .r1, i 40)'
+      ${If} $1 == ""
+        System::Call 'kernel32::GetTickCount() i.r1'
+      ${EndIf}
+      FileOpen $0 "$APPDATA\DKS\install-nonce" w
+      ${If} $0 != ""
+        FileWrite $0 "$1"
+        FileClose $0
+      ${EndIf}
+      FileOpen $0 "$APPDATA\DKS\install-nonce" r
+      ${If} $0 != ""
+        FileRead $0 $2
+        FileClose $0
+        ${If} $2 == ""
+          DetailPrint "DKS: ERROR legacy install-nonce is empty after write"
+        ${Else}
+          DetailPrint "DKS: legacy install-nonce created successfully (no reset marker — login preserved)"
+        ${EndIf}
+      ${Else}
+        DetailPrint "DKS: ERROR legacy install-nonce file missing after write"
+      ${EndIf}
+      Delete "$APPDATA\DKS\session-reset-required"
     ${EndIf}
   ${EndIf}
 !macroend

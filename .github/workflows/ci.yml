@@ -107,51 +107,217 @@ jobs:
         run: |
           Write-Host "Checking electron-builder.yml does not declare publisherName"
           $cfg = Get-Content -Raw "electron-builder.yml"
-          if ($cfg -match "^\\s*publisherName\\s*:") { throw "electron-builder.yml must NOT contain publisherName for unsigned build (would cause 100% download verification failure)" }
+          if ($cfg -match "^\s*publisherName\s*:") { throw "electron-builder.yml must NOT contain publisherName for unsigned build (would cause 100% download verification failure)" }
           Write-Host "electron-builder.yml ok — no publisherName key"
+          # Useful win-unpacked check (quick) — not a substitute for installer extraction
           $candidates = @(
             "release/win-unpacked/resources/app-update.yml",
             "dist/win-unpacked/resources/app-update.yml"
           )
-          $found = $false
+          $foundQuick = $false
           foreach ($cand in $candidates) {
             if (Test-Path $cand) {
-              $found = $true
-              Write-Host "--- $cand (actual packaged app-update.yml) ---"
+              $foundQuick = $true
+              Write-Host "--- $cand (win-unpacked, quick check) ---"
               $content = Get-Content -Raw $cand
               Write-Host $content
-              if ($content -match "publisherName") { throw "$cand must NOT contain publisherName for unsigned build — installer is unsigned and verification would fail at 100% download" }
-              if ($content -notmatch "owner:\\s*tacenta2k") { Write-Host "WARNING: owner not tacenta2k in $cand" }
-              if ($content -notmatch "repo:\\s*dks") { Write-Host "WARNING: repo not dks in $cand" }
-              Write-Host "Confirmed $cand has no publisherName and has owner/repo (sanitized)"
+              if ($content -match "publisherName") { throw "$cand must NOT contain publisherName for unsigned build" }
+              if ($content -notmatch "provider:\s*github") { throw "$cand must contain provider: github" }
+              if ($content -notmatch "owner:\s*tacenta2k") { throw "$cand must contain owner: tacenta2k" }
+              if ($content -notmatch "repo:\s*dks") { throw "$cand must contain repo: dks" }
+              Write-Host "Confirmed $cand has no publisherName and has provider/owner/repo (sanitized)"
             }
           }
-          if (-not $found) {
-            Write-Host "win-unpacked not found — trying to extract from installer via 7z"
-            $exe = Get-ChildItem "release/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
-            if ($exe -and (Get-Command 7z -ErrorAction SilentlyContinue)) {
-              $tmp = Join-Path $env:RUNNER_TEMP "dks-extract-app-update"
-              New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-              & 7z x "$exe" "-o$tmp" "resources/app-update.yml" -y | Out-Null
-              $extracted = Join-Path $tmp "resources/app-update.yml"
-              if (Test-Path $extracted) {
-                $found = $true
-                Write-Host "--- $extracted (extracted from installer) ---"
-                $content = Get-Content -Raw $extracted
-                Write-Host $content
-                if ($content -match "publisherName") { throw "extracted resources/app-update.yml must NOT contain publisherName for unsigned build" }
-                Write-Host "Confirmed extracted resources/app-update.yml has no publisherName"
-              } else {
-                Write-Host "7z extraction did not produce $extracted — listing tmp"
-                Get-ChildItem $tmp -Recurse | Format-Table FullName
-              }
-            } else {
-              Write-Host "No installer or 7z not available — checking release/*.yml as fallback"
-              Get-ChildItem "release" -Filter "*.yml" | ForEach-Object { Write-Host "Found $($_.FullName)"; Get-Content $_.FullName | Write-Host }
-            }
+          if (-not $foundQuick) { Write-Host "win-unpacked not found — proceeding to NSIS two-stage extraction" }
+          # Required: NSIS two-stage extraction from the actual installer (same as public installer)
+          Write-Host "--- NSIS two-stage extraction: DKS-0.1.5-win-x64.exe -> `$PLUGINSDIR/app-64.7z -> resources/app-update.yml ---"
+          $exe = Get-ChildItem "release/*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $exe) { throw "No installer exe found in release/ for two-stage extraction" }
+          Write-Host "Installer: $exe (size $((Get-Item $exe).Length) bytes)"
+          if (-not (Get-Command 7z -ErrorAction SilentlyContinue)) { throw "7z not available for two-stage extraction" }
+          $stage1 = Join-Path $env:RUNNER_TEMP "dks-stage1-extract"
+          New-Item -ItemType Directory -Force -Path $stage1 | Out-Null
+          Write-Host "Stage 1: extracting $exe to find `$PLUGINSDIR/app-64.7z"
+          & 7z x "$exe" "-o$stage1" -y 2>&1 | Write-Host
+          $app64 = Get-ChildItem -Path $stage1 -Recurse -Filter "app-64.7z" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $app64) {
+            # fallback: list what was extracted
+            Write-Host "app-64.7z not found — listing stage1:"
+            Get-ChildItem $stage1 -Recurse | Format-Table FullName
+            throw "Two-stage extraction FAIL: `$PLUGINSDIR/app-64.7z not found inside installer $exe"
           }
-          if (-not $found) { throw "No packaged app-update.yml found to verify — build may have failed to produce win-unpacked/resources/app-update.yml" }
+          Write-Host "Found app-64.7z at: $app64 (size $((Get-Item $app64).Length) bytes)"
+          $stage2 = Join-Path $env:RUNNER_TEMP "dks-stage2-extract"
+          New-Item -ItemType Directory -Force -Path $stage2 | Out-Null
+          Write-Host "Stage 2: extracting $app64 -> resources/app-update.yml"
+          & 7z x "$app64" "-o$stage2" "resources/app-update.yml" -y 2>&1 | Write-Host
+          # try also with backslash variant
+          $extracted = Join-Path $stage2 "resources/app-update.yml"
+          if (-not (Test-Path $extracted)) { $extracted = Get-ChildItem -Path $stage2 -Recurse -Filter "app-update.yml" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName }
+          if (-not $extracted -or -not (Test-Path $extracted)) {
+            Write-Host "app-update.yml not found after stage2 — listing stage2:"
+            Get-ChildItem $stage2 -Recurse | Format-Table FullName
+            throw "Two-stage extraction FAIL: resources/app-update.yml not found inside $app64"
+          }
+          Write-Host "--- $extracted (sanitized, from installer `$PLUGINSDIR/app-64.7z) ---"
+          $content = Get-Content -Raw $extracted
+          Write-Host $content
+          if ($content -match "publisherName") { throw "Extracted $extracted must NOT contain publisherName for unsigned build (installer is unsigned)" }
+          if ($content -notmatch "provider:\s*github") { throw "Extracted yml must contain provider: github" }
+          if ($content -notmatch "owner:\s*tacenta2k") { throw "Extracted yml must contain owner: tacenta2k" }
+          if ($content -notmatch "repo:\s*dks") { throw "Extracted yml must contain repo: dks" }
+          Write-Host "CONFIRMED: two-stage extracted resources/app-update.yml has provider: github, owner: tacenta2k, repo: dks, no publisherName"
+          Write-Host "Do not inspect latest.yml as substitute — this is the packaged yml from inside app-64.7z"
           Write-Host "app-update.yml verification passed — no publisherName, proper code-signing is future stronger fix; v0.1.5 ships unsigned with disableDifferentialDownload=true"
+
+      - name: NSIS install-classification matrix A-D (hard, proven pre-copy hook)
+        shell: pwsh
+        run: |
+          function Invoke-HangProof($FilePath, $ArgumentList, $Label) {
+            $quoted = "`"$FilePath`" $ArgumentList"
+            Write-Host "Running: $quoted"
+            if ($ArgumentList -notmatch "/S") { throw "HARD FAIL: installer invocation missing /S: $quoted" }
+            $p = Start-Process -FilePath "$FilePath" -ArgumentList "$ArgumentList" -PassThru
+            if (-not $p.WaitForExit(600000)) {
+              try { $p.Kill() } catch {}
+              throw "HARD FAIL: $Label hung: $quoted did not exit within 600s"
+            }
+            Write-Host "$Label exit code: $($p.ExitCode) for $quoted"
+            if ($p.ExitCode -ne 0) { throw "HARD FAIL: $Label failed with exit $($p.ExitCode): $quoted" }
+            return $p
+          }
+          function Assert-NoDKSRunning($phase) {
+            for ($i=0; $i -lt 5; $i++) {
+              $tl = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+              Write-Host "[$phase] tasklist attempt $($i+1): $tl"
+              if ($tl -notmatch "DKS.exe") { return $true }
+              try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
+              Start-Sleep -Seconds 2
+            }
+            $final = tasklist /FI "IMAGENAME eq DKS.exe" /FO CSV /NH 2>$null
+            if ($final -match "DKS.exe") { throw "HARD FAIL: DKS.exe still running after retries in $phase" }
+            return $true
+          }
+          $installer = Get-ChildItem "release/*.exe" | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $installer) { throw "No installer exe found in release/" }
+          Write-Host "Installer: $installer (size $((Get-Item $installer).Length) bytes)"
+          $base = "$env:APPDATA\DKS"
+          $installDir = "$env:LOCALAPPDATA\Programs\DKS"
+          # Helper to get nonce and marker state
+          function Get-NonceState($label) {
+            $noncePath = "$base\install-nonce"
+            $markerPath = "$base\session-reset-required"
+            $nonceExists = Test-Path $noncePath
+            $markerExists = Test-Path $markerPath
+            $nonceVal = $null
+            if ($nonceExists) { $nonceVal = (Get-Content -Raw $noncePath -ErrorAction SilentlyContinue).Trim() }
+            Write-Host "$label nonceExists=$nonceExists markerExists=$markerExists noncePrefix=$($nonceVal ? $nonceVal.Substring(0,[Math]::Min(8,$nonceVal.Length)) : 'none') path=$base"
+            return @{ nonceExists=$nonceExists; markerExists=$markerExists; nonce=$nonceVal; noncePath=$noncePath; markerPath=$markerPath }
+          }
+          # --- Cleanup any previous install for A (completely clean) ---
+          Write-Host "=== A. Completely clean install ==="
+          Assert-NoDKSRunning "pre-A" | Out-Null
+          $prevUninst = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($prevUninst) {
+            Write-Host "A. Cleaning previous install via silent uninstall: $($prevUninst.FullName)"
+            Invoke-HangProof -FilePath $prevUninst.FullName -ArgumentList "/S" -Label "A cleanup uninstall" | Out-Null
+            Start-Sleep -Seconds 5
+          }
+          if (Test-Path $base) { Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue; Write-Host "A. Cleaned $base" }
+          Assert-NoDKSRunning "pre-A-install" | Out-Null
+          Write-Host "A. Running current installer /S on clean system"
+          Invoke-HangProof -FilePath $installer -ArgumentList "/S" -Label "A clean install" | Out-Null
+          Start-Sleep -Seconds 10
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
+          $stateA = Get-NonceState "A. After clean install:"
+          if (-not $stateA.nonceExists) { throw "A FAIL: install-nonce missing after clean install at $($stateA.noncePath)" }
+          if ([string]::IsNullOrWhiteSpace($stateA.nonce)) { throw "A FAIL: install-nonce empty after clean install" }
+          if (-not $stateA.markerExists) { throw "A FAIL: session-reset-required MISSING after clean install at $($stateA.markerPath) — genuine fresh must create marker" }
+          Write-Host "A. PASS: Completely clean install — install-nonce non-empty ($($stateA.nonce.Substring(0,8))…), session-reset-required EXISTS at $base\session-reset-required"
+          $nonceA = $stateA.nonce
+          # --- B. Legacy pre-nonce in-place upgrade (simulate v0.1.4) ---
+          Write-Host "=== B. Legacy pre-nonce in-place upgrade (v0.1.4 -> v0.1.5) ==="
+          Write-Host "B. Simulating legacy state: actual installation location has DKS.exe + registry entry, but no nonce file"
+          Write-Host "B. Proof: install dir $installDir exists=$((Test-Path $installDir)), DKS.exe exists=$((Test-Path "$installDir\DKS.exe"))"
+          # Verify we have a real prior install (hasPerUserInstallation will be 1 in customInit)
+          $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\*"
+          $regFound = Get-ItemProperty $regKey -ErrorAction SilentlyContinue | Where-Object { $_.InstallLocation -like "*DKS*" -or $_.DisplayName -like "*DKS*" } | Select-Object -First 1
+          if ($regFound) { Write-Host "B. Registry InstallLocation found: $($regFound.InstallLocation) (hasPerUserInstallation will be 1)" } else { Write-Host "B. No registry entry found — checking DKS.exe as fallback for hasPerUserInstallation" }
+          # Create legacy state: delete nonce/marker but keep DKS.exe and registry
+          if (Test-Path "$base\install-nonce") { Remove-Item -Force "$base\install-nonce" -ErrorAction SilentlyContinue; Write-Host "B. Deleted $base\install-nonce to simulate pre-nonce legacy" }
+          if (Test-Path "$base\session-reset-required") { Remove-Item -Force "$base\session-reset-required" -ErrorAction SilentlyContinue; Write-Host "B. Deleted $base\session-reset-required" }
+          $legacyState = Get-NonceState "B. Before legacy upgrade (simulated pre-nonce):"
+          if ($legacyState.nonceExists) { throw "B FAIL: legacy simulation failed — nonce still exists" }
+          if (-not (Test-Path "$installDir\DKS.exe")) { throw "B FAIL: DKS.exe not found at $installDir\DKS.exe — cannot simulate in-place upgrade (hasPerUserInstallation would be 0)" }
+          Write-Host "B. Running current v0.1.5 installer over legacy install without uninstalling"
+          Invoke-HangProof -FilePath $installer -ArgumentList "/S" -Label "B legacy over-install" | Out-Null
+          Start-Sleep -Seconds 10
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
+          $stateB = Get-NonceState "B. After legacy upgrade:"
+          if (-not $stateB.nonceExists) { throw "B FAIL: install-nonce still missing after legacy upgrade at $($stateB.noncePath) — customInstall should have minted without marker" }
+          if ([string]::IsNullOrWhiteSpace($stateB.nonce)) { throw "B FAIL: install-nonce empty after legacy upgrade" }
+          if ($stateB.markerExists) { throw "B FAIL: session-reset-required EXISTS after legacy upgrade at $($stateB.markerPath) — must NOT exist (login preserved for v0.1.4->v0.1.5)" }
+          Write-Host "B. PASS: Legacy pre-nonce in-place upgrade — nonce exists ($($stateB.nonce.Substring(0,8))…), session-reset-required does NOT exist at $base\session-reset-required (login preserved)"
+          $nonceB = $stateB.nonce
+          # --- C. Current in-place update/reinstall (v0.1.5 -> v0.1.5) ---
+          Write-Host "=== C. Current in-place update/reinstall ==="
+          Write-Host "C. Running v0.1.5 installer again without uninstalling (preserve session)"
+          Invoke-HangProof -FilePath $installer -ArgumentList "/S" -Label "C in-place reinstall" | Out-Null
+          Start-Sleep -Seconds 10
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
+          $stateC = Get-NonceState "C. After in-place reinstall:"
+          if (-not $stateC.nonceExists) { throw "C FAIL: install-nonce missing after in-place reinstall" }
+          if ([string]::IsNullOrWhiteSpace($stateC.nonce)) { throw "C FAIL: install-nonce empty after in-place reinstall" }
+          if ($stateC.nonce -ne $nonceB) { throw "C FAIL: nonce changed on in-place reinstall: before $nonceB after $($stateC.nonce) — must be unchanged (preserve session)" }
+          if ($stateC.markerExists) { throw "C FAIL: session-reset-required EXISTS after in-place reinstall at $($stateC.markerPath) — must NOT exist (preserve session for auto/manual update)" }
+          Write-Host "C. PASS: In-place update/reinstall — nonce unchanged ($($stateC.nonce.Substring(0,8))…), reset marker does NOT exist at $base\session-reset-required"
+          # --- D. Genuine uninstall/reinstall ---
+          Write-Host "=== D. Genuine uninstall/reinstall ==="
+          # Plant sentinels and sqlite dummy before uninstall to verify survival logic
+          Write-Host "D. Planting sentinels + dummy dks-cache.sqlite with known hash before uninstall"
+          New-Item -ItemType Directory -Force -Path "$base\Local Storage\leveldb" | Out-Null
+          "sentinel-D1" | Out-File "$base\Local Storage\leveldb\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Session Storage" | Out-Null
+          "sentinel-D2" | Out-File "$base\Session Storage\x" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\IndexedDB" | Out-Null
+          "sentinel-D3" | Out-File "$base\IndexedDB\x" -Encoding ascii
+          "cookie-legacy-D" | Out-File "$base\Cookies" -Encoding ascii
+          New-Item -ItemType Directory -Force -Path "$base\Network" | Out-Null
+          "cookie-current-D" | Out-File "$base\Network\Cookies" -Encoding ascii
+          "dummy-sqlite-for-D-hash-v1" | Out-File "$base\dks-cache.sqlite" -Encoding ascii
+          $hashBeforeD = (Get-FileHash "$base\dks-cache.sqlite" -Algorithm SHA256).Hash
+          Write-Host "D. Planted sentinels (Local Storage\leveldb\x, Session Storage\x, IndexedDB\x, Cookies, Network\Cookies) + dks-cache.sqlite hash $hashBeforeD"
+          $uninstaller = Get-ChildItem "$installDir\Uninstall*.exe" -ErrorAction SilentlyContinue | Select-Object -First 1 -ExpandProperty FullName
+          if (-not $uninstaller) { throw "D FAIL: uninstaller not found at $installDir\Uninstall*.exe — cannot perform genuine uninstall" }
+          Write-Host "D. Running uninstall: $uninstaller /S"
+          Assert-NoDKSRunning "pre-D-uninstall" | Out-Null
+          Invoke-HangProof -FilePath $uninstaller -ArgumentList "/S" -Label "D genuine uninstall" | Out-Null
+          Start-Sleep -Seconds 5
+          Write-Host "D. Verifying nonce and session stores are gone while dks-cache.sqlite hash unchanged"
+          $checksD = @("$base\Local Storage\leveldb\x","$base\Session Storage\x","$base\IndexedDB\x","$base\Cookies","$base\Network\Cookies","$base\install-nonce")
+          $failedD = @()
+          foreach ($p in $checksD) { $exists = Test-Path $p; Write-Host "  $p exists=$exists"; if ($exists) { $failedD += $p } }
+          if ($failedD.Count -gt 0) { throw "D FAIL: after uninstall, sentinels/nonce still exist: $($failedD -join ', ') — must be gone" }
+          if (-not (Test-Path "$base\dks-cache.sqlite")) { throw "D FAIL: dks-cache.sqlite missing after uninstall — must remain" }
+          $hashAfterD = (Get-FileHash "$base\dks-cache.sqlite" -Algorithm SHA256).Hash
+          Write-Host "  dks-cache.sqlite hash unchanged=$($hashAfterD -eq $hashBeforeD) (before $hashBeforeD after $hashAfterD)"
+          if ($hashAfterD -ne $hashBeforeD) { throw "D FAIL: sqlite hash changed after uninstall: $hashBeforeD vs $hashAfterD — must remain byte-identical" }
+          Write-Host "D. Uninstall verified: nonce+stores gone, sqlite intact"
+          Write-Host "D. Reinstalling genuine fresh"
+          Invoke-HangProof -FilePath $installer -ArgumentList "/S" -Label "D reinstall" | Out-Null
+          Start-Sleep -Seconds 10
+          try { taskkill /F /IM DKS.exe 2>$null; $LASTEXITCODE=0 } catch {}
+          $stateD = Get-NonceState "D. After reinstall:"
+          if (-not $stateD.nonceExists) { throw "D FAIL: install-nonce missing after reinstall at $($stateD.noncePath)" }
+          if ([string]::IsNullOrWhiteSpace($stateD.nonce)) { throw "D FAIL: install-nonce empty after reinstall" }
+          if ($stateD.nonce -eq $nonceB) { throw "D FAIL: nonce not different after genuine uninstall/reinstall: $nonceB — must be new non-empty nonce" }
+          if (-not $stateD.markerExists) { throw "D FAIL: session-reset-required MISSING after genuine uninstall/reinstall at $($stateD.markerPath) — must EXISTS to require login" }
+          Write-Host "D. PASS: Genuine uninstall/reinstall — new nonce different ($($stateD.nonce.Substring(0,8))… vs $($nonceB.Substring(0,8))…), session-reset-required EXISTS at $base\session-reset-required (require login)"
+          Write-Host "=== A-D matrix PASSED ==="
+          Write-Host "Summary: A clean marker EXISTS, B legacy marker NOT exist, C in-place nonce unchanged marker NOT exist, D uninstall cleared stores sqlite intact + reinstall new nonce marker EXISTS"
+          # Preserve marker for app-level E test (genuine fresh) — do not clean marker here; let next steps verify
+          # Clean up D sentinels for next proof but keep nonce/marker for app logic
+          # We keep APPDATA\DKS for stale test which will reinstall anyway
 
       - name: Investigate old releases (v0.1.3 app-update.yml and v0.1.4 Authenticode) — no mutation
         shell: pwsh
