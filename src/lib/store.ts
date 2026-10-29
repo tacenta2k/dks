@@ -11,6 +11,7 @@ import {
   type OfficeSigninRequest,
 } from '../features/auth/office-approval-service';
 import { classifyAuthError, RESTORE_UNREACHABLE_CODE } from '../features/auth/auth-errors';
+import { startTimingSpan } from './timing';
 import type {
   AuthError,
   AuthResult,
@@ -212,6 +213,8 @@ export function createAppStore(
       approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null, isRestoringSession: false });
+      // Issue B: auth=<password grant> profile=<profiles row> total=<button busy>.
+      const span = startTimingSpan('signin');
       ownedAuthFlows += 1;
       let result: Awaited<ReturnType<typeof authService.signIn>>;
       try {
@@ -220,10 +223,12 @@ export function createAppStore(
         ownedAuthFlows -= 1;
       }
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
+        span.end({ outcome: 'superseded' });
         return;
       }
 
       if (result.error || !result.data) {
+        span.end({ outcome: 'error', code: result.error?.code ?? 'unknown' });
         set({
           session: null,
           profile: null,
@@ -251,6 +256,8 @@ export function createAppStore(
         ...EMPTY_SESSION_APPROVAL,
       });
 
+      span.end({ outcome: 'ok', role: result.data.profile.role });
+
       // Office-only: this signed session needs Admin approval BEFORE any
       // workspace traffic (server-side RLS enforces the same boundary).
       if (result.data.profile.role === 'office') {
@@ -263,6 +270,7 @@ export function createAppStore(
       approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null });
+      const span = startTimingSpan('restore');
       ownedAuthFlows += 1;
       let result: Awaited<ReturnType<typeof authService.restoreSession>>;
       let attempts = 1;
@@ -277,6 +285,7 @@ export function createAppStore(
           if (!result.error || classifyAuthError(result.error) !== 'transient') break;
           if (requestId !== authRequestId) break;
           await sleep(delay);
+          span.mark('backoff');
           if (requestId !== authRequestId) break;
           attempts += 1;
           result = await authService.restoreSession();
@@ -285,15 +294,16 @@ export function createAppStore(
         ownedAuthFlows -= 1;
       }
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
+        span.end({ outcome: 'superseded', attempts });
         return;
       }
 
       if (result.error) {
         const transient = classifyAuthError(result.error) === 'transient';
+        span.end({ outcome: transient ? 'unreachable' : 'error', code: result.error.code ?? 'unknown', attempts });
         const shownError: AuthError = transient
           ? { message: RESTORE_UNREACHABLE_MESSAGE, code: RESTORE_UNREACHABLE_CODE, cause: result.error }
           : result.error;
-        void attempts;
         set({
           session: null,
           profile: null,
@@ -306,6 +316,7 @@ export function createAppStore(
       }
 
       if (!result.data) {
+        span.end({ outcome: 'no-session', attempts });
         set({
           session: null,
           profile: null,
@@ -341,6 +352,7 @@ export function createAppStore(
         // "cannot verify" state. The gate stays closed either way.
         ...(result.data.profile.role === 'office' ? { sessionApproval: 'checking' as const } : {}),
       });
+      span.end({ outcome: 'ok', role: result.data.profile.role, attempts });
 
       // Office-only: a persisted, still-valid approved session re-validates
       // on restart (no new request); revoked/denied stops the workspace here.
@@ -430,7 +442,10 @@ export function createAppStore(
       const approvalId = ++approvalRequestId;
       const authId = authRequestId;
       set({ sessionApproval: 'checking', sessionApprovalError: null });
+      const approvalSpan = startTimingSpan('office-approval');
       const result = await approvalService.requestApproval();
+      approvalSpan.mark('approval_request');
+      approvalSpan.end({ outcome: result.error ? 'error' : (result.data?.status ?? 'none'), role: 'office' });
       if (approvalId !== approvalRequestId || authId !== authRequestId || get().profile?.role !== 'office') return;
       applyApprovalStatus(set, result.data, result.error);
     },

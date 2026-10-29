@@ -1,6 +1,7 @@
 import type { Session } from '@supabase/supabase-js';
 
 import { createSupabaseClient, supabase } from '../../lib/supabase';
+import { activeTimingSpan } from '../../lib/timing';
 import type {
   AuthChangeEvent,
   AuthError,
@@ -136,6 +137,8 @@ export class AuthService {
         email: normalizedEmail,
         password,
       });
+      // Issue B timing: Supabase Auth password grant (network + server hash).
+      activeTimingSpan('signin')?.mark('auth');
 
       if (result.error) {
         return { data: null, error: toAuthError(result.error, 'Unable to sign in.') };
@@ -151,7 +154,9 @@ export class AuthService {
         };
       }
 
-      return this.withProfile(result.data.session);
+      const identity = await this.withProfile(result.data.session);
+      activeTimingSpan('signin')?.mark('profile');
+      return identity;
     } catch (error) {
       return { data: null, error: toAuthError(error, 'Unable to sign in.') };
     }
@@ -164,6 +169,8 @@ export class AuthService {
 
     try {
       const result = await this.client.auth.getSession();
+      // Issue B timing: stored session read (+ token refresh when expired).
+      activeTimingSpan('restore')?.mark('session');
       if (result.error) {
         return { data: null, error: toAuthError(result.error, 'Unable to restore the session.') };
       }
@@ -172,7 +179,9 @@ export class AuthService {
         return { data: null, error: null };
       }
 
-      return this.withProfile(result.data.session);
+      const identity = await this.withProfile(result.data.session);
+      activeTimingSpan('restore')?.mark('profile');
+      return identity;
     } catch (error) {
       return { data: null, error: toAuthError(error, 'Unable to restore the session.') };
     }
