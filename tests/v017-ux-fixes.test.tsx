@@ -219,7 +219,12 @@ describe('v0.1.7 — the shell pins the sidebar and scrolls only the content', (
 
     const sidebar = css.match(/\n\.sidebar\s*\{[^}]*\}/)?.[0] ?? '';
     expect(sidebar).toMatch(/height:\s*100vh/);
-    expect(sidebar).toMatch(/overflow-y:\s*auto/);
+    // The rail never scrolls, so the logo cannot scroll away; only the nav list
+    // scrolls when the window is shorter than the navigation.
+    expect(sidebar).toMatch(/overflow:\s*hidden/);
+    const nav = css.match(/\n\.sidebar__nav\s*\{[^}]*\}/)?.[0] ?? '';
+    expect(nav).toMatch(/overflow-y:\s*auto/);
+    expect(nav).toMatch(/min-height:\s*0/);
 
     const body = css.match(/\.app-shell__body\s*\{[^}]*\}/)?.[0] ?? '';
     expect(body).toMatch(/overflow-y:\s*auto/);
@@ -229,6 +234,8 @@ describe('v0.1.7 — the shell pins the sidebar and scrolls only the content', (
     const narrow = css.slice(css.indexOf('@media (max-width: 720px)'));
     expect(narrow).toMatch(/\.app-shell\s*\{[^}]*display:\s*block/);
     expect(narrow).toMatch(/\.sidebar\s*\{[^}]*height:\s*auto/);
+    // ...and the nav must stop being an inner scroll area there.
+    expect(narrow).toMatch(/\.sidebar__nav\s*\{[^}]*overflow:\s*visible/);
     expect(narrow).toMatch(/\.app-shell__body\s*\{[^}]*overflow:\s*visible/);
   });
 });
