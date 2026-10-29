@@ -501,11 +501,30 @@ describe('v0.1.8 Issue A — pinned evidence for the updater install invocation'
   it('CI case E runs the exact updater arguments and asserts marker/nonce/session', () => {
     const ci = read('.github/workflows/ci.yml');
     expect(ci).toContain('NSIS case E — electron-updater install invocation');
-    expect(ci).toContain('-ArgumentList "--updated --force-run"');
+    // E1: the exact non-silent quitAndInstall() invocation, wizard driven like the user did.
+    expect(ci).toContain('$p = Start-UpdaterInstall "--updated --force-run"');
+    expect(ci).toContain("Invoke-WizardButton $p.Id '^(Next|Install)'");
+    expect(ci).toContain("Invoke-WizardButton $p.Id '^Finish'");
     expect(ci).toContain('-ArgumentList "--updated /S --force-run"');
     expect(ci).toContain('gh release download v0.1.6');
     expect(ci).toContain('session-reset-required EXISTS after an updater-style install');
     expect(ci).toContain('install-nonce changed');
     expect(ci).toContain('install nonce matches stored nonce — preserving session');
+  });
+
+  it('pinned: the assisted wizard shows the install-mode page on update (not skipped by --updated)', () => {
+    const tpl = 'node_modules/app-builder-lib/templates/nsis';
+    const assisted = read(`${tpl}/assistedInstaller.nsh`);
+    // License and directory pages are guarded by skipPageIfUpdated; the install-mode page is not.
+    expect(assisted).toMatch(/skipPageIfUpdated\s+!insertmacro licensePage/);
+    expect(assisted).toMatch(/!ifndef INSTALL_MODE_PER_ALL_USERS\s+!insertmacro PAGE_INSTALL_MODE/);
+    const multiUser = read(`${tpl}/multiUserUi.nsh`);
+    expect(multiUser).toContain('${OrIf} ${isForCurrentUser}');
+    // isUpdated / isForCurrentUser are generated CLI-parameter tests (StdUtils.TestParameter).
+    const generator = read('node_modules/app-builder-lib/out/targets/nsis/nsisScriptGenerator.js');
+    expect(generator).toContain('StdUtils.TestParameter');
+    const target = read('node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js');
+    expect(target).toContain('scriptGenerator.flags(["updated", "force-run", "keep-shortcuts", "no-desktop-shortcut", "delete-app-data", "allusers", "currentuser"])');
+    expect(target).toMatch(/if \(options\.perMachine === true\) \{\s*defines\.INSTALL_MODE_PER_ALL_USERS = null;/);
   });
 });

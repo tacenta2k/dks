@@ -463,25 +463,77 @@ jobs:
           if (-not (Wait-Log $offset "starting main process \(version=0\.1\.6" 90)) { throw "E1 setup FAIL: v0.1.6 did not start" }
           Start-Sleep -Seconds 5
           $offset = (Get-LogText).Length
-          $p = Start-Process $installer -ArgumentList "--updated --force-run" -PassThru
-          $installed = $false
+          # The assisted (oneClick:false, perMachine:false) wizard is NOT fully silent on update:
+          # skipPageIfUpdated hides only the license/directory pages, while the install-mode page
+          # (multiUserUi.nsh PAGE_INSTALL_MODE) is skipped only by --currentuser/--allusers, which
+          # electron-updater never passes. The user therefore saw "Choose Installation Options"
+          # (default = existing per-user mode), then progress, then the Finish page with "Run DKS".
+          # Drive that wizard like the user did, through UI Automation (no focus/SendKeys needed).
+          Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes
+          function Get-WizardButtons([int]$procId) {
+            $A = [System.Windows.Automation.AutomationElement]
+            $wins = $A::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $procId)))
+            $found = @()
+            foreach ($w in $wins) {
+              $found += @($w.FindAll([System.Windows.Automation.TreeScope]::Descendants, (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button))))
+            }
+            return ,$found
+          }
+          function Get-WizardText([int]$procId) {
+            $A = [System.Windows.Automation.AutomationElement]
+            $wins = $A::RootElement.FindAll([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $procId)))
+            $names = @()
+            foreach ($w in $wins) {
+              foreach ($e in $w.FindAll([System.Windows.Automation.TreeScope]::Descendants, [System.Windows.Automation.Condition]::TrueCondition)) {
+                $n = $e.Current.Name; if ($n -and $n.Length -lt 120) { $names += ($n -replace '&', '') }
+              }
+            }
+            return (($names | Select-Object -Unique) -join " | ")
+          }
+          function Invoke-WizardButton([int]$procId, [string]$pattern) {
+            foreach ($b in (Get-WizardButtons $procId)) {
+              $name = $b.Current.Name -replace '&', ''
+              if ($name -match $pattern -and $b.Current.IsEnabled) {
+                try { $b.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke(); return $name } catch {}
+              }
+            }
+            return $null
+          }
+          function Start-UpdaterInstall([string]$argLine) {
+            Write-Host "E1: starting `"$installer`" $argLine"
+            return Start-Process $installer -ArgumentList $argLine -PassThru
+          }
+          $p = Start-UpdaterInstall "--updated --force-run"
+          $installed = $false; $installedAt = 0; $clickedFinish = $false; $sawUi = $false; $lastText = ""; $deviation = $false
           for ($i = 0; $i -lt 300; $i++) {
-            if ((Get-DisplayVersion) -eq $pkgVersion) { $installed = $true; break }
             if ($p.HasExited) { break }
+            $text = try { Get-WizardText $p.Id } catch { "" }
+            if ($text) { $sawUi = $true }
+            if ($text -and $text -ne $lastText) { Write-Host "E1 wizard page: $text"; $lastText = $text }
+            if (-not $installed -and (Get-DisplayVersion) -eq $pkgVersion) { $installed = $true; $installedAt = $i; Write-Host "E1: $pkgVersion registered after ${i}s" }
+            if ($installed) {
+              # customInstall runs right after registryAddInstallInfo; give it time, then Finish (Run DKS is checked by default).
+              if ($i - $installedAt -ge 5) { $clicked = try { Invoke-WizardButton $p.Id '^Finish' } catch { $null }; if ($clicked) { Write-Host "E1: pressed '$clicked'"; if ($p.WaitForExit(30000)) { $clickedFinish = $true }; break } }
+            } else {
+              $clicked = try { Invoke-WizardButton $p.Id '^(Next|Install)' } catch { $null }
+              if ($clicked) { Write-Host "E1: pressed '$clicked' (default selection kept, as the user would)" }
+            }
+            if (-not $sawUi -and $i -ge 60 -and -not $installed) {
+              Write-Host "::warning::E1: no installer window is visible to UI Automation on this runner; falling back to the updater arguments plus --currentuser (equivalent to pressing Next on the default 'Only for me')"
+              try { $p.Kill() } catch {}; Start-Sleep -Seconds 3
+              $p = Start-UpdaterInstall "--updated --force-run --currentuser"; $deviation = $true; $sawUi = $true
+            }
             Start-Sleep -Seconds 1
           }
-          if (-not $installed) { try { $p.Kill() } catch {}; throw "E1 FAIL: installer did not register $pkgVersion (exited=$($p.HasExited) code=$(if ($p.HasExited) { $p.ExitCode }))" }
-          # customInstall runs right after registryAddInstallInfo; then the assisted UI stops on the Finish page.
-          Start-Sleep -Seconds 10
-          $clickedFinish = $false
-          if (-not $p.HasExited) {
-            Write-Host "E1: installer is on the Finish page (non-silent, as for the user) — pressing Finish (Run DKS is checked by default)"
-            try {
-              $ws = New-Object -ComObject WScript.Shell
-              if ($ws.AppActivate($p.Id)) { Start-Sleep -Milliseconds 500; $ws.SendKeys("{ENTER}") }
-            } catch { Write-Host "SendKeys unavailable: $_" }
-            if ($p.WaitForExit(20000)) { $clickedFinish = $true } else { Write-Host "E1: Finish could not be pressed on this runner — closing the installer and launching DKS like StartApp does (--updated)"; try { $p.Kill() } catch {} }
-          } else { Write-Host "E1: installer exited by itself with code $($p.ExitCode)" }
+          if (-not $installed -and (Get-DisplayVersion) -eq $pkgVersion) { $installed = $true }
+          if (-not $installed) {
+            # Capture the installer state BEFORE killing it (a killed process reports exit code -1).
+            $state = if ($p.HasExited) { "installer exited by itself with code $($p.ExitCode)" } else { "installer still running after 300s" }
+            try { $p.Kill() } catch {}
+            throw "E1 FAIL: installer did not register $pkgVersion ($state; last wizard page: $lastText)"
+          }
+          if (-not $clickedFinish -and -not $p.HasExited) { Write-Host "E1: Finish could not be pressed — closing the installer and launching DKS like StartApp does (--updated)"; try { $p.Kill() } catch {} }
+          Write-Host "E1: wizard finished=$clickedFinish deviation(--currentuser)=$deviation"
           Start-Sleep -Seconds 3
           $debugAfter = if (Test-Path $debugFile) { (Get-Item $debugFile).LastWriteTimeUtc } else { $null }
           Write-Host "E1: old uninstaller session-cleanup debug file rewritten=$($debugAfter -ne $debugBefore) (customUnInstall writes it only when NOT isUpdated)"
