@@ -14,7 +14,8 @@
 
 .settings-nav {
   position: sticky;
-  top: 70px;
+  /* Sticky inside the scrolling page container (below the top bar). */
+  top: 0;
   display: grid;
   gap: 5px;
 }
@@ -139,6 +140,27 @@
 
 .settings-alert__dismiss:hover {
   background: color-mix(in srgb, currentColor 10%, transparent);
+}
+
+/* v0.1.7 — the save feedback floats as a toast: fixed to the viewport, out of
+   the document flow, so it can appear/disappear without shifting the page up
+   or down (Settings → About & updates used to jump on every background save).
+   pointer-events stay on so an error toast can still be dismissed. */
+.settings-alert--toast {
+  position: fixed;
+  right: 24px;
+  bottom: 24px;
+  z-index: 60;
+  width: max-content;
+  max-width: min(420px, calc(100vw - 48px));
+  border-color: var(--color-border-strong);
+  background: var(--color-surface-raised);
+  box-shadow: 0 12px 32px var(--color-shadow-strong);
+}
+
+.settings-alert--toast.settings-alert--error {
+  border-color: color-mix(in srgb, #dc2626 35%, var(--color-border));
+  background: color-mix(in srgb, #dc2626 8%, var(--color-surface-raised));
 }
 
 /* Success banners auto-hide after SAVE_BANNER_VISIBLE_MS in SettingsPage;
@@ -432,6 +454,44 @@
 }
 
 .settings-email .sheet-form__error,
+/* v0.1.7 — skeleton shown while email preferences load for the first time. */
+.settings-skeleton {
+  display: block;
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--color-surface-muted) 0%,
+    color-mix(in srgb, var(--color-border) 70%, var(--color-surface-muted)) 50%,
+    var(--color-surface-muted) 100%
+  );
+  background-size: 200% 100%;
+  animation: settings-skeleton-shimmer 1.2s ease-in-out infinite;
+}
+
+.settings-skeleton--toggle {
+  width: min(320px, 70%);
+  height: 18px;
+}
+
+.settings-skeleton--field {
+  width: min(420px, 100%);
+  height: 38px;
+}
+
+.settings-skeleton--area {
+  width: min(420px, 100%);
+  height: 96px;
+}
+
+@keyframes settings-skeleton-shimmer {
+  from {
+    background-position: 100% 0;
+  }
+  to {
+    background-position: -100% 0;
+  }
+}
+
 .settings-email .settings-alert {
   max-width: 640px;
   margin: 0;

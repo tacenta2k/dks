@@ -26,6 +26,7 @@ import type { DashboardFilterId } from '../features/dashboard/selectors';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell, type SyncPendingItem } from './components/AppShell';
+import { StartupSplash } from './components/StartupSplash';
 import { createAppStore } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
@@ -91,6 +92,9 @@ export interface AppProps {
    */
   updater?: DksUpdaterApi | null;
 }
+
+/** Upper bound for the start-up splash if session restoration never settles. */
+const RESTORE_SPLASH_MAX_MS = 20_000;
 
 function getSystemDarkPreference(): boolean {
   if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -198,6 +202,10 @@ export function App({
   const resolvedTheme = resolveTheme(themePreference, systemDark);
   const authStatus = useStore(appStore, (state) => state.authStatus);
   const authError = useStore(appStore, (state) => state.authError);
+  const isRestoringSession = useStore(appStore, (state) => state.isRestoringSession);
+  // Fail-safe only: if session restoration never settles (a hung network
+  // request), stop showing the splash eventually so the user is never stuck.
+  const [restoreSplashExpired, setRestoreSplashExpired] = useState(false);
   const session = useStore(appStore, (state) => state.session);
   const profile = useStore(appStore, (state) => state.profile);
   const health = useStore(appStore, (state) => state.health);
@@ -257,6 +265,14 @@ export function App({
 
     return undefined;
   }, [appStore, authService, demoAvailable, startInWorkspace]);
+
+  useEffect(() => {
+    if (!isRestoringSession) {
+      return undefined;
+    }
+    const timer = window.setTimeout(() => setRestoreSplashExpired(true), RESTORE_SPLASH_MAX_MS);
+    return () => window.clearTimeout(timer);
+  }, [isRestoringSession]);
 
   const handleThemeChange = (preference: ThemePreference) => {
     setThemePreference(preference);
@@ -1060,6 +1076,12 @@ export function App({
           onSignOut={() => void appStore.getState().signOut()}
         />
       );
+    }
+    // v0.1.7: while the saved session is still being restored, show the
+    // neutral splash — NEVER the email/password form. The AuthScreen appears
+    // only once restoration has finished and there is no session.
+    if (isRestoringSession && !restoreSplashExpired) {
+      return <StartupSplash />;
     }
     return (
       <AuthScreen

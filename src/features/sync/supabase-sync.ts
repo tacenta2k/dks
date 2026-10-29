@@ -169,6 +169,28 @@ export function isDuplicateColumnNameError(message: string): boolean {
   );
 }
 
+/**
+ * v0.1.7 — the column's OWN id already exists on the server:
+ *   23505 duplicate key value violates unique constraint "app_columns_pkey".
+ *
+ * The SELECT policy hides soft-deleted columns from Office, so a column an
+ * administrator deleted looks "missing" to the Office sync and is re-INSERTed
+ * under the same id on every run. The row demonstrably already exists, so the
+ * create is treated as done (an UPDATE by id is attempted instead) rather than
+ * leaving a permanent error in the sync status pill.
+ *
+ * Name-key duplicates are deliberately excluded — they mean a DIFFERENT row
+ * owns the name and are reconciled by `reconcileDuplicateColumnName`. Other
+ * unique indexes (e.g. `one_primary_expiry_column`) are not matched either.
+ */
+export function isDuplicateColumnIdError(message: string, code?: string | null): boolean {
+  const text = message.toLowerCase();
+  if (isDuplicateColumnNameError(message)) return false;
+  if (text.includes('app_columns_pkey')) return true;
+  const duplicate = code === '23505' || text.includes('duplicate key') || text.includes('23505');
+  return duplicate && (text.includes('_pkey') || text.includes('key (id)'));
+}
+
 export interface RemoteColumnLookup {
   id: string;
   name: string;
@@ -1099,6 +1121,32 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         requireClearance(options);
         const rawMessage = caught instanceof Error ? caught.message : String(caught);
         const message = sanitizeSyncError(rawMessage);
+        const errorCode = caught instanceof RemoteWriteError ? caught.code : undefined;
+        if (mode === 'insert' && isDuplicateColumnIdError(rawMessage, errorCode)) {
+          // The create already landed on the server (typically a column that
+          // an administrator soft-deleted and Office can no longer SELECT).
+          // Never leave the create failing forever: push the local values as
+          // a plain UPDATE by id and acknowledge the queued create. For a row
+          // this account cannot see the UPDATE matches nothing, which is the
+          // correct no-op — the server copy stays authoritative.
+          try {
+            requireClearance(options);
+            await writeRow(options.client, 'app_columns', payload, 'update');
+            requireClearance(options);
+            console.info('[sync] Queued column create already exists on the server; acknowledging the create.');
+            pushedColumns += 1;
+            await bookkeeping.markSynced('column', column.id);
+          } catch (updateCaught) {
+            if (updateCaught instanceof SyncClearanceError) throw updateCaught;
+            requireClearance(options);
+            const updateMessage = sanitizeSyncError(
+              updateCaught instanceof Error ? updateCaught.message : String(updateCaught),
+            );
+            await bookkeeping.markFailed('column', column.id, updateMessage);
+            errors.push(`Column ${column.name}: ${updateMessage}`);
+          }
+          continue;
+        }
         if (mode === 'insert' && isDuplicateColumnNameError(rawMessage)) {
           const reconciled = await reconcileDuplicateColumnName({
             client: options.client,

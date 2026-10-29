@@ -1,8 +1,10 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   EMPTY_EMAIL_PREFS,
-  loadEmailNotificationPrefs,
+  loadEmailNotificationPrefsCached,
+  peekCachedEmailNotificationPrefs,
+  rememberEmailNotificationPrefs,
   saveEmailNotificationPrefs,
   validateEmailPrefs,
   type EmailNotificationPrefs,
@@ -24,37 +26,66 @@ function normalizeRecipients(text: string): string[] {
 }
 
 export function EmailNotificationsSection({ client }: EmailNotificationsSectionProps) {
-  const [prefs, setPrefs] = useState<EmailNotificationPrefs>({ ...EMPTY_EMAIL_PREFS });
-  const [recipientsText, setRecipientsText] = useState('');
-  const [loaded, setLoaded] = useState(false);
+  // v0.1.7: a cached value (prefetched by Settings or from an earlier visit)
+  // renders the form immediately — no loader, no network wait.
+  const [initialCache] = useState(() => (client ? peekCachedEmailNotificationPrefs(client) : null));
+  const [prefs, setPrefs] = useState<EmailNotificationPrefs>(() => (
+    initialCache?.prefs ?? { ...EMPTY_EMAIL_PREFS }
+  ));
+  const [recipientsText, setRecipientsText] = useState(() => (
+    initialCache?.prefs.expiryRecipients.join('\n') ?? ''
+  ));
+  const [loaded, setLoaded] = useState(() => !client || initialCache !== null);
+  // A failed/timed-out FIRST load shows Retry instead of a form full of
+  // defaults that could be saved over the real server preferences.
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Once the administrator edits a field, a background refresh never
+  // overwrites what they typed.
+  const editedRef = useRef(false);
 
   useEffect(() => {
     if (!client) {
       setLoaded(true);
       return undefined;
     }
+    const cached = peekCachedEmailNotificationPrefs(client);
+    if (cached?.fresh && loadAttempt === 0) {
+      // Fresh enough: no request at all on this mount.
+      return undefined;
+    }
     let cancelled = false;
-    void loadEmailNotificationPrefs(client).then((result) => {
-      if (cancelled || result.error && !result.data) {
-        if (!cancelled) {
-          setError(result.error?.message ?? 'Unable to load email preferences.');
-          setLoaded(true);
+    void loadEmailNotificationPrefsCached(client, { force: loadAttempt > 0 || cached !== null })
+      .then((result) => {
+        if (cancelled) {
+          return;
         }
-        return;
-      }
-      if (!cancelled) {
-        const prefsResult = result.data ?? { ...EMPTY_EMAIL_PREFS };
-        setPrefs(prefsResult);
-        setRecipientsText(prefsResult.expiryRecipients.join('\n'));
-        setError(result.error ? result.error.message : null);
+        if (result.error || !result.data) {
+          if (cached) {
+            // Stale cache is already on screen; keep it and stay quiet.
+            return;
+          }
+          setLoadError(result.error?.message ?? 'Unable to load email preferences.');
+          setLoaded(true);
+          return;
+        }
+        if (!editedRef.current) {
+          setPrefs(result.data);
+          setRecipientsText(result.data.expiryRecipients.join('\n'));
+        }
+        setLoadError(null);
         setLoaded(true);
-      }
-    });
+      });
     return () => { cancelled = true; };
-  }, [client]);
+  }, [client, loadAttempt]);
+
+  const editPrefs = (patch: (current: EmailNotificationPrefs) => EmailNotificationPrefs) => {
+    editedRef.current = true;
+    setPrefs(patch);
+  };
 
   const save = async (): Promise<void> => {
     if (!client || busy) {
@@ -81,15 +112,55 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
       return;
     }
     if (result.data) {
+      rememberEmailNotificationPrefs(client, result.data);
       setPrefs(result.data);
       setRecipientsText(result.data.expiryRecipients.join('\n'));
     }
+    editedRef.current = false;
     setError(null);
     setMessage('Email preferences saved.');
   };
 
   if (!loaded) {
-    return <p className="settings-empty" role="status">Loading email preferences…</p>;
+    // Skeleton with roughly the final height, so the form appearing does not
+    // push the rest of the Notifications section around.
+    return (
+      <section
+        className="settings-email settings-email--loading"
+        role="status"
+        aria-busy="true"
+        aria-label="Loading email preferences…"
+        data-testid="email-prefs-skeleton"
+      >
+        <h3>Email notifications</h3>
+        <span className="settings-skeleton settings-skeleton--toggle" aria-hidden="true" />
+        <span className="settings-skeleton settings-skeleton--field" aria-hidden="true" />
+        <span className="settings-skeleton settings-skeleton--toggle" aria-hidden="true" />
+        <span className="settings-skeleton settings-skeleton--area" aria-hidden="true" />
+      </section>
+    );
+  }
+
+  if (client && loadError) {
+    return (
+      <section className="settings-email" aria-labelledby="email-notifications-title">
+        <h3 id="email-notifications-title">Email notifications</h3>
+        <p className="sheet-form__error" role="alert">{loadError}</p>
+        <div className="settings-email__actions">
+          <button
+            type="button"
+            className="button button--secondary"
+            onClick={() => {
+              setLoadError(null);
+              setLoaded(false);
+              setLoadAttempt((attempt) => attempt + 1);
+            }}
+          >
+            Retry
+          </button>
+        </div>
+      </section>
+    );
   }
 
   if (!client) {
@@ -112,7 +183,7 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
           id="settings-email-approvals-enabled"
           type="checkbox"
           checked={prefs.enabled}
-          onChange={(event) => setPrefs((current) => ({ ...current, enabled: event.target.checked }))}
+          onChange={(event) => editPrefs((current) => ({ ...current, enabled: event.target.checked }))}
         />
         <span>Email me when an Office sign-in needs approval</span>
       </label>
@@ -124,7 +195,7 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
           type="email"
           value={prefs.adminEmail ?? ''}
           placeholder="admin@example.com"
-          onChange={(event) => setPrefs((current) => ({
+          onChange={(event) => editPrefs((current) => ({
             ...current,
             adminEmail: event.target.value.trim() || null,
           }))}
@@ -137,7 +208,7 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
           type="checkbox"
           checked={prefs.expiryDigestEnabled}
           disabled={!prefs.enabled}
-          onChange={(event) => setPrefs((current) => ({ ...current, expiryDigestEnabled: event.target.checked }))}
+          onChange={(event) => editPrefs((current) => ({ ...current, expiryDigestEnabled: event.target.checked }))}
         />
         <span>Send a daily expiry digest</span>
       </label>
@@ -150,7 +221,10 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
           value={recipientsText}
           disabled={!prefs.enabled || !prefs.expiryDigestEnabled}
           placeholder="admin@example.com\noffice@example.com"
-          onChange={(event) => setRecipientsText(event.target.value)}
+          onChange={(event) => {
+            editedRef.current = true;
+            setRecipientsText(event.target.value);
+          }}
         />
       </label>
 
@@ -160,7 +234,7 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
           type="checkbox"
           checked={prefs.includeFullIds}
           disabled={!prefs.enabled || !prefs.expiryDigestEnabled}
-          onChange={(event) => setPrefs((current) => ({ ...current, includeFullIds: event.target.checked }))}
+          onChange={(event) => editPrefs((current) => ({ ...current, includeFullIds: event.target.checked }))}
         />
         <span>Include full Passport / Civil ID values in the emailed PDF</span>
       </label>

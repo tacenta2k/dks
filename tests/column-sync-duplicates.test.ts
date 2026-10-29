@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  isDuplicateColumnIdError,
   isDuplicateColumnNameError,
   resolveRemoteColumnByName,
   runSupabaseSync,
@@ -55,6 +56,14 @@ interface FakeServerOptions {
   /** Omit the RPC entirely (migration not run). */
   withoutRpc?: boolean;
   rpcThrows?: string;
+  /**
+   * Ids that already exist server-side but are invisible to SELECT (an
+   * Admin-soft-deleted column seen from Office). INSERTing one of these ids
+   * fails with the real primary-key violation.
+   */
+  existingHiddenIds?: string[];
+  /** Fail every app_columns UPDATE with this message. */
+  updateError?: string;
 }
 
 function createFakeServer(options: FakeServerOptions = {}) {
@@ -77,6 +86,17 @@ function createFakeServer(options: FakeServerOptions = {}) {
       },
       insert: async (values) => {
         calls.push(`insert:${table}`);
+        if (table === 'app_columns' && values.some((value) => (
+          (options.existingHiddenIds ?? []).includes(String(value.id ?? ''))
+        ))) {
+          return {
+            data: null,
+            error: {
+              code: '23505',
+              message: 'duplicate key value violates unique constraint "app_columns_pkey"',
+            },
+          };
+        }
         if (table === 'app_columns' && options.duplicateOnInsert !== false) {
           const clash = [...visible, ...hidden].some((column) => (
             values.some((value) => (
@@ -98,6 +118,9 @@ function createFakeServer(options: FakeServerOptions = {}) {
       update: (values) => ({
         eq: async (_column: string, id: string) => {
           calls.push(`update:${table}:${id}`);
+          if (table === 'app_columns' && options.updateError) {
+            return { data: null, error: { message: options.updateError } };
+          }
           if (table === 'app_columns') updates.push({ id, ...values });
           return { data: null, error: null };
         },
@@ -354,6 +377,96 @@ describe('duplicate column reconciliation (Office)', () => {
       expect(failed.length).toBeGreaterThan(0);
       // Nothing was deleted to work around the clash.
       expect(store.listColumns(true)).toHaveLength(2);
+    } finally {
+      store.close();
+    }
+  });
+});
+
+describe('v0.1.7 — column create already exists on the server (app_columns_pkey)', () => {
+  it('recognises the primary-key violation but not the name or other unique keys', () => {
+    expect(isDuplicateColumnIdError(
+      'duplicate key value violates unique constraint "app_columns_pkey"',
+      '23505',
+    )).toBe(true);
+    expect(isDuplicateColumnIdError('duplicate key value violates unique constraint "app_columns_pkey"')).toBe(true);
+    expect(isDuplicateColumnIdError(
+      'duplicate key value violates unique constraint "app_columns_name_key"',
+      '23505',
+    )).toBe(false);
+    expect(isDuplicateColumnIdError(
+      'duplicate key value violates unique constraint "one_primary_expiry_column"',
+      '23505',
+    )).toBe(false);
+    expect(isDuplicateColumnIdError('new row violates row-level security policy', '42501')).toBe(false);
+  });
+
+  it('acknowledges the queued create instead of leaving a permanent sync error', async () => {
+    const { store, local, reported } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({ columns: [], existingHiddenIds: [LOCAL_COLUMN_ID] });
+
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('healthy');
+      expect(result.errors).toEqual([]);
+      expect(store.listOutbox('all').filter((item) => item.entityType === 'column'))
+        .toEqual([expect.objectContaining({ status: 'synced' })]);
+      // A plain UPDATE by the SAME id replaced the impossible INSERT.
+      expect(server.inserts).toHaveLength(0);
+      expect(server.updates).toEqual([expect.objectContaining({ id: LOCAL_COLUMN_ID })]);
+      expect(store.getSyncStatus()).toEqual(expect.objectContaining({ status: 'healthy', lastError: null }));
+      expect(reported.join(' ')).not.toContain('unique constraint');
+      // The local column is untouched (no rekey, nothing deleted).
+      expect(store.listColumns(true).map((column) => column.id)).toEqual([LOCAL_COLUMN_ID]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recovers an item that already failed with the pkey error on an earlier run', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const [queued] = store.listOutbox('all').filter((item) => item.entityType === 'column');
+      store.markOutboxFailed(queued.id, 'duplicate key value violates unique constraint "app_columns_pkey"');
+      store.setSyncStatus({
+        status: 'error',
+        lastError: 'Column Visa Expiry: duplicate key value violates unique constraint "app_columns_pkey"',
+      } as never);
+      const server = createFakeServer({ columns: [], existingHiddenIds: [LOCAL_COLUMN_ID] });
+
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('healthy');
+      expect(store.listOutbox('all').filter((item) => item.status !== 'synced')).toEqual([]);
+      expect(store.getSyncStatus()).toEqual(expect.objectContaining({ status: 'healthy', lastError: null }));
+
+      // Later runs stay healthy too (no flip back into the error state).
+      const again = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+      expect(again.status).toBe('healthy');
+    } finally {
+      store.close();
+    }
+  });
+
+  it('keeps the item retryable with the UPDATE failure, never the raw pkey text', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({
+        columns: [],
+        existingHiddenIds: [LOCAL_COLUMN_ID],
+        updateError: 'network request failed',
+      });
+
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('error');
+      const [item] = store.listOutbox('all').filter((row) => row.entityType === 'column');
+      expect(item.status).toBe('failed');
+      expect(item.lastError).not.toContain('app_columns_pkey');
     } finally {
       store.close();
     }
