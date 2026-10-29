@@ -15,7 +15,7 @@ import { resolveAppVersion } from '../../lib/app-info';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import type { OfficeSessionSignOutSummary } from '../auth/office-approval-service';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
-import type { EmailPrefsClient } from './email-preferences';
+import { primeEmailNotificationPrefs, type EmailPrefsClient } from './email-preferences';
 import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -316,6 +316,17 @@ export function SettingsPage({
   // stay until dismissed or replaced by a new save.
   const [saveBanner, setSaveBanner] = useState<SaveBanner | null>(null);
   const bannerIdRef = useRef(0);
+  /**
+   * Did the pending settings change come from the user?
+   *
+   * Background/external updates flow into the same `settings` state (workspace
+   * settings loaded or refreshed by the app shell, a primary-column heal, a
+   * late local-cache read). Those used to hit the auto-save effect and pop
+   * "Settings saved to the workspace." with no user action. Only an explicit
+   * edit (a control change or the Save button) sets this flag, and the effect
+   * both persists and reports only when it is set.
+   */
+  const userChangeRef = useRef(false);
 
   const showBanner = useCallback((kind: SaveBannerKind, message: string) => {
     bannerIdRef.current += 1;
@@ -365,6 +376,16 @@ export function SettingsPage({
     // this fallback subscription itself depends on the bridge identity.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [providedUpdateState, updaterBridge]);
+
+  // Warm the email preferences while the user is still on another section, so
+  // switching to Notifications paints the form immediately instead of starting
+  // a network round-trip from a spinner.
+  useEffect(() => {
+    if (role !== 'admin' || !emailPrefsClient) {
+      return;
+    }
+    primeEmailNotificationPrefs(emailPrefsClient);
+  }, [emailPrefsClient, role]);
 
   // Opening About surfaces the current updater truth once — including an
   // update the background check already downloaded. In a development build
@@ -416,6 +437,13 @@ export function SettingsPage({
       mountedRef.current = true;
       return;
     }
+    // Nobody asked for this change (it was synced in from the shell, the local
+    // cache or a background refresh): never write it back and never show
+    // "Settings saved" feedback for it.
+    if (!userChangeRef.current) {
+      return;
+    }
+    userChangeRef.current = false;
     try {
       const results = [onSettingsChange?.(settings), onChange?.(settings)]
         .filter((result): result is Promise<void> => Boolean(result && typeof result.then === 'function'));
@@ -443,10 +471,11 @@ export function SettingsPage({
   const updateHandler = onCheckForUpdates ?? onUpdate;
   const resolvedVersion = appVersion ?? version ?? defaultVersion();
   const updateSettings = (patch: (current: DksSettings) => DksSettings) => {
+    // Explicit user edit: this is the only source of save feedback. One
+    // banner per change (the auto-save effect replaces it with the workspace
+    // result), instead of an optimistic banner racing a second one.
+    userChangeRef.current = true;
     setSettings((current) => patch(current));
-    // A new edit is also a retry: replace any persistent save-failure banner
-    // with the transient optimistic success message.
-    showBanner('success', 'Settings saved locally.');
   };
 
   const updateColor = (key: keyof StatusColors, value: string) => {
@@ -548,24 +577,28 @@ export function SettingsPage({
           ))}
         </nav>
         <div className="settings-content">
-          {saveBanner ? (
-            <div
-              className={`settings-alert${saveBanner.kind === 'error' ? ' settings-alert--error' : ' settings-alert--autohide'}`}
-              role={saveBanner.kind === 'error' ? 'alert' : 'status'}
-            >
-              <span className="settings-alert__message">{saveBanner.message}</span>
-              {saveBanner.kind === 'error' ? (
-                <button
-                  type="button"
-                  className="settings-alert__dismiss"
-                  aria-label="Dismiss message"
-                  onClick={() => setSaveBanner(null)}
-                >
-                  Dismiss
-                </button>
-              ) : null}
-            </div>
-          ) : null}
+          {/* Floating toast: fixed-positioned, so showing/hiding it never
+              pushes the page (or the Settings/Updates section) up and down. */}
+          <div className="settings-banner-host" aria-live="polite">
+            {saveBanner ? (
+              <div
+                className={`settings-alert settings-alert--toast${saveBanner.kind === 'error' ? ' settings-alert--error' : ' settings-alert--autohide'}`}
+                role={saveBanner.kind === 'error' ? 'alert' : 'status'}
+              >
+                <span className="settings-alert__message">{saveBanner.message}</span>
+                {saveBanner.kind === 'error' ? (
+                  <button
+                    type="button"
+                    className="settings-alert__dismiss"
+                    aria-label="Dismiss message"
+                    onClick={() => setSaveBanner(null)}
+                  >
+                    Dismiss
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
           {settingsError ? <div className="settings-alert settings-alert--error" role="alert">{settingsError}</div> : null}
 
           {activeSection === 'expiry' ? (

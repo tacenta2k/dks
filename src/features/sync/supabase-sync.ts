@@ -169,6 +169,28 @@ export function isDuplicateColumnNameError(message: string): boolean {
   );
 }
 
+/**
+ * The SAME column id already exists on the server — Postgres reports the
+ * primary key, not the unique name:
+ *   23505 duplicate key value violates unique constraint "app_columns_pkey"
+ *
+ * This is the idempotent-replay case: the first insert reached the server but
+ * the acknowledgement never reached the client (crash, quit, offline, an
+ * interrupted sync), so the queued create is retried forever and leaves a
+ * permanent error in the sync pill. An INSERT can never succeed for that id
+ * again, so it must be treated as "already created" (update, then ack) rather
+ * than as a failure.
+ */
+export function isDuplicateColumnKeyError(message: string): boolean {
+  const text = message.toLowerCase();
+  if (text.includes('app_columns_pkey')) {
+    return true;
+  }
+  const duplicate = text.includes('duplicate key') || text.includes('23505');
+  // Any other table's primary key (entries_pkey, …) is not this case.
+  return duplicate && text.includes('pkey') && !text.includes('entries');
+}
+
 export interface RemoteColumnLookup {
   id: string;
   name: string;
@@ -775,6 +797,97 @@ async function reconcileDuplicateColumnName({
   return 'synced';
 }
 
+interface ReconcileColumnKeyOptions {
+  client: SupabaseDataClient;
+  local: SupabaseSyncLocal;
+  column: DksLocalColumn;
+  payload: Record<string, unknown>;
+  now: () => string;
+  bookkeeping: Bookkeeping;
+  conflicts: SupabaseConflict[];
+  errors: string[];
+  requireAllowed: () => void;
+  /** The remote row carrying the SAME id, when this account can see it. */
+  remoteColumn?: Record<string, unknown> | null;
+}
+
+/**
+ * The queued column create hit `app_columns_pkey`: the row with this id is
+ * already on the server (a replayed insert whose acknowledgement never
+ * arrived). An INSERT can never succeed for that id again, so the item is
+ * resolved as "already created" instead of being retried forever:
+ *
+ *  - push the local values onto the existing row with an UPDATE (never a second
+ *    INSERT), then acknowledge the outbox item → the sync pill goes healthy;
+ *  - if the UPDATE is refused (for example the row was soft-deleted remotely,
+ *    which hides it from the Office UPDATE policy), fall back to the duplicate
+ *    NAME reconciliation when that is the error, otherwise keep a readable,
+ *    actionable reason instead of the raw constraint text.
+ *
+ * Returns 'synced' (resolved, item acknowledged), 'unhandled' (fall through to
+ * the regular failure handling / name reconciliation) or 'reported' (a precise
+ * reason was already stored for the item).
+ */
+async function reconcileDuplicateColumnKey({
+  client,
+  local,
+  column,
+  payload,
+  now,
+  bookkeeping,
+  conflicts,
+  errors,
+  requireAllowed,
+  remoteColumn,
+}: ReconcileColumnKeyOptions): Promise<'synced' | 'reported' | 'unhandled'> {
+  requireAllowed();
+  try {
+    await writeRow(client, 'app_columns', { ...payload, id: column.id }, 'update');
+    requireAllowed();
+    await bookkeeping.markSynced('column', column.id);
+    return 'synced';
+  } catch (caught) {
+    if (caught instanceof SyncClearanceError) throw caught;
+    requireAllowed();
+    const rawMessage = caught instanceof Error ? caught.message : String(caught);
+    if (isDuplicateColumnNameError(rawMessage)) {
+      // Same id but the (new) name belongs to another row: let the caller run
+      // the name reconciliation, which adopts or reports precisely.
+      return 'unhandled';
+    }
+
+    // The row exists but this account may not update it. Record what is known
+    // for the administrator and keep a readable reason on the item.
+    const localRecord = column as unknown as Record<string, unknown>;
+    const conflict: SupabaseConflict = {
+      entityType: 'column',
+      entityId: column.id,
+      local: localRecord,
+      remote: remoteColumn ?? {
+        id: column.id,
+        name: column.name,
+        type: column.type,
+        options: payload.options ?? {},
+        deleted: true,
+        updated_at: now(),
+      },
+      winner: 'remote',
+      createdAt: now(),
+    };
+    conflicts.push(conflict);
+    await local.recordConflict?.(conflict);
+    requireAllowed();
+    const message = sanitizeSyncError(rawMessage);
+    await bookkeeping.markFailed(
+      'column',
+      column.id,
+      `This column already exists on the server, but it could not be updated from this account: ${message}`,
+    );
+    errors.push(`Column ${column.name}: already exists on the server`);
+    return 'reported';
+  }
+}
+
 export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<SupabaseSyncResult> {
   const now = options.now ?? (() => new Date().toISOString());
   const errors: string[] = [];
@@ -1099,23 +1212,42 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
         requireClearance(options);
         const rawMessage = caught instanceof Error ? caught.message : String(caught);
         const message = sanitizeSyncError(rawMessage);
-        if (mode === 'insert' && isDuplicateColumnNameError(rawMessage)) {
-          const reconciled = await reconcileDuplicateColumnName({
-            client: options.client,
-            local: options.local,
-            column,
-            payload,
-            now,
-            bookkeeping,
-            conflicts,
-            errors,
-            requireAllowed: () => requireClearance(options),
-          });
-          if (reconciled === 'synced') {
+        if (mode === 'insert' && (isDuplicateColumnKeyError(rawMessage) || isDuplicateColumnNameError(rawMessage))) {
+          // 23505 on the primary key = the row is already there (replayed
+          // insert); 23505 on the unique name = another row owns the name.
+          // Both are resolved instead of being retried forever.
+          const reconciled = isDuplicateColumnKeyError(rawMessage)
+            ? await reconcileDuplicateColumnKey({
+              client: options.client,
+              local: options.local,
+              column,
+              payload,
+              now,
+              bookkeeping,
+              conflicts,
+              errors,
+              requireAllowed: () => requireClearance(options),
+              remoteColumn: remoteColumns.find((remote) => stringValue(remote.id) === column.id) ?? null,
+            })
+            : 'unhandled';
+          const outcome = reconciled === 'unhandled'
+            ? await reconcileDuplicateColumnName({
+              client: options.client,
+              local: options.local,
+              column,
+              payload,
+              now,
+              bookkeeping,
+              conflicts,
+              errors,
+              requireAllowed: () => requireClearance(options),
+            })
+            : reconciled;
+          if (outcome === 'synced') {
             pushedColumns += 1;
             continue;
           }
-          if (reconciled === 'reported') {
+          if (outcome === 'reported') {
             // A precise, actionable reason is already stored for this item;
             // keep it instead of replacing it with the raw constraint text.
             continue;

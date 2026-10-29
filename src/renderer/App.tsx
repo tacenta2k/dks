@@ -26,6 +26,7 @@ import type { DashboardFilterId } from '../features/dashboard/selectors';
 import { createSyncingRepositoryProxy } from '../lib/sync-trigger';
 import { isSupabaseConfigured } from '../lib/supabase';
 import { AppShell, type SyncPendingItem } from './components/AppShell';
+import { AuthSplash } from './components/AuthSplash';
 import { createAppStore } from '../lib/store';
 import { createElectronSheetRepository } from '../features/sheet/electron-repository';
 import type { SheetRepository } from '../features/sheet/repository';
@@ -143,6 +144,14 @@ export function App({
     createSyncingRepositoryProxy(baseSheetRepository, requestSync),
   );
   const [activeView, setActiveView] = useState<AppView>(initialView);
+  /**
+   * Auth-flicker guard: true from the first render until the persisted session
+   * has been restored. Deriving this from `authStatus === 'loading'` is not
+   * enough — the store starts `unauthenticated` and only flips to `loading`
+   * inside an effect, which paints the sign-in form for one or more frames
+   * (and for the whole 1–3 s token refresh on a slow connection).
+   */
+  const [restoringSession, setRestoringSession] = useState(() => authService.isConfigured);
   // Dashboard card navigation: the clicked card's exact filter, applied by
   // the Visa Sheet (token increments so re-clicking a card re-applies it).
   const [dashboardSheetFilter, setDashboardSheetFilter] = useState<
@@ -246,10 +255,19 @@ export function App({
 
   useEffect(() => {
     if (authService.isConfigured) {
-      void appStore.getState().restoreSession();
+      // Startup session restoration. The flag stays true until the persisted
+      // session has fully resolved (valid / expired / none), and the login
+      // form is never rendered while it is true — see the render guard below.
+      setRestoringSession(true);
+      void appStore.getState().restoreSession().finally(() => {
+        setRestoringSession(false);
+      });
       return undefined;
     }
 
+    // No backend configured (demo/offline build): nothing to restore, so the
+    // sign-in screen is ready immediately.
+    setRestoringSession(false);
     appStore.getState().reset();
     if (demoAvailable && startInWorkspace) {
       appStore.getState().setDemoSession();
@@ -1048,6 +1066,12 @@ export function App({
   };
 
   if (!isWorkspaceVisible) {
+    // Startup: the persisted session has not resolved yet. Show the neutral
+    // logo/spinner splash — never the email/password form — so a signed-in
+    // user never sees (or types into) the login screen for a moment.
+    if (restoringSession) {
+      return <AuthSplash />;
+    }
     // A password-authenticated Office session with no approval yet gets the
     // dedicated gate — never the AuthScreen (that would let it re-sign-in in
     // a loop) and NEVER any other workspace surface.
@@ -1061,6 +1085,7 @@ export function App({
         />
       );
     }
+    // Initialization is complete and there is no session: the sign-in form.
     return (
       <AuthScreen
         onSignIn={(email, password) => appStore.getState().signIn(email, password)}

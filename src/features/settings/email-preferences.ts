@@ -126,15 +126,83 @@ export function emailPrefsToRecord(prefs: EmailNotificationPrefs): Record<string
   };
 }
 
-export async function loadEmailNotificationPrefs(
+/**
+ * Settings → Notifications must never feel like it "hangs".
+ *
+ * Two independent problems made the email section slow:
+ *  1. every mount of the section issued a NEW network round-trip (switching
+ *     tabs back and forth re-fetched each time), and
+ *  2. a slow/stalled request had no ceiling, so the section sat on its loader
+ *     until the transport gave up (or forever).
+ *
+ * The cache below makes a repeat open instant, the in-flight map makes two
+ * concurrent opens share ONE request, and the timeout turns a stalled request
+ * into a normal, retryable error so the form is usable immediately.
+ */
+export const EMAIL_PREFS_LOAD_TIMEOUT_MS = 8_000;
+
+interface EmailPrefsCacheEntry {
+  prefs: EmailNotificationPrefs;
+  loadedAt: number;
+}
+
+/** Resolved prefs per client (a WeakMap: no leak when a session is replaced). */
+const emailPrefsCache = new WeakMap<object, EmailPrefsCacheEntry>();
+/** In-flight request per client, shared by every caller. */
+const emailPrefsInFlight = new WeakMap<object, Promise<AuthResult<EmailNotificationPrefs>>>();
+
+/** Clears the memoized prefs (saves, sign-out, an explicit refresh). */
+export function clearEmailNotificationPrefsCache(client?: EmailPrefsClient | null): void {
+  if (client) {
+    emailPrefsCache.delete(client);
+    emailPrefsInFlight.delete(client);
+    return;
+  }
+  // WeakMap has no clear(): the next client object simply gets a fresh entry.
+}
+
+/** The last successfully loaded prefs for this client, if any (synchronous). */
+export function peekEmailNotificationPrefs(
+  client: EmailPrefsClient | null | undefined,
+): EmailNotificationPrefs | null {
+  if (!client) {
+    return null;
+  }
+  const cached = emailPrefsCache.get(client);
+  return cached ? { ...cached.prefs } : null;
+}
+
+function rememberEmailPrefs(client: EmailPrefsClient, prefs: EmailNotificationPrefs): void {
+  emailPrefsCache.set(client, { prefs: { ...prefs }, loadedAt: Date.now() });
+}
+
+function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error('The server did not answer in time.'));
+    }, timeoutMs);
+    Promise.resolve(promise).then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function fetchEmailNotificationPrefs(
   client: EmailPrefsClient,
+  timeoutMs: number,
 ): Promise<AuthResult<EmailNotificationPrefs>> {
   try {
-    const result = await client
-      .from('settings')
-      .select('key,value')
-      .eq('key', EMAIL_PREFS_SETTINGS_KEY)
-      .maybeSingle();
+    const result = await withTimeout(
+      client.from('settings').select('key,value').eq('key', EMAIL_PREFS_SETTINGS_KEY).maybeSingle(),
+      timeoutMs,
+    );
     if (result.error) {
       return {
         data: { ...EMPTY_EMAIL_PREFS },
@@ -142,13 +210,61 @@ export async function loadEmailNotificationPrefs(
       };
     }
     const record = result.data as Record<string, unknown> | null;
-    return { data: parseEmailPrefs(record?.value), error: null };
+    const prefs = parseEmailPrefs(record?.value);
+    rememberEmailPrefs(client, prefs);
+    return { data: prefs, error: null };
   } catch (caught) {
     return {
       data: { ...EMPTY_EMAIL_PREFS },
       error: toError('Unable to load email preferences.', 'EMAIL_PREFS_LOAD_FAILED', caught),
     };
   }
+}
+
+/**
+ * Load the Admin email preferences.
+ *
+ * `{ cached: true }` returns the memoized value without touching the network
+ * (used for the first paint); a plain call shares any in-flight request and is
+ * bounded by `timeoutMs`.
+ */
+export async function loadEmailNotificationPrefs(
+  client: EmailPrefsClient,
+  options: { timeoutMs?: number; cached?: boolean; refresh?: boolean } = {},
+): Promise<AuthResult<EmailNotificationPrefs>> {
+  const timeoutMs = options.timeoutMs ?? EMAIL_PREFS_LOAD_TIMEOUT_MS;
+  if (!options.refresh) {
+    const cached = emailPrefsCache.get(client);
+    if (cached) {
+      return { data: { ...cached.prefs }, error: null };
+    }
+    if (options.cached) {
+      return { data: { ...EMPTY_EMAIL_PREFS }, error: null };
+    }
+  }
+  const inFlight = emailPrefsInFlight.get(client);
+  if (inFlight) {
+    return inFlight;
+  }
+  const request = fetchEmailNotificationPrefs(client, timeoutMs).finally(() => {
+    emailPrefsInFlight.delete(client);
+  });
+  emailPrefsInFlight.set(client, request);
+  return request;
+}
+
+/**
+ * Warm the cache without blocking anything (Settings → Notifications opens on
+ * a warmed client instead of a spinner). Failures are silent: the section
+ * loads (and reports) on its own when it opens.
+ */
+export function primeEmailNotificationPrefs(
+  client: EmailPrefsClient | null | undefined,
+): void {
+  if (!client || emailPrefsCache.has(client)) {
+    return;
+  }
+  void loadEmailNotificationPrefs(client).catch(() => undefined);
 }
 
 export async function saveEmailNotificationPrefs(
@@ -169,7 +285,9 @@ export async function saveEmailNotificationPrefs(
         error: toError(result.error.message, 'EMAIL_PREFS_SAVE_FAILED', result.error),
       };
     }
-    return { data: parseEmailPrefs(emailPrefsToRecord(prefs)), error: null };
+    const saved = parseEmailPrefs(emailPrefsToRecord(prefs));
+    rememberEmailPrefs(client, saved);
+    return { data: saved, error: null };
   } catch (caught) {
     return {
       data: null,

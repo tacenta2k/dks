@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  isDuplicateColumnKeyError,
   isDuplicateColumnNameError,
   resolveRemoteColumnByName,
   runSupabaseSync,
@@ -52,6 +53,8 @@ interface FakeServerOptions {
   hiddenColumns?: RemoteColumn[];
   /** Fail the insert with the real Postgres message. */
   duplicateOnInsert?: boolean;
+  /** Fail the insert outright with this Postgres message (e.g. the pkey case). */
+  insertError?: string;
   /** Omit the RPC entirely (migration not run). */
   withoutRpc?: boolean;
   rpcThrows?: string;
@@ -77,6 +80,9 @@ function createFakeServer(options: FakeServerOptions = {}) {
       },
       insert: async (values) => {
         calls.push(`insert:${table}`);
+        if (options.insertError) {
+          return { data: null, error: { message: options.insertError } };
+        }
         if (table === 'app_columns' && options.duplicateOnInsert !== false) {
           const clash = [...visible, ...hidden].some((column) => (
             values.some((value) => (
@@ -185,6 +191,92 @@ describe('duplicate column name errors are recognised', () => {
     )).toBe(true);
     expect(isDuplicateColumnNameError('duplicate key value violates unique constraint "entries_pkey"')).toBe(false);
     expect(isDuplicateColumnNameError('new row violates row-level security policy')).toBe(false);
+  });
+});
+
+describe('duplicate primary key on column insert (23505 app_columns_pkey)', () => {
+  it('treats an already-present row as created: updates it and acknowledges the outbox item', async () => {
+    // Root cause of the stuck pill: a replayed column insert hits the primary
+    // key (the row is already on the server, e.g. it was created on another
+    // device or the ack was lost). That is NOT an error to show the user — the
+    // column exists. The old catch only retried the name conflict, so the item
+    // went to `failed` with a raw "duplicate key value violates unique
+    // constraint app_columns_pkey" and the pill stayed red forever.
+    const { store, local, conflicts, reported } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({
+        columns: [],
+        insertError: 'duplicate key value violates unique constraint "app_columns_pkey"',
+      });
+
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('healthy');
+      // The item was resolved by writing the row under its own id.
+      expect(server.inserts).toHaveLength(0);
+      expect(server.updates).toEqual([
+        expect.objectContaining({ id: LOCAL_COLUMN_ID, name: 'Visa Expiry' }),
+      ]);
+      expect(store.listOutbox('all').filter((item) => item.entityType === 'column'))
+        .toEqual([expect.objectContaining({ status: 'synced' })]);
+      // Nothing user-facing: no failed message, no conflict, still one column.
+      expect(reported.join(' ')).not.toMatch(/duplicate key|unique constraint|pkey/i);
+      expect(conflicts).toHaveLength(0);
+      expect(store.listColumns(true).map((column) => column.id)).toEqual([LOCAL_COLUMN_ID]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('recognises a primary-key clash without swallowing other failures', () => {
+    expect(isDuplicateColumnKeyError(
+      'duplicate key value violates unique constraint "app_columns_pkey"',
+    )).toBe(true);
+    expect(isDuplicateColumnKeyError(
+      '23505: duplicate key value violates unique constraint "app_columns_pkey"',
+    )).toBe(true);
+    expect(isDuplicateColumnKeyError(
+      'duplicate key value violates unique constraint "entries_pkey"',
+    )).toBe(false);
+    expect(isDuplicateColumnKeyError('duplicate key value violates unique constraint "app_columns_name_key"'))
+      .toBe(false);
+    expect(isDuplicateColumnKeyError('new row violates row-level security policy')).toBe(false);
+  });
+
+  it('still reports a readable reason when the replay cannot be updated either', async () => {
+    const { store, local, reported } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({
+        columns: [],
+        insertError: 'duplicate key value violates unique constraint "app_columns_pkey"',
+      });
+      // Office may not UPDATE a soft-deleted row: the replay is genuinely stuck.
+      const blocked = {
+        ...server.client,
+        from: (table: string) => {
+          const base = server.client.from(table);
+          return {
+            ...base,
+            update: () => ({
+              eq: async () => ({
+                data: null,
+                error: { message: 'new row violates row-level security policy for table "app_columns"' },
+              }),
+            }),
+          };
+        },
+      };
+
+      await runSupabaseSync({ client: blocked as typeof server.client, local, userId: OFFICE_UID });
+
+      // The tab still surfaces the real reason instead of a raw Postgres dump.
+      expect(reported.join(' ')).toContain('already exists on the server');
+      expect(reported.join(' ')).not.toContain('duplicate key value violates');
+    } finally {
+      store.close();
+    }
   });
 });
 

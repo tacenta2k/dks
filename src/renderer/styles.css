@@ -77,18 +77,31 @@ button:focus-visible {
   outline-offset: 2px;
 }
 
+/*
+ * Shell layout: ONE scroll container.
+ *
+ * The app used to be `min-height: 100vh` with a document-level scroll, so the
+ * sidebar (a normal flex child stretched to the full content height) scrolled
+ * up and out of view with the page. Now the shell is exactly the viewport, the
+ * sidebar is pinned at full viewport height, and only `.app-shell__body`
+ * scrolls — the sidebar, its logo and the navigation never move.
+ */
 .app-shell {
   display: flex;
-  min-height: 100vh;
+  height: 100vh;
+  overflow: hidden;
   background: var(--color-background);
 }
 
 .sidebar {
   display: flex;
   width: 220px;
-  min-height: 100vh;
+  height: 100vh;
   flex: 0 0 220px;
   flex-direction: column;
+  /* A very short window scrolls the nav inside the rail, never the page. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 20px 14px 18px;
   border-right: 1px solid var(--color-border);
   background: var(--color-surface);
@@ -352,8 +365,15 @@ button:focus-visible {
 }
 
 .app-shell__body {
+  display: flex;
+  height: 100vh;
   min-width: 0;
+  min-height: 0;
   flex: 1;
+  flex-direction: column;
+  /* The only scrolling region in the shell. */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .top-bar {
@@ -1004,6 +1024,61 @@ button:focus-visible {
     var(--color-background);
 }
 
+/*
+ * Startup splash (auth-flicker fix): the same neutral background as the sign-in
+ * page, but with no form, no inputs and no focus targets — shown only while
+ * the persisted session is being restored.
+ */
+.auth-splash {
+  cursor: default;
+}
+
+.auth-splash__card {
+  display: grid;
+  gap: 18px;
+  justify-items: center;
+}
+
+.auth-splash__title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 20px;
+  font-weight: 750;
+  letter-spacing: 0.04em;
+}
+
+.auth-splash__status {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+}
+
+.auth-splash__spinner {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 auto;
+  border: 2px solid color-mix(in srgb, var(--color-primary) 24%, transparent);
+  border-top-color: var(--color-primary);
+  border-radius: 50%;
+  animation: auth-splash-spin 800ms linear infinite;
+}
+
+@keyframes auth-splash-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* Respect a reduced-motion preference: keep the spinner visible but static. */
+@media (prefers-reduced-motion: reduce) {
+  .auth-splash__spinner {
+    animation: none;
+  }
+}
+
 .login-card {
   width: min(100%, 432px);
   padding: 45px clamp(26px, 8vw, 54px) 41px;
@@ -1289,16 +1364,27 @@ button:focus-visible {
 }
 
 @media (max-width: 720px) {
+  /* Narrow layout: the rail is a top bar, so the whole page scrolls again. */
   .app-shell {
     display: block;
+    height: auto;
+    overflow: visible;
   }
 
   .sidebar {
     width: 100%;
+    height: auto;
     min-height: auto;
+    overflow: visible;
     padding: 17px 17px 13px;
     border-right: 0;
     border-bottom: 1px solid var(--color-border);
+  }
+
+  .app-shell__body {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
   }
 
   .sidebar__nav {

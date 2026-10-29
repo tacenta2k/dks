@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react';
 import {
   EMPTY_EMAIL_PREFS,
   loadEmailNotificationPrefs,
+  peekEmailNotificationPrefs,
   saveEmailNotificationPrefs,
   validateEmailPrefs,
   type EmailNotificationPrefs,
@@ -24,15 +25,29 @@ function normalizeRecipients(text: string): string[] {
 }
 
 export function EmailNotificationsSection({ client }: EmailNotificationsSectionProps) {
-  const [prefs, setPrefs] = useState<EmailNotificationPrefs>({ ...EMPTY_EMAIL_PREFS });
-  const [recipientsText, setRecipientsText] = useState('');
-  const [loaded, setLoaded] = useState(false);
+  // Prefetched/cached values render on the FIRST paint — no spinner at all
+  // when SettingsPage warmed the cache (primeEmailNotificationPrefs).
+  const cachedPrefs = peekEmailNotificationPrefs(client);
+  const [prefs, setPrefs] = useState<EmailNotificationPrefs>(() => cachedPrefs ?? { ...EMPTY_EMAIL_PREFS });
+  const [recipientsText, setRecipientsText] = useState(() => (
+    cachedPrefs ? cachedPrefs.expiryRecipients.join('\n') : ''
+  ));
+  const [loaded, setLoaded] = useState(Boolean(cachedPrefs) || !client);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     if (!client) {
+      setLoaded(true);
+      return undefined;
+    }
+    // A cached value is authoritative for this session: opening the tab again
+    // must not re-hit the network (that is what made tab switching feel slow).
+    const warm = peekEmailNotificationPrefs(client);
+    if (warm) {
+      setPrefs(warm);
+      setRecipientsText(warm.expiryRecipients.join('\n'));
       setLoaded(true);
       return undefined;
     }
@@ -89,7 +104,25 @@ export function EmailNotificationsSection({ client }: EmailNotificationsSectionP
   };
 
   if (!loaded) {
-    return <p className="settings-empty" role="status">Loading email preferences…</p>;
+    // Skeleton: the rest of Settings stays interactive; these rows are inert
+    // stand-ins for the form that is about to arrive.
+    return (
+      <section
+        className="settings-email settings-email--loading"
+        aria-labelledby="email-notifications-title"
+        aria-busy="true"
+      >
+        <h3 id="email-notifications-title">Email notifications</h3>
+        <p className="settings-empty settings-empty--loading" role="status">
+          Loading email preferences…
+        </p>
+        <div className="settings-email__skeleton" aria-hidden="true">
+          <span className="settings-email__skeleton-row" />
+          <span className="settings-email__skeleton-row" />
+          <span className="settings-email__skeleton-row settings-email__skeleton-row--short" />
+        </div>
+      </section>
+    );
   }
 
   if (!client) {
