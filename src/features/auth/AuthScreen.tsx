@@ -1,7 +1,7 @@
-import { FormEvent, useRef, useState } from 'react';
+import { FormEvent, useEffect, useRef, useState } from 'react';
 import { Eye, EyeOff } from 'lucide-react';
 
-import { isSupabaseConfigured } from '../../lib/supabase';
+import { isSupabaseConfigured, prewarmSupabaseConnection } from '../../lib/supabase';
 import type { AuthStatus, SupabaseHealth } from './auth-types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -36,6 +36,17 @@ export function AuthScreen({
   onRetrySession,
 }: AuthScreenProps) {
   const [retrying, setRetrying] = useState(false);
+  // Issue B: open the connection to Supabase while the user is typing so the
+  // password request does not pay DNS/TCP/TLS on the click path. Throttled
+  // inside prewarmSupabaseConnection (one request per minute at most).
+  const prewarm = () => {
+    if (health.configured || isSupabaseConfigured()) void prewarmSupabaseConnection();
+  };
+  useEffect(() => {
+    prewarm();
+    // Mount-only: focus/typing re-warm below keeps a long-open form warm.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   // Password visibility toggle: the input keeps id/name/autoComplete so
@@ -155,6 +166,7 @@ export function AuthScreen({
               type="email"
               autoComplete="username"
               value={email}
+              onFocus={prewarm}
               onChange={(event) => setEmail(event.target.value)}
               required
             />
@@ -168,6 +180,7 @@ export function AuthScreen({
                 type={passwordVisible ? 'text' : 'password'}
                 autoComplete="current-password"
                 value={password}
+                onFocus={prewarm}
                 onChange={(event) => setPassword(event.target.value)}
                 required
               />

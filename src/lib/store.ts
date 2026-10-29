@@ -12,6 +12,7 @@ import {
 } from '../features/auth/office-approval-service';
 import { classifyAuthError, RESTORE_UNREACHABLE_CODE } from '../features/auth/auth-errors';
 import { startTimingSpan } from './timing';
+import { isSupabaseConnectionWarm } from './supabase';
 import type {
   AuthError,
   AuthResult,
@@ -215,6 +216,7 @@ export function createAppStore(
       set({ authStatus: 'loading', authError: null, isRestoringSession: false });
       // Issue B: auth=<password grant> profile=<profiles row> total=<button busy>.
       const span = startTimingSpan('signin');
+      const warm = isSupabaseConnectionWarm() ? 'yes' : 'no';
       ownedAuthFlows += 1;
       let result: Awaited<ReturnType<typeof authService.signIn>>;
       try {
@@ -223,12 +225,12 @@ export function createAppStore(
         ownedAuthFlows -= 1;
       }
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
-        span.end({ outcome: 'superseded' });
+        span.end({ outcome: 'superseded', warm });
         return;
       }
 
       if (result.error || !result.data) {
-        span.end({ outcome: 'error', code: result.error?.code ?? 'unknown' });
+        span.end({ outcome: 'error', code: result.error?.code ?? 'unknown', warm });
         set({
           session: null,
           profile: null,
@@ -256,7 +258,7 @@ export function createAppStore(
         ...EMPTY_SESSION_APPROVAL,
       });
 
-      span.end({ outcome: 'ok', role: result.data.profile.role });
+      span.end({ outcome: 'ok', role: result.data.profile.role, warm });
 
       // Office-only: this signed session needs Admin approval BEFORE any
       // workspace traffic (server-side RLS enforces the same boundary).

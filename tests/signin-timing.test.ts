@@ -70,7 +70,7 @@ describe('sign-in timing logs', () => {
     await store.getState().signIn(EMAIL, PASSWORD);
     const signin = lines.filter((l) => l.startsWith('[dks:timing] signin '));
     expect(signin).toHaveLength(1);
-    expect(signin[0]).toMatch(/^\[dks:timing\] signin auth=\d+ms profile=\d+ms total=\d+ms outcome=ok role=admin$/);
+    expect(signin[0]).toMatch(/^\[dks:timing\] signin auth=\d+ms profile=\d+ms total=\d+ms outcome=ok role=admin warm=(yes|no)$/);
     const auth = Number(/auth=(\d+)ms/.exec(signin[0])![1]);
     expect(auth).toBeGreaterThanOrEqual(25);
     assertNoSecrets(lines);
@@ -85,7 +85,7 @@ describe('sign-in timing logs', () => {
     });
     const store = createAppStore(new AuthService(c), null);
     await store.getState().signIn(EMAIL, PASSWORD);
-    expect(lines.find((l) => l.includes(' signin '))).toMatch(/outcome=error code=invalid_credentials$/);
+    expect(lines.find((l) => l.includes(' signin '))).toMatch(/outcome=error code=invalid_credentials warm=(yes|no)$/);
     assertNoSecrets(lines);
   });
 
