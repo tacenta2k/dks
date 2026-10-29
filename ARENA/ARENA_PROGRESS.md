@@ -3434,3 +3434,105 @@ Real `SqliteStore` in-memory, 400 rows × 12 columns (snapshot payload
   measured (jsdom has no layout engine). The skeleton improves perceived
   response; it does not change data-arrival time beyond the snapshot
   coalescing saving.
+
+## §40 UX, sync and layout fixes (column pkey, auth flicker, settings toast, notifications speed, pinned sidebar) — 2026-10-29 (LLM agent)
+
+Branch `arena/22e884e5-dks`, on top of `b965576 chore(release): v0.1.7`.
+Login isolation (Office approval gate/clearance), the updater pill/Settings
+single subscription, and grid Tab continuation were not touched.
+
+### 1. Column sync `duplicate key … "app_columns_pkey"`
+
+- Root cause: the `app_columns` SELECT policy hides soft-deleted columns from
+  Office. A column an Admin deleted therefore looked "missing" to the Office
+  sync, which re-INSERTed it under the SAME id on every run → 23505 on the
+  primary key. Only the name-key (`app_columns_name_key`) variant was
+  reconciled; the pkey variant fell through to `markFailed`, so the sync pill
+  stayed in error forever.
+- Fix (`src/features/sync/supabase-sync.ts`): new `isDuplicateColumnIdError`
+  (pkey / `(id)` duplicates only; name-key and `one_primary_expiry_column` are
+  excluded). On such an insert failure the column is pushed as a plain UPDATE
+  by id and the queued create is acknowledged. For a row Office cannot see
+  the UPDATE matches nothing (correct no-op). A failing UPDATE keeps the item
+  retryable with the UPDATE's message, never the raw pkey text. Items that
+  already failed earlier are re-queued by `retryFailedOutbox` and now clear.
+- Tests: 4 new cases in `tests/column-sync-duplicates.test.ts` (real SQLite).
+
+### 2. Login form flashing on start-up
+
+- Root cause: the store started as `authStatus: 'unauthenticated'` and the
+  restore ran in an effect, so the first paint AND the whole `'loading'`
+  restore window rendered `<AuthScreen>`.
+- Fix: `isRestoringSession` in `src/lib/store.ts` (initially
+  `authService.isConfigured`; cleared by the first terminal auth outcome from
+  any path). `src/renderer/App.tsx` renders the new
+  `src/renderer/components/StartupSplash.tsx` (logo + spinner, no form) while
+  it is true; the AuthScreen appears only after restoration finishes with no
+  session. 20 s fail-safe so a hung request can never trap the user on the
+  splash. A restored Office session starts at `sessionApproval: 'checking'`
+  ("Opening your session…") instead of briefly showing "Cannot verify".
+- Tests: `tests/startup-splash.test.tsx` (7).
+
+### 3. "Settings saved to the workspace" spam + layout jump
+
+- Root cause: the auto-save effect depended on `settings` AND the callback
+  identities. App's `persistWorkspaceSettings` is a new function every render
+  (sync ticks, notification polling, updater progress), and background
+  workspace-settings / column loads also replaced `settings`, so the save ran
+  and the in-flow banner appeared without user action, pushing the page.
+- Fix (`SettingsPage.tsx`, `settings.css`): persisting is driven by an
+  explicit user-edit counter only (callbacks/settings read through refs);
+  only the newest save may report. The banner is now a fixed-position toast
+  (`.settings-alert--toast`), out of the document flow.
+- Tests: `tests/settings-banner-and-layout.test.tsx` (banner block).
+
+### 4. Settings → Notifications slow / hanging
+
+- Root cause: `EmailNotificationsSection` only mounts while the tab is
+  active, so every visit made a fresh, un-timed Supabase read behind a
+  blocking text placeholder.
+- Fix (`email-preferences.ts`, `EmailNotificationsSection.tsx`,
+  `SettingsPage.tsx`): per-client in-flight dedupe + 60 s cache, 8 s timeout,
+  prefetch when Settings opens, skeleton loader, Retry on a failed first load
+  (no form of defaults that could overwrite server prefs), background refresh
+  never overwrites fields the Admin is editing.
+
+### 5. Sidebar scrolling away with the page
+
+- Root cause: the document (body) scrolled; `.app-shell` only had
+  `min-height: 100vh`, so the sidebar scrolled off with the page.
+- Fix (`src/renderer/styles.css`, `sheet.css`, `settings.css`): the shell is
+  exactly one viewport (`height: 100vh/100dvh; overflow: hidden`), the
+  sidebar is a sticky full-height column (own scroll only on very short
+  windows), the body is a flex column, and only `main.content` has
+  `overflow-y: auto`. Pages keep the centred 1280px column via padding so the
+  scrollbar sits at the window edge. The sheet flexes to fill the body with
+  its grid scrolling internally; the Settings inner nav sticks at `top: 0`
+  inside the scroll container. The ≤720px stacked layout keeps document
+  scrolling.
+
+### Verification performed here
+
+- `npm run typecheck` — clean.
+- `npm test` — 90 files, **863 passed / 3 skipped**.
+- `npm run build` — clean (pre-existing >500 kB chunk warning).
+- Windows NSIS packaging runs in CI (`windows-2022`) on the branch push; the
+  sandbox cannot download the Electron Windows zip.
+
+### Release note
+
+`v0.1.7` was already tagged and published (Latest) before this work. Installed
+0.1.7 clients will only auto-update to a HIGHER version, so these fixes must
+ship as the next patch (the Release workflow's `patch` bump → 0.1.8).
+
+### Owner manual checks (packaged app)
+
+1. Start DKS while signed in: splash (logo + spinner), then dashboard — no
+   login form. Sign out, restart: splash briefly, then the login form.
+2. Office PC with a column the Admin deleted: sync pill returns to healthy.
+3. Settings: leave it open on About & updates during a sync/update download —
+   no banner, no jumping. Change a control — one toast bottom-right, page does
+   not move.
+4. Settings → Notifications opens instantly the second time; offline shows a
+   Retry button after ≤8 s.
+5. Scroll a long page (Audit Log, Settings) — sidebar and top bar stay put.

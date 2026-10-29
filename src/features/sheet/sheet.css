@@ -667,11 +667,15 @@
   display: flex;
   width: 100%;
   max-width: none;
-  height: calc(100vh - 50px);
+  /* Fills the shell body below the top bar; the grid scrolls internally, so
+     the sheet page itself never scrolls. */
+  height: auto;
+  flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   margin: 0;
   padding: 10px 12px 12px;
+  overflow: hidden;
 }
 
 .content.content--sheet .sheet-page {
@@ -1056,5 +1060,14 @@
 
   .sheet-search input {
     width: clamp(120px, 18vw, 220px);
+  }
+}
+
+/* v0.1.7 — the narrow (stacked) shell lets the document scroll, so the sheet
+   keeps its explicit viewport height there instead of flexing. */
+@media (max-width: 720px) {
+  .content.content--sheet {
+    height: calc(100vh - 50px);
+    flex: none;
   }
 }

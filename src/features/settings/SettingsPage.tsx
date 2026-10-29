@@ -15,7 +15,7 @@ import { resolveAppVersion } from '../../lib/app-info';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import type { OfficeSessionSignOutSummary } from '../auth/office-approval-service';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
-import type { EmailPrefsClient } from './email-preferences';
+import { prefetchEmailNotificationPrefs, type EmailPrefsClient } from './email-preferences';
 import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -379,6 +379,14 @@ export function SettingsPage({
       .catch(() => setUpdateState({ status: 'error', errorKind: 'check' }));
   }, [activeSection, updaterBridge]);
 
+  // v0.1.7: warm the (Admin-only) email preferences as soon as Settings
+  // opens, so the Notifications tab renders without waiting on the network.
+  useEffect(() => {
+    if (role === 'admin' && emailPrefsClient) {
+      prefetchEmailNotificationPrefs(emailPrefsClient);
+    }
+  }, [emailPrefsClient, role]);
+
   useEffect(() => {
     if (providedColumns) {
       setColumns([...providedColumns]);
@@ -411,23 +419,53 @@ export function SettingsPage({
     setSettings(resolveSettings(providedSettings, columns));
   }, [columns, providedSettings]);
 
+  // v0.1.7: persisting is driven ONLY by an explicit user edit. The previous
+  // effect depended on `settings` and on the callback identities, so every
+  // background refresh (workspace settings fetched by sync, columns loading)
+  // and every parent re-render (sync ticks, updater progress — the parent's
+  // save callback is a new function each render) re-ran the save and flashed
+  // "Settings saved to the workspace." without any user action.
+  const latestSettingsRef = useRef(settings);
+  latestSettingsRef.current = settings;
+  const saveCallbacksRef = useRef({ onSettingsChange, onChange });
+  saveCallbacksRef.current = { onSettingsChange, onChange };
+  const [userSaveRequest, setUserSaveRequest] = useState(0);
+  // Only the newest save may report its outcome, so a slow earlier save can
+  // never overwrite the banner of a later one.
+  const latestSaveRequestRef = useRef(0);
+  latestSaveRequestRef.current = userSaveRequest;
+
   useEffect(() => {
-    if (!mountedRef.current) {
-      mountedRef.current = true;
+    if (userSaveRequest === 0) {
       return;
     }
+    const requestId = userSaveRequest;
+    const isLatest = () => mountedRef.current && requestId === latestSaveRequestRef.current;
+    const current = latestSettingsRef.current;
+    const { onSettingsChange: persist, onChange: notify } = saveCallbacksRef.current;
     try {
-      const results = [onSettingsChange?.(settings), onChange?.(settings)]
+      const results = [persist?.(current), notify?.(current)]
         .filter((result): result is Promise<void> => Boolean(result && typeof result.then === 'function'));
       if (results.length > 0) {
         void Promise.all(results)
-          .then(() => showBanner('success', 'Settings saved to the workspace.'))
-          .catch(() => showBanner('error', 'Saved locally; cloud sync failed. Changes will retry when online.'));
+          .then(() => {
+            if (isLatest()) showBanner('success', 'Settings saved to the workspace.');
+          })
+          .catch(() => {
+            if (isLatest()) showBanner('error', 'Saved locally; cloud sync failed. Changes will retry when online.');
+          });
       }
     } catch {
       showBanner('error', 'Saved locally; cloud sync failed. Changes will retry when online.');
     }
-  }, [onChange, onSettingsChange, settings, showBanner]);
+  }, [showBanner, userSaveRequest]);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   if (!can(role, 'settings')) {
     return (
@@ -444,6 +482,8 @@ export function SettingsPage({
   const resolvedVersion = appVersion ?? version ?? defaultVersion();
   const updateSettings = (patch: (current: DksSettings) => DksSettings) => {
     setSettings((current) => patch(current));
+    // Explicit user edit → exactly one persist for the resulting settings.
+    setUserSaveRequest((request) => request + 1);
     // A new edit is also a retry: replace any persistent save-failure banner
     // with the transient optimistic success message.
     showBanner('success', 'Settings saved locally.');
@@ -548,10 +588,14 @@ export function SettingsPage({
           ))}
         </nav>
         <div className="settings-content">
+          {/* v0.1.7: the save feedback is a floating toast (position: fixed)
+              so showing or hiding it never moves the page layout. */}
           {saveBanner ? (
             <div
-              className={`settings-alert${saveBanner.kind === 'error' ? ' settings-alert--error' : ' settings-alert--autohide'}`}
+              key={saveBanner.id}
+              className={`settings-alert settings-alert--toast${saveBanner.kind === 'error' ? ' settings-alert--error' : ' settings-alert--autohide'}`}
               role={saveBanner.kind === 'error' ? 'alert' : 'status'}
+              data-testid="settings-save-toast"
             >
               <span className="settings-alert__message">{saveBanner.message}</span>
               {saveBanner.kind === 'error' ? (

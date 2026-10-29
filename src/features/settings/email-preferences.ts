@@ -151,6 +151,127 @@ export async function loadEmailNotificationPrefs(
   }
 }
 
+/* ---------------------------------------------------------------------------
+ * v0.1.7 — fast Settings → Notifications.
+ *
+ * The section used to issue a fresh, un-timed Supabase read every time the
+ * Notifications tab was opened (the section only mounts while it is active),
+ * so a slow network made the tab "hang" on "Loading email preferences…".
+ *
+ *  - One in-flight request per client (concurrent mounts share it).
+ *  - A short-lived per-client cache: re-opening the tab renders instantly.
+ *  - A timeout: the UI stops waiting and offers Retry instead of spinning
+ *    forever. A late response still fills the cache for the retry.
+ *  - Settings prefetches on mount, so the data is usually ready before the
+ *    administrator even clicks the tab.
+ * ------------------------------------------------------------------------- */
+
+export const EMAIL_PREFS_LOAD_TIMEOUT_MS = 8_000;
+export const EMAIL_PREFS_CACHE_TTL_MS = 60_000;
+
+interface EmailPrefsCacheEntry {
+  value?: EmailNotificationPrefs;
+  loadedAt?: number;
+  inflight?: Promise<AuthResult<EmailNotificationPrefs>>;
+}
+
+const emailPrefsCache = new WeakMap<object, EmailPrefsCacheEntry>();
+
+function cacheEntry(client: EmailPrefsClient): EmailPrefsCacheEntry {
+  let entry = emailPrefsCache.get(client);
+  if (!entry) {
+    entry = {};
+    emailPrefsCache.set(client, entry);
+  }
+  return entry;
+}
+
+/** The last successfully loaded/saved preferences for this client, if any. */
+export function peekCachedEmailNotificationPrefs(
+  client: EmailPrefsClient,
+): { prefs: EmailNotificationPrefs; fresh: boolean } | null {
+  const entry = emailPrefsCache.get(client);
+  if (!entry?.value || entry.loadedAt === undefined) {
+    return null;
+  }
+  return {
+    prefs: { ...entry.value, expiryRecipients: [...entry.value.expiryRecipients] },
+    fresh: Date.now() - entry.loadedAt < EMAIL_PREFS_CACHE_TTL_MS,
+  };
+}
+
+/** Record preferences the server just accepted (after a successful save). */
+export function rememberEmailNotificationPrefs(
+  client: EmailPrefsClient,
+  prefs: EmailNotificationPrefs,
+): void {
+  const entry = cacheEntry(client);
+  entry.value = { ...prefs, expiryRecipients: [...prefs.expiryRecipients] };
+  entry.loadedAt = Date.now();
+}
+
+function startEmailPrefsRequest(client: EmailPrefsClient): Promise<AuthResult<EmailNotificationPrefs>> {
+  const entry = cacheEntry(client);
+  if (entry.inflight) {
+    return entry.inflight;
+  }
+  const request = loadEmailNotificationPrefs(client).then((result) => {
+    if (!result.error && result.data) {
+      rememberEmailNotificationPrefs(client, result.data);
+    }
+    return result;
+  }).finally(() => {
+    if (entry.inflight === request) {
+      entry.inflight = undefined;
+    }
+  });
+  entry.inflight = request;
+  return request;
+}
+
+/**
+ * Cached, de-duplicated, time-limited load. A fresh cached value resolves
+ * without any network request; `force` always asks the server (sharing any
+ * request already in flight).
+ */
+export async function loadEmailNotificationPrefsCached(
+  client: EmailPrefsClient,
+  options: { force?: boolean; timeoutMs?: number } = {},
+): Promise<AuthResult<EmailNotificationPrefs>> {
+  const cached = peekCachedEmailNotificationPrefs(client);
+  if (!options.force && cached?.fresh) {
+    return { data: cached.prefs, error: null };
+  }
+  const request = startEmailPrefsRequest(client);
+  const timeoutMs = options.timeoutMs ?? EMAIL_PREFS_LOAD_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<AuthResult<EmailNotificationPrefs>>((resolve) => {
+    timer = setTimeout(() => resolve({
+      data: null,
+      error: toError(
+        'Email preferences are taking longer than expected to load. Check your connection and try again.',
+        'EMAIL_PREFS_LOAD_TIMEOUT',
+      ),
+    }), timeoutMs);
+  });
+  try {
+    return await Promise.race([request, timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/** Fire-and-forget warm-up used by the Settings page on mount. */
+export function prefetchEmailNotificationPrefs(client: EmailPrefsClient | null | undefined): void {
+  if (!client) {
+    return;
+  }
+  if (peekCachedEmailNotificationPrefs(client)?.fresh) {
+    return;
+  }
+  void startEmailPrefsRequest(client).catch(() => undefined);
+}
+
 export async function saveEmailNotificationPrefs(
   client: EmailPrefsClient,
   prefs: EmailNotificationPrefs,

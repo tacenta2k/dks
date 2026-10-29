@@ -46,6 +46,15 @@ export interface AppStore {
   profile: Profile | null;
   authStatus: AuthStatus;
   authError: AuthError | null;
+  /**
+   * v0.1.7 — true from app start until the persisted session has been
+   * restored (or found absent). While true the App renders a neutral splash,
+   * never the email/password AuthScreen, so an already signed-in user does not
+   * see the login form flash before the dashboard. Cleared by the FIRST
+   * terminal auth outcome from any path (restore, auth-state event, sign-in,
+   * demo, reset, sign-out).
+   */
+  isRestoringSession: boolean;
   syncStatus: SyncStatus;
   theme: ThemePreference;
   health: SupabaseHealth;
@@ -90,13 +99,14 @@ const EMPTY_SESSION_APPROVAL: Pick<
 
 function initialState(health: SupabaseHealth): Pick<
   AppStore,
-  'session' | 'profile' | 'authStatus' | 'authError' | 'syncStatus' | 'theme' | 'health' | 'sessionApproval' | 'sessionApprovalRequest' | 'sessionApprovalError'
+  'session' | 'profile' | 'authStatus' | 'authError' | 'isRestoringSession' | 'syncStatus' | 'theme' | 'health' | 'sessionApproval' | 'sessionApprovalRequest' | 'sessionApprovalError'
 > {
   return {
     session: null,
     profile: null,
     authStatus: 'unauthenticated',
     authError: null,
+    isRestoringSession: false,
     syncStatus: 'offline',
     theme: 'system',
     health,
@@ -164,12 +174,15 @@ export function createAppStore(
 
   const store = createStore<AppStore>((set, get) => ({
     ...initialState(serviceHealth),
+    // A configured client always restores a persisted session on start-up;
+    // an unconfigured (demo/test) client has nothing to restore.
+    isRestoringSession: authService.isConfigured,
 
     signIn: async (email, password) => {
       preserveOfficeGate = false;
       approvalRequestId += 1;
       const requestId = ++authRequestId;
-      set({ authStatus: 'loading', authError: null });
+      set({ authStatus: 'loading', authError: null, isRestoringSession: false });
       const result = await authService.signIn(email, password);
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
         return;
@@ -180,6 +193,7 @@ export function createAppStore(
           session: null,
           profile: null,
           authStatus: result.error?.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
+          isRestoringSession: false,
           authError: result.error,
           health: errorHealth(get().health, result.error),
           ...EMPTY_SESSION_APPROVAL,
@@ -191,6 +205,7 @@ export function createAppStore(
         session: result.data.session,
         profile: result.data.profile,
         authStatus: 'authenticated',
+        isRestoringSession: false,
         authError: null,
         health: {
           ...get().health,
@@ -223,6 +238,7 @@ export function createAppStore(
           session: null,
           profile: null,
           authStatus: result.error.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
+          isRestoringSession: false,
           authError: result.error,
           health: errorHealth(get().health, result.error),
         });
@@ -234,6 +250,7 @@ export function createAppStore(
           session: null,
           profile: null,
           authStatus: 'unauthenticated',
+          isRestoringSession: false,
           authError: null,
           health: {
             ...get().health,
@@ -250,6 +267,7 @@ export function createAppStore(
         session: result.data.session,
         profile: result.data.profile,
         authStatus: 'authenticated',
+        isRestoringSession: false,
         authError: null,
         health: {
           ...get().health,
@@ -258,6 +276,10 @@ export function createAppStore(
           error: null,
         },
         ...EMPTY_SESSION_APPROVAL,
+        // A restored Office session shows the neutral "Opening your session…"
+        // gate while its approval is re-validated — never a transient
+        // "cannot verify" state. The gate stays closed either way.
+        ...(result.data.profile.role === 'office' ? { sessionApproval: 'checking' as const } : {}),
       });
 
       // Office-only: a persisted, still-valid approved session re-validates
@@ -281,6 +303,7 @@ export function createAppStore(
         session: null,
         profile: null,
         authStatus: result.error ? 'error' : 'unauthenticated',
+        isRestoringSession: false,
         authError: result.error,
         health: result.error ? errorHealth(get().health, result.error) : {
           ...get().health,
@@ -312,6 +335,7 @@ export function createAppStore(
         session: demoSession,
         profile: { id: demoSession.user.id, email, role: 'admin', fullName: 'Offline demo' },
         authStatus: 'demo',
+        isRestoringSession: false,
         authError: null,
         health: { ...EMPTY_HEALTH },
         ...EMPTY_SESSION_APPROVAL,
@@ -401,6 +425,7 @@ export function createAppStore(
       set({
         session: null,
         authStatus: 'unauthenticated',
+        isRestoringSession: false,
         health: { ...get().health, authenticated: false },
         ...(result.error ? { sessionApprovalError: result.error } : {}),
       });
@@ -446,6 +471,7 @@ export function createAppStore(
         session: null,
         profile: null,
         authStatus: 'unauthenticated',
+        isRestoringSession: false,
         authError: null,
         health: {
           ...store.getState().health,
@@ -466,6 +492,7 @@ export function createAppStore(
           session: null,
           profile: null,
           authStatus: result.error?.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
+          isRestoringSession: false,
           authError: result.error,
           ...EMPTY_SESSION_APPROVAL,
         });
@@ -476,6 +503,7 @@ export function createAppStore(
         session,
         profile: result.data,
         authStatus: 'authenticated',
+        isRestoringSession: false,
         authError: null,
         health: {
           ...store.getState().health,
