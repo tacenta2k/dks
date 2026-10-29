@@ -1245,6 +1245,12 @@ Until user gives more direction:
 - [ ] Theme toggle updates all UI.
 - [ ] Avatar popup shows email, role, Logout.
 
+- [ ] (0.1.7 pinned shell) Long page scrolls: sidebar logo/nav and top bar stay in place; only the page area scrolls; no double scrollbar.
+- [ ] (0.1.7) Short window (~600px tall): sidebar scrolls on its own; collapsed and expanded sidebar both pinned.
+- [ ] (0.1.7) Narrow window (<720px): sidebar stacks above the page and the whole page scrolls (intentional).
+- [ ] (0.1.7) Startup with a saved session shows the splash, never a flash of the login form; offline start reaches the login form (with "Retry saved sign-in") within 20s.
+- [ ] (0.1.8) After an in-app update the app reopens signed in.
+
 ## Visa Sheet
 
 - [ ] Removed buttons/features do not return.
@@ -1273,6 +1279,7 @@ Until user gives more direction:
 
 ## Recycle Bin
 
+- [ ] (0.1.7 pinned shell) Table header stays visible while scrolling a long list (also Audit Log).
 - [ ] Friendly labels / truthful fallback.
 - [ ] Dates in DD/MM/YYYY HH:mm.
 - [ ] Short Restore/Delete actions.
@@ -1290,6 +1297,9 @@ Until user gives more direction:
 
 ## Settings
 
+- [ ] (0.1.7) Settings section nav stays visible while scrolling a long section.
+- [ ] (0.1.7) Saving shows one floating toast (does not push content); merely opening Settings shows nothing; errors stay until dismissed.
+- [ ] (0.1.7) Notifications tab: skeleton then content; when offline, an error with Retry after ~8s.
 - [ ] Inner settings navigation layout.
 - [ ] Two-boundary expiry range editor.
 - [ ] Expiry today distinct from expired.

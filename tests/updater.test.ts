@@ -3,6 +3,7 @@ import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  BEFORE_INSTALL_TIMEOUT_MS,
   createUpdaterScheduler,
   createUpdaterService,
   type UpdaterAdapter,
@@ -401,5 +402,129 @@ describe('release provider configuration', () => {
     expect(builderYml).not.toMatch(/GH_TOKEN\s*[:=]\s*\S/);
     const updaterSource = readTextFileNormalised(resolve(root, 'electron/main/updater.ts'));
     expect(updaterSource).not.toMatch(/GH_TOKEN|setFeedURL/);
+  });
+});
+
+describe('v0.1.8 Issue A — session is flushed before the installer takes over', () => {
+  const downloadedService = (extra: Partial<Parameters<typeof createUpdaterService>[0]> = {}) => {
+    const quitAndInstall = vi.fn();
+    const service = createUpdaterService({
+      adapter: adapter({
+        checkForUpdates: vi.fn(async () => ({ updateInfo: { version: '9.9.9' } })),
+        downloadUpdate: vi.fn(async () => undefined),
+        quitAndInstall,
+      }),
+      enabled: true,
+      ...extra,
+    });
+    return { service, quitAndInstall };
+  };
+
+  it('awaits beforeQuitAndInstall BEFORE quitAndInstall', async () => {
+    const order: string[] = [];
+    const { service, quitAndInstall } = downloadedService({
+      beforeQuitAndInstall: async () => {
+        await new Promise((r) => setTimeout(r, 20));
+        order.push('flush');
+      },
+    });
+    quitAndInstall.mockImplementation(() => order.push('install'));
+    await service.checkForUpdates();
+    await expect(service.restartToUpdate()).resolves.toBe(true);
+    expect(order).toEqual(['flush', 'install']);
+  });
+
+  it('a failing flush never blocks the install', async () => {
+    const { service, quitAndInstall } = downloadedService({
+      beforeQuitAndInstall: async () => { throw new Error('flush failed'); },
+    });
+    await service.checkForUpdates();
+    await expect(service.restartToUpdate()).resolves.toBe(true);
+    expect(quitAndInstall).toHaveBeenCalledOnce();
+  });
+
+  it('a hanging flush is bounded by BEFORE_INSTALL_TIMEOUT_MS', async () => {
+    vi.useFakeTimers();
+    try {
+      const { service, quitAndInstall } = downloadedService({
+        beforeQuitAndInstall: () => new Promise<void>(() => undefined),
+      });
+      await service.checkForUpdates();
+      const pending = service.restartToUpdate();
+      await vi.advanceTimersByTimeAsync(BEFORE_INSTALL_TIMEOUT_MS + 10);
+      await expect(pending).resolves.toBe(true);
+      expect(quitAndInstall).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('the real adapter keeps electron-updater\'s exact install arguments (isSilent=false, isForceRunAfter=true)', () => {
+    const source = readFileSync(resolve(__dirname, '../electron/main/updater.ts'), 'utf8');
+    expect(source).toContain('autoUpdater.quitAndInstall(false, true)');
+    const main = readFileSync(resolve(__dirname, '../electron/main/index.ts'), 'utf8');
+    expect(main).toContain('beforeQuitAndInstall: flushSessionStorageBeforeInstall');
+    expect(main).toMatch(/flushStorageData\(\)/);
+    expect(main).toMatch(/cookies\?\.flushStore\?\.\(\)/);
+  });
+});
+
+describe('v0.1.8 Issue A — pinned evidence for the updater install invocation', () => {
+  const root = resolve(__dirname, '..');
+  const read = (p: string) => readFileSync(resolve(root, p), 'utf8');
+
+  it('electron-updater builds `--updated [--force-run]` and quitAndInstall() defaults to non-silent + autoRun', () => {
+    const nsis = read('node_modules/electron-updater/out/NsisUpdater.js');
+    expect(nsis).toContain('const args = ["--updated"];');
+    expect(nsis).toMatch(/if \(options\.isSilent\) \{\s*args\.push\("\/S"\);/);
+    expect(nsis).toMatch(/if \(options\.isForceRunAfter\) \{\s*args\.push\("--force-run"\);/);
+    const base = read('node_modules/electron-updater/out/BaseUpdater.js');
+    expect(base).toContain('quitAndInstall(isSilent = false, isForceRunAfter = false)');
+    expect(base).toContain('this.install(isSilent, isSilent ? isForceRunAfter : this.autoRunAppAfterInstall)');
+    expect(read('node_modules/electron-updater/out/AppUpdater.js')).toContain('this.autoRunAppAfterInstall = true;');
+  });
+
+  it('electron-builder always passes --updated to the OLD uninstaller during an in-place install', () => {
+    const util = read('node_modules/app-builder-lib/templates/nsis/include/installUtil.nsh');
+    expect(util).toContain('StrCpy $0 "$0 --updated"');
+    expect(util).toContain(`ExecWait '"$uninstallerFileNameTemp" /S /KEEP_APP_DATA $0 _?=$installationDir' $R0`);
+    // and DKS keeps deleteAppDataOnUninstall false, so the --updated branch is the one taken
+    expect(read('electron-builder.yml')).toMatch(/deleteAppDataOnUninstall:\s*false/);
+  });
+
+  it('installer.nsh: isUpdated → never fresh; uninstall cleanup is skipped when updating', () => {
+    const nsh = read('build/installer.nsh');
+    expect(nsh).toMatch(/!macro customInit[\s\S]*?Delete "\$APPDATA\\DKS\\\.dks-isFresh"\s*\$\{If\} \$\{isUpdated\}/);
+    expect(nsh).toMatch(/!macro customUnInstall\s*\$\{ifNot\} \$\{isUpdated\}/);
+  });
+
+  it('CI case E runs the exact updater arguments and asserts marker/nonce/session', () => {
+    const ci = read('.github/workflows/ci.yml');
+    expect(ci).toContain('NSIS case E — electron-updater install invocation');
+    // E1: the exact non-silent quitAndInstall() invocation, wizard driven like the user did.
+    expect(ci).toContain('$p = Start-UpdaterInstall "--updated --force-run"');
+    expect(ci).toContain("Invoke-WizardButton $p.Id '^(Next|Install)'");
+    expect(ci).toContain("Invoke-WizardButton $p.Id '^Finish'");
+    expect(ci).toContain('-ArgumentList "--updated /S --force-run"');
+    expect(ci).toContain('gh release download v0.1.6');
+    expect(ci).toContain('session-reset-required EXISTS after an updater-style install');
+    expect(ci).toContain('install-nonce changed');
+    expect(ci).toContain('install nonce matches stored nonce — preserving session');
+  });
+
+  it('pinned: the assisted wizard shows the install-mode page on update (not skipped by --updated)', () => {
+    const tpl = 'node_modules/app-builder-lib/templates/nsis';
+    const assisted = read(`${tpl}/assistedInstaller.nsh`);
+    // License and directory pages are guarded by skipPageIfUpdated; the install-mode page is not.
+    expect(assisted).toMatch(/skipPageIfUpdated\s+!insertmacro licensePage/);
+    expect(assisted).toMatch(/!ifndef INSTALL_MODE_PER_ALL_USERS\s+!insertmacro PAGE_INSTALL_MODE/);
+    const multiUser = read(`${tpl}/multiUserUi.nsh`);
+    expect(multiUser).toContain('${OrIf} ${isForCurrentUser}');
+    // isUpdated / isForCurrentUser are generated CLI-parameter tests (StdUtils.TestParameter).
+    const generator = read('node_modules/app-builder-lib/out/targets/nsis/nsisScriptGenerator.js');
+    expect(generator).toContain('StdUtils.TestParameter');
+    const target = read('node_modules/app-builder-lib/out/targets/nsis/NsisTarget.js');
+    expect(target).toContain('scriptGenerator.flags(["updated", "force-run", "keep-shortcuts", "no-desktop-shortcut", "delete-app-data", "allusers", "currentuser"])');
+    expect(target).toMatch(/if \(options\.perMachine === true\) \{\s*defines\.INSTALL_MODE_PER_ALL_USERS = null;/);
   });
 });

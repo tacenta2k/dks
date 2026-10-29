@@ -19,12 +19,51 @@ export function resetMarkerPath(userDataPath: string): string {
 }
 
 export function readInstallerNonce(userDataPath: string): string | null {
+  const result = readInstallerNonceDetailed(userDataPath);
+  return result.status === 'ok' ? result.nonce : null;
+}
+
+/**
+ * v0.1.8 — "missing" and "unreadable" are different facts. A genuine
+ * uninstall deletes the file (ENOENT → `missing`). Any other error (sharing
+ * violation from AV/indexer right after an update, EPERM, EBUSY…) means the
+ * file IS there but could not be read this instant (`unreadable`). Treating
+ * an unreadable file as missing turned a transient lock into a
+ * "mismatch without marker" and cleared the session of a user who had only
+ * updated. Reads are retried briefly before giving up.
+ */
+export type InstallerNonceRead =
+  | { status: 'ok'; nonce: string }
+  | { status: 'missing' }
+  | { status: 'unreadable'; code: string };
+
+export function readInstallerNonceDetailed(
+  userDataPath: string,
+  attempts = 3,
+): InstallerNonceRead {
+  let lastCode = 'UNKNOWN';
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+    try {
+      const raw = readFileSync(installerNoncePath(userDataPath), 'utf8');
+      const trimmed = typeof raw === 'string' ? raw.trim() : '';
+      // An empty file is equivalent to no nonce: NSIS writes the GUID in one
+      // FileWrite, so empty means "never written", not "being written".
+      return trimmed ? { status: 'ok', nonce: trimmed } : { status: 'missing' };
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException | null)?.code ?? 'UNKNOWN';
+      if (code === 'ENOENT' || code === 'ENOTDIR') return { status: 'missing' };
+      lastCode = code;
+      sleepSync(50 * (attempt + 1));
+    }
+  }
+  return { status: 'unreadable', code: lastCode };
+}
+
+function sleepSync(ms: number): void {
   try {
-    const raw = readFileSync(installerNoncePath(userDataPath), 'utf8');
-    const trimmed = typeof raw === 'string' ? raw.trim() : '';
-    return trimmed || null;
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
   } catch {
-    return null;
+    // Best effort only — a failed wait just retries immediately.
   }
 }
 
@@ -85,6 +124,8 @@ export interface EnforceSessionIsolationOptions {
  * - reset marker absent + stored null + installer nonce present → legacy migration: store nonce WITHOUT clearing (preserves login).
  * - reset marker absent + stored null + installer nonce absent → mint nonce without clearing (first-ever fallback, harmless).
  * - exact nonce match → preserve login.
+ * - v0.1.8: nonce file present but unreadable (not ENOENT) → preserve, decide next launch.
+ * - v0.1.8: marker present but stored === installer nonce → stale marker, remove it, preserve.
  * - unexpected mismatch without marker → clear fail-closed (treat as reset condition).
  * - SQLite, rows, pending outbox survive uninstall/reinstall (installer never deletes dks-cache.sqlite; app-level clear uses clearStorageData, not file deletion).
  */
@@ -96,9 +137,40 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
   if (!userDataPath || typeof userDataPath !== 'string' || !userDataPath.trim()) return true;
 
   try {
-    const installerNonce = readInstallerNonce(userDataPath);
+    const nonceRead = readInstallerNonceDetailed(userDataPath);
+    const installerNonce = nonceRead.status === 'ok' ? nonceRead.nonce : null;
     const hasMarker = hasResetMarker(userDataPath);
     const storedNonce = tryGetStoredNonce(options.store);
+
+    // v0.1.8 — the nonce file exists but cannot be read right now. A genuine
+    // uninstall DELETES it (and a genuine reinstall always leaves the reset
+    // marker), so "present but unreadable" is never evidence of a reinstall.
+    // Preserve the session, record nothing, and decide again next launch.
+    if (nonceRead.status === 'unreadable' && !hasMarker) {
+      logger.warn('[dks] install nonce present but unreadable — preserving session, will re-check next launch', {
+        code: nonceRead.code,
+        hasStoredNonce: Boolean(storedNonce),
+      });
+      return true;
+    }
+
+    // v0.1.8 — stale marker: this exact install nonce was already reset on an
+    // earlier launch (stored === installer) but the one-shot marker could not
+    // be removed then. A genuine reinstall ALWAYS mints a NEW nonce
+    // (customInstall fresh path), so stored === installer + marker can only be
+    // a leftover. Clearing again would sign the user out on every restart and
+    // on every auto-update after that first launch.
+    if (hasMarker && installerNonce && storedNonce === installerNonce) {
+      logger.info('[dks] stale session-reset marker for an already-reset install nonce — removing marker, preserving session', {
+        prefix: installerNonce.slice(0, 8) + '…',
+      });
+      try {
+        unlinkSync(resetMarkerPath(userDataPath));
+      } catch (error) {
+        logger.warn('[dks] could not remove stale session-reset marker — will retry next launch (session still preserved)', error);
+      }
+      return true;
+    }
 
     // F/Genuine fresh install: marker present → must clear (covers first install and uninstall/reinstall)
     if (hasMarker) {
@@ -132,7 +204,11 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
       trySetStoredNonce(options.store, nonceToStore);
       try {
         unlinkSync(resetMarkerPath(userDataPath));
-      } catch {}
+      } catch (error) {
+        // Not fatal: the next launch sees stored === installer and treats the
+        // marker as stale (see above) instead of clearing again.
+        logger.warn('[dks] could not remove session-reset marker after reset — next launch will treat it as stale', error);
+      }
       logger.info('[dks] genuine fresh install — session cleared, new nonce stored, marker removed (login requires email/password for Admin and Office; Office needs fresh Admin approval due to new Auth session_id)');
       return true;
     }
@@ -161,6 +237,9 @@ export async function enforceSessionIsolation(options: EnforceSessionIsolationOp
     }
 
     if (installerNonce && storedNonce === installerNonce) {
+      logger.info('[dks] install nonce matches stored nonce — preserving session (restart or in-place update)', {
+        prefix: installerNonce.slice(0, 8) + '…',
+      });
       return true;
     }
 

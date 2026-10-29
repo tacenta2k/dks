@@ -10,6 +10,9 @@ import {
   type OfficeSessionSignOutSummary,
   type OfficeSigninRequest,
 } from '../features/auth/office-approval-service';
+import { classifyAuthError, RESTORE_UNREACHABLE_CODE } from '../features/auth/auth-errors';
+import { startTimingSpan } from './timing';
+import { isSupabaseConnectionWarm } from './supabase';
 import type {
   AuthError,
   AuthResult,
@@ -123,14 +126,42 @@ function errorHealth(health: SupabaseHealth, error: AuthError | null): SupabaseH
   };
 }
 
+/**
+ * v0.1.8 (Issue A) — back-off between restore attempts when the failure is
+ * TRANSIENT (network/timeout/5xx). Sum ≈ 15 s, i.e. inside the 20 s splash
+ * (RESTORE_SPLASH_MAX_MS in App.tsx), so a short outage right after an update
+ * no longer replaces a valid saved session with the email/password form.
+ */
+export const RESTORE_RETRY_DELAYS_MS: readonly number[] = [1_000, 2_000, 4_000, 8_000];
+
+export const RESTORE_UNREACHABLE_MESSAGE =
+  'Cannot reach the DKS server right now. Your saved sign-in is kept — check the connection and press Retry, or sign in again.';
+
+export interface AppStoreOptions {
+  restoreRetryDelaysMs?: readonly number[];
+  sleep?: (ms: number) => Promise<void>;
+}
+
+const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export function createAppStore(
   authService = new AuthService(),
   approvalService: OfficeApprovalService | null = createOfficeApprovalService(),
+  options: AppStoreOptions = {},
 ): StoreApi<AppStore> {
   let authRequestId = 0;
   let approvalRequestId = 0;
   let preserveOfficeGate = false;
   let explicitSignOut = false;
+  // While an explicit signIn()/restoreSession() is in flight, THAT flow owns
+  // the outcome. auth-js emits SIGNED_IN / INITIAL_SESSION / TOKEN_REFRESHED
+  // from inside those calls; reacting to them started a second, racing
+  // profile load whose (possibly transient) failure could overwrite the
+  // result and which bumped authRequestId so signIn() discarded its own
+  // result (and skipped submitOfficeApprovalRequest).
+  let ownedAuthFlows = 0;
+  const restoreRetryDelays = options.restoreRetryDelaysMs ?? RESTORE_RETRY_DELAYS_MS;
+  const sleep = options.sleep ?? defaultSleep;
   const serviceHealth: SupabaseHealth = {
     ...EMPTY_HEALTH,
     configured: authService.isConfigured,
@@ -183,12 +214,23 @@ export function createAppStore(
       approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null, isRestoringSession: false });
-      const result = await authService.signIn(email, password);
+      // Issue B: auth=<password grant> profile=<profiles row> total=<button busy>.
+      const span = startTimingSpan('signin');
+      const warm = isSupabaseConnectionWarm() ? 'yes' : 'no';
+      ownedAuthFlows += 1;
+      let result: Awaited<ReturnType<typeof authService.signIn>>;
+      try {
+        result = await authService.signIn(email, password);
+      } finally {
+        ownedAuthFlows -= 1;
+      }
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
+        span.end({ outcome: 'superseded', warm });
         return;
       }
 
       if (result.error || !result.data) {
+        span.end({ outcome: 'error', code: result.error?.code ?? 'unknown', warm });
         set({
           session: null,
           profile: null,
@@ -216,6 +258,8 @@ export function createAppStore(
         ...EMPTY_SESSION_APPROVAL,
       });
 
+      span.end({ outcome: 'ok', role: result.data.profile.role, warm });
+
       // Office-only: this signed session needs Admin approval BEFORE any
       // workspace traffic (server-side RLS enforces the same boundary).
       if (result.data.profile.role === 'office') {
@@ -228,24 +272,53 @@ export function createAppStore(
       approvalRequestId += 1;
       const requestId = ++authRequestId;
       set({ authStatus: 'loading', authError: null });
-      const result = await authService.restoreSession();
+      const span = startTimingSpan('restore');
+      ownedAuthFlows += 1;
+      let result: Awaited<ReturnType<typeof authService.restoreSession>>;
+      let attempts = 1;
+      try {
+        result = await authService.restoreSession();
+        // v0.1.8 (Issue A): a TRANSIENT failure (network, timeout, 5xx) says
+        // nothing about the saved session — auth-js keeps it on disk. Retry
+        // with back-off instead of showing the password form. Definitive
+        // failures (no session, refresh token rejected, NOT_AUTHORIZED) fall
+        // straight through exactly as before.
+        for (const delay of restoreRetryDelays) {
+          if (!result.error || classifyAuthError(result.error) !== 'transient') break;
+          if (requestId !== authRequestId) break;
+          await sleep(delay);
+          span.mark('backoff');
+          if (requestId !== authRequestId) break;
+          attempts += 1;
+          result = await authService.restoreSession();
+        }
+      } finally {
+        ownedAuthFlows -= 1;
+      }
       if (requestId !== authRequestId && result.error?.code !== 'NOT_AUTHORIZED') {
+        span.end({ outcome: 'superseded', attempts });
         return;
       }
 
       if (result.error) {
+        const transient = classifyAuthError(result.error) === 'transient';
+        span.end({ outcome: transient ? 'unreachable' : 'error', code: result.error.code ?? 'unknown', attempts });
+        const shownError: AuthError = transient
+          ? { message: RESTORE_UNREACHABLE_MESSAGE, code: RESTORE_UNREACHABLE_CODE, cause: result.error }
+          : result.error;
         set({
           session: null,
           profile: null,
           authStatus: result.error.code === 'NOT_AUTHORIZED' ? 'unauthorized' : 'error',
           isRestoringSession: false,
-          authError: result.error,
-          health: errorHealth(get().health, result.error),
+          authError: shownError,
+          health: errorHealth(get().health, shownError),
         });
         return;
       }
 
       if (!result.data) {
+        span.end({ outcome: 'no-session', attempts });
         set({
           session: null,
           profile: null,
@@ -281,6 +354,7 @@ export function createAppStore(
         // "cannot verify" state. The gate stays closed either way.
         ...(result.data.profile.role === 'office' ? { sessionApproval: 'checking' as const } : {}),
       });
+      span.end({ outcome: 'ok', role: result.data.profile.role, attempts });
 
       // Office-only: a persisted, still-valid approved session re-validates
       // on restart (no new request); revoked/denied stops the workspace here.
@@ -370,7 +444,10 @@ export function createAppStore(
       const approvalId = ++approvalRequestId;
       const authId = authRequestId;
       set({ sessionApproval: 'checking', sessionApprovalError: null });
+      const approvalSpan = startTimingSpan('office-approval');
       const result = await approvalService.requestApproval();
+      approvalSpan.mark('approval_request');
+      approvalSpan.end({ outcome: result.error ? 'error' : (result.data?.status ?? 'none'), role: 'office' });
       if (approvalId !== approvalRequestId || authId !== authRequestId || get().profile?.role !== 'office') return;
       applyApprovalStatus(set, result.data, result.error);
     },
@@ -456,6 +533,12 @@ export function createAppStore(
 
   authService.onAuthStateChange((_event, session) => {
     if (preserveOfficeGate) return;
+    // signIn()/restoreSession() in flight own the outcome (see ownedAuthFlows).
+    if (ownedAuthFlows > 0) return;
+    // App start: restoreSession() (always called on mount when Supabase is
+    // configured) owns the first session read; INITIAL_SESSION would only
+    // start a duplicate, racing profile load.
+    if (_event === 'INITIAL_SESSION' && store.getState().isRestoringSession) return;
     const requestId = ++authRequestId;
     if (!session) {
       const current = store.getState();
@@ -488,6 +571,24 @@ export function createAppStore(
       }
 
       if (result.error || !result.data) {
+        const current = store.getState();
+        // v0.1.8 (Issue A): a token refresh succeeded (Supabase issued this
+        // session) but the profile re-read hit a network blip. Keep the
+        // signed-in user on the same identity instead of throwing them to the
+        // login form; only adopt the fresh token. NOT_AUTHORIZED and other
+        // definitive errors still end the session below.
+        if (
+          result.error
+          && classifyAuthError(result.error) === 'transient'
+          && current.authStatus === 'authenticated'
+          && current.profile?.id === session.user.id
+        ) {
+          store.setState({
+            session,
+            health: { ...current.health, reachable: 'unreachable', error: result.error.message },
+          });
+          return;
+        }
         store.setState({
           session: null,
           profile: null,

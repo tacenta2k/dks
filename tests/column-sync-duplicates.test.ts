@@ -473,6 +473,108 @@ describe('v0.1.7 — column create already exists on the server (app_columns_pke
   });
 });
 
+describe('v0.1.8 — local purge of a column an administrator deleted (Office)', () => {
+  const OTHER_COLUMN: RemoteColumn = {
+    id: REMOTE_COLUMN_ID, name: 'Full Name', type: 'text', options: {}, position: 1,
+    visible: true, deleted: false, deleted_at: null, updated_at: '2026-01-01T00:00:00.000Z',
+  };
+  const outboxCount = (store: ReturnType<typeof sqliteLocal>['store']) => store.listOutbox('all').length;
+
+  it('soft-deletes the local copy on positive proof (pkey 23505 + invisible), with no outbox echo', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      // The column was synced earlier; Admin then soft-deleted it, so Office's
+      // SELECT no longer returns it while other columns are still visible.
+      for (const item of store.listOutbox('all')) store.markOutboxSynced(item.id);
+      const before = outboxCount(store);
+      const server = createFakeServer({ columns: [OTHER_COLUMN], existingHiddenIds: [LOCAL_COLUMN_ID] });
+
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+
+      expect(result.status).toBe('healthy');
+      const purged = store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID);
+      expect(purged).toEqual(expect.objectContaining({ deleted: true }));
+      expect(store.listColumns(false).map((column) => column.id)).not.toContain(LOCAL_COLUMN_ID);
+      expect(outboxCount(store)).toBe(before); // remote path: nothing queued to push back
+      expect(store.listOutbox('pending')).toEqual([]);
+      // Nothing was ever written as deleted to the server by Office.
+      expect(server.updates.every((update) => update.deleted !== true)).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('a queued create for a column Admin already deleted is acknowledged AND purged', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({ columns: [OTHER_COLUMN], existingHiddenIds: [LOCAL_COLUMN_ID] });
+      const result = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+      expect(result.status).toBe('healthy');
+      expect(store.listOutbox('all').filter((item) => item.entityType === 'column' && item.status !== 'synced')).toEqual([]);
+      expect(store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID)?.deleted).toBe(true);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('later syncs stop re-INSERTing the purged column (no 23505 round trip every minute)', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({ columns: [OTHER_COLUMN], existingHiddenIds: [LOCAL_COLUMN_ID] });
+      await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+      server.calls.length = 0;
+      const again = await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+      expect(again.status).toBe('healthy');
+      expect(server.calls.filter((call) => call.startsWith('insert:app_columns'))).toEqual([]);
+      expect(server.calls.filter((call) => call.startsWith('update:app_columns'))).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('SAFEGUARD: an empty column list is never proof — nothing is purged', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const server = createFakeServer({ columns: [], existingHiddenIds: [LOCAL_COLUMN_ID] });
+      await runSupabaseSync({ client: server.client, local, userId: OFFICE_UID });
+      expect(store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID)?.deleted).toBe(false);
+    } finally {
+      store.close();
+    }
+  });
+
+  it('SAFEGUARD: the purge keeps updated_at, so if the column is visible again the server copy restores it (never pushed as a delete)', async () => {
+    const { store, local } = sqliteLocal();
+    try {
+      store.createColumn(seededColumn() as never);
+      const keptUpdatedAt = store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID)!.updated_at;
+      const hidden = createFakeServer({ columns: [OTHER_COLUMN], existingHiddenIds: [LOCAL_COLUMN_ID] });
+      await runSupabaseSync({ client: hidden.client, local, userId: OFFICE_UID });
+      const purged = store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID)!;
+      expect(purged.deleted).toBe(true);
+      expect(purged.updated_at).toBe(keptUpdatedAt);
+
+      // Hypothetical wrong purge: the row turns out to be live and visible.
+      const visible = createFakeServer({
+        columns: [OTHER_COLUMN, {
+          id: LOCAL_COLUMN_ID, name: 'Visa Expiry', type: 'date_expiry', options: {}, position: 2,
+          visible: true, deleted: false, deleted_at: null, updated_at: keptUpdatedAt,
+        }],
+      });
+      await runSupabaseSync({ client: visible.client, local, userId: OFFICE_UID });
+      expect(store.listColumns(true).find((column) => column.id === LOCAL_COLUMN_ID)?.deleted).toBe(false);
+      expect(visible.updates.filter((update) => update.id === LOCAL_COLUMN_ID)).toEqual([]);
+      expect(visible.inserts).toEqual([]);
+    } finally {
+      store.close();
+    }
+  });
+});
+
 describe('column reconciliation SQL', () => {
   const files = ['supabase/schema.sql', 'ARENA/sql/fix-column-sync.sql'];
 
