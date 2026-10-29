@@ -3,7 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   DRAFT_ROW_ID,
   GRID_KEYBOARD_PROPS,
+  draftFocusTarget,
   isMeaningfulDraftValue,
+  rowIndexOfRowId,
 } from '../src/features/sheet/grid-behaviour';
 
 /**
@@ -41,5 +43,61 @@ describe('grid keyboard contract (SHEET-12)', () => {
     expect(GRID_KEYBOARD_PROPS.singleClickEdit).toBe(false);
     // Paste stays plain text: spreadsheet formulas are never copied as formulas.
     expect(GRID_KEYBOARD_PROPS.suppressCopyRowsToClipboard).toBe(true);
+  });
+});
+
+/**
+ * Draft-commit focus hand-off — resolved by stable row id, never by the draft
+ * row's stale rowIndex. (The end-to-end reorder behaviour is covered by
+ * tests/grid-tab-navigation.test.tsx.)
+ */
+describe('draft-commit focus hand-off', () => {
+  const editable = ['full_name', 'visa_expiry', 'notes'];
+
+  it('targets the NEXT editable column of the created record on Tab', () => {
+    expect(draftFocusTarget('tab', 'row-42', 'full_name', editable)).toEqual({
+      rowId: 'row-42',
+      columnId: 'visa_expiry',
+      draftColumnId: 'full_name',
+    });
+  });
+
+  it('keeps continuous entry on the fresh draft for Enter', () => {
+    expect(draftFocusTarget('enter', 'row-42', 'full_name', editable)).toEqual({
+      rowId: DRAFT_ROW_ID,
+      columnId: 'full_name',
+      draftColumnId: 'full_name',
+    });
+    expect(draftFocusTarget(null, 'row-42', 'notes', editable).rowId).toBe(DRAFT_ROW_ID);
+  });
+
+  it('stays on the draft row when Tab leaves the last editable column', () => {
+    expect(draftFocusTarget('tab', 'row-42', 'notes', editable)).toEqual({
+      rowId: DRAFT_ROW_ID,
+      columnId: 'notes',
+      draftColumnId: 'notes',
+    });
+  });
+
+  it('never targets a system column (Days Left / Actions are not editable)', () => {
+    const target = draftFocusTarget('tab', 'row-42', 'full_name', editable);
+    expect(editable).not.toContain('daysLeft');
+    expect(target.columnId).toBe('visa_expiry');
+  });
+
+  it('resolves a row id to its CURRENT grid position', () => {
+    const api = {
+      getRowNode: (id: string) => (
+        id === 'row-new' ? { rowIndex: 0 } : id === '__draft' ? { rowIndex: 7 } : undefined
+      ),
+    };
+    expect(rowIndexOfRowId(api, 'row-new')).toBe(0);
+    expect(rowIndexOfRowId(api, '__draft')).toBe(7);
+    // Not in the row model yet (data not applied, or filtered out).
+    expect(rowIndexOfRowId(api, 'row-missing')).toBeNull();
+    // A node without a usable index is never a focus target.
+    expect(rowIndexOfRowId({ getRowNode: () => ({ rowIndex: null }) }, 'row-new')).toBeNull();
+    expect(rowIndexOfRowId({ getRowNode: () => ({ rowIndex: -1 }) }, 'row-new')).toBeNull();
+    expect(rowIndexOfRowId({ getRowNode: () => undefined }, 'row-new')).toBeNull();
   });
 });

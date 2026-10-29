@@ -57,9 +57,11 @@ import {
   GRID_KEYBOARD_PROPS,
   columnOrderFromMovedEvent,
   createTabToNextCell,
+  draftFocusTarget,
   isMeaningfulDraftValue,
-  nextTabbableColumnId,
+  rowIndexOfRowId,
   sheetGridThemeClass,
+  type DraftFocusTarget,
 } from './grid-behaviour';
 import { GroupHeaderCell } from './group-header';
 import { groupGridRows, groupableColumns, isGroupHeaderRow } from './grouping';
@@ -163,6 +165,14 @@ function accessibleCellValue(row: SheetRow, column: ColumnDefinition): string {
   }
   return String(value);
 }
+
+/**
+ * Upper bound on the animation frames spent waiting for the refreshed row
+ * model / rendered cell after a draft-row commit. Frames — not a timeout —
+ * only bridge React's data commit to AG Grid's row render; the handoff target
+ * itself is always re-resolved from the record's row id.
+ */
+const DRAFT_FOCUS_MAX_FRAMES = 30;
 
 const SKELETON_ROW_COUNT = 8;
 const SKELETON_CELL_WIDTHS = ['86%', '64%', '78%', '52%', '70%', '58%'];
@@ -276,6 +286,14 @@ export function SheetPage({
     [],
   );
 
+  // The rows array of the LAST refresh, set the moment the snapshot is read
+  // (before React re-renders). Comparing it by identity with the rows array
+  // the current render is based on tells a draft-commit focus hand-off
+  // whether the row set it sees is fresh or still one render behind.
+  const latestRowsRef = useRef<readonly SheetRow[]>(rows);
+  const renderedRowsRef = useRef<readonly SheetRow[]>(rows);
+  renderedRowsRef.current = rows;
+
   // `quiet` refreshes replace the data without unmounting the page: the
   // loading overlay used to destroy open editors, dialogs and focused inputs
   // on every background refresh (focus-delay regression).
@@ -289,6 +307,7 @@ export function SheetPage({
         repository.getRows(),
       ]);
       setColumns(nextColumns);
+      latestRowsRef.current = nextRows;
       setRows(nextRows);
       setError(null);
     } catch (caught) {
@@ -381,6 +400,141 @@ export function SheetPage({
     const grouped = groupGridRows(visibleRows, groupColumn);
     return [...grouped, draftRow];
   }, [builtRows.rows, matchingIds, groupColumn, draftRow]);
+
+  // -- Draft-row commit → focus handoff ------------------------------------
+  // A draft commit moves the new record to its own place in the sheet (the
+  // local store returns `ORDER BY updated_at DESC`, so it lands at the TOP)
+  // and re-pins the blank draft row last. The grid row the user was editing
+  // therefore no longer exists at the captured rowIndex, and the refreshed
+  // rowData reaches the grid asynchronously. The handoff below keeps only
+  // stable coordinates — the created record's row id + the target column id —
+  // and resolves them against the LIVE row model (see applyPendingDraftFocus).
+  const displayRowsRef = useRef<readonly SheetGridRendererData[]>(displayRows);
+  displayRowsRef.current = displayRows;
+  const pendingDraftFocusRef = useRef<DraftFocusTarget | null>(null);
+  const draftFocusFrameRef = useRef<number | null>(null);
+  const draftFocusFramesRef = useRef(0);
+
+  /**
+   * Land the cursor on the record a draft-row commit created, at its CURRENT
+   * grid position.
+   *
+   * Returns true when the handoff is finished (applied, fallen back, or
+   * dropped) and false while the refreshed data is still settling — the
+   * caller then retries on the grid's model update / next frame. Nothing here
+   * depends on the draft row's old rowIndex or on a fixed delay.
+   */
+  const applyPendingDraftFocus = useCallback((): boolean => {
+    const api = gridApiRef.current;
+    const target = pendingDraftFocusRef.current;
+    if (!target || !api) {
+      return true;
+    }
+    let rowId = target.rowId;
+    let columnId = target.columnId;
+    let rowIndex = rowIndexOfRowId(api, rowId);
+    if (rowIndex === null) {
+      if (displayRowsRef.current.some((row) => row.__rowId === target.rowId)) {
+        // The refreshed rows are rendered but the grid has not applied them
+        // to its row model yet — wait for the model update.
+        return false;
+      }
+      if (renderedRowsRef.current !== latestRowsRef.current) {
+        // The snapshot holding this record has been read but not rendered
+        // yet, so the grid cannot show it yet — wait, never assume that it is
+        // hidden.
+        return false;
+      }
+      // The refreshed data settled WITHOUT this record (an active filter
+      // hides it): keep continuous entry on the fresh draft row instead.
+      const draftIndex = rowIndexOfRowId(api, DRAFT_ROW_ID);
+      if (draftIndex === null) {
+        pendingDraftFocusRef.current = null;
+        return true;
+      }
+      rowId = DRAFT_ROW_ID;
+      columnId = target.draftColumnId;
+      rowIndex = draftIndex;
+      pendingDraftFocusRef.current = { rowId, columnId, draftColumnId: target.draftColumnId };
+    }
+    try {
+      // Close the transient editor the Tab gesture opened on the draft row
+      // before the refreshed data arrived — one focused editor only.
+      if (api.getEditingCells().length > 0) {
+        api.stopEditing();
+      }
+      api.setFocusedCell(rowIndex, columnId);
+      api.startEditingCell({ rowIndex, colKey: columnId });
+      const started = api.getEditingCells().some((cell) => (
+        cell.rowIndex === rowIndex && String(cell.column.getColId()) === columnId
+      ));
+      if (!started) {
+        // Row model is current but this cell is not rendered yet: retry.
+        return false;
+      }
+      pendingDraftFocusRef.current = null;
+      return true;
+    } catch {
+      // The grid can be torn down between the refresh and the frame.
+      pendingDraftFocusRef.current = null;
+      return true;
+    }
+  }, []);
+
+  /**
+   * Retry a still-pending handoff once per animation frame (bounded by
+   * DRAFT_FOCUS_MAX_FRAMES). Frames — not a timeout — only bridge the gap
+   * between the row model update and the cell actually being rendered; both
+   * the row index and the rendered cell are re-checked on every attempt.
+   */
+  const schedulePendingDraftFocus = useCallback(() => {
+    if (draftFocusFrameRef.current !== null) {
+      return; // a frame is already queued; it re-reads the pending target
+    }
+    function tick() {
+      draftFocusFrameRef.current = null;
+      if (applyPendingDraftFocus()) {
+        draftFocusFramesRef.current = 0;
+        return;
+      }
+      draftFocusFramesRef.current += 1;
+      if (draftFocusFramesRef.current > DRAFT_FOCUS_MAX_FRAMES) {
+        // Give up quietly instead of hijacking a later, unrelated focus.
+        pendingDraftFocusRef.current = null;
+        draftFocusFramesRef.current = 0;
+        return;
+      }
+      draftFocusFrameRef.current = window.requestAnimationFrame(tick);
+    }
+    draftFocusFrameRef.current = window.requestAnimationFrame(tick);
+  }, [applyPendingDraftFocus]);
+
+  /** Try the handoff immediately, then keep retrying per frame if needed. */
+  const flushPendingDraftFocus = useCallback(() => {
+    if (applyPendingDraftFocus()) {
+      draftFocusFramesRef.current = 0;
+      return;
+    }
+    schedulePendingDraftFocus();
+  }, [applyPendingDraftFocus, schedulePendingDraftFocus]);
+
+  // AG Grid fires modelUpdated once the row model is rebuilt and every node
+  // has its CURRENT row index (including the draft row's re-pin). The retry
+  // is deferred to the next frame so the grid is never mutated inside its own
+  // event dispatch, and so the target cell has a chance to render.
+  const handleModelUpdated = useCallback(() => {
+    if (pendingDraftFocusRef.current) {
+      schedulePendingDraftFocus();
+    }
+  }, [schedulePendingDraftFocus]);
+
+  useEffect(() => () => {
+    if (draftFocusFrameRef.current !== null) {
+      window.cancelAnimationFrame(draftFocusFrameRef.current);
+      draftFocusFrameRef.current = null;
+    }
+  }, []);
+
   const duplicatePassportValues = useMemo(() => {
     const passportColumn = activeColumns.find((column) => (
       column.isPassport === true || column.is_passport === true || /passport/i.test(column.name)
@@ -567,40 +721,19 @@ export function SheetPage({
       setStatusMessage('Added a new record.');
       const api = gridApiRef.current;
       if (api) {
-        // Excel Tab semantics on the draft row: typing column 1 and pressing
-        // Tab creates the record AND lands editing column 2 OF THAT NEW
-        // RECORD (not the fresh draft, not outside the grid).
+        // Excel semantics on the draft row: Tab creates the record AND lands
+        // editing the NEXT editable column OF THAT NEW RECORD; Enter keeps
+        // continuous entry on the fresh draft row. The handoff only records
+        // stable coordinates (row id + column id) — the draft row's old
+        // rowIndex is meaningless once the new record is placed at its own
+        // position in the sheet.
         const intent = draftCommitIntentRef.current;
         draftCommitIntentRef.current = null;
-        window.requestAnimationFrame(() => {
-          try {
-            // Close any transient editor the grid itself opened on the draft
-            // row while Tab/Enter was processed — one focused editor only.
-            api.stopEditing();
-            if (intent === 'tab') {
-              const createdNode = api.getRowNode(created.id);
-              const nextField = nextTabbableColumnId(field, editableColumnIds, false) ?? field;
-              if (createdNode && createdNode.rowIndex !== null && createdNode.rowIndex >= 0) {
-                api.setFocusedCell(createdNode.rowIndex, nextField);
-                api.startEditingCell({ rowIndex: createdNode.rowIndex, colKey: nextField });
-                return;
-              }
-            }
-            // SHEET-11 "continuous focus": the committed row is saved and a
-            // fresh blank draft is now the last row — put the cursor back in
-            // the same column so the next record can be typed without
-            // touching the mouse.
-            const rowIndex = api.getDisplayedRowCount() - 1;
-            if (rowIndex >= 0) {
-              api.setFocusedCell(rowIndex, field);
-              api.startEditingCell({ rowIndex, colKey: field });
-            }
-          } catch {
-            // The grid can be torn down between the refresh and the frame.
-          }
-        });
+        pendingDraftFocusRef.current = draftFocusTarget(intent, created.id, field, editableColumnIds);
+        flushPendingDraftFocus();
       } else {
         draftCommitIntentRef.current = null;
+        pendingDraftFocusRef.current = null;
       }
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
@@ -1002,6 +1135,7 @@ export function SheetPage({
                   onKeyDownCapture={rememberGridKeyIntent}
                   onPointerDownCapture={() => {
                     draftCommitIntentRef.current = null;
+                    pendingDraftFocusRef.current = null;
                   }}
                 >
                   {/* §5.9: single non-blocking hint floating inside the grid
@@ -1068,6 +1202,10 @@ export function SheetPage({
                     gridApiRef.current = event.api;
                   }}
                   onCellValueChanged={(event) => void handleCellValueChanged(event)}
+                  // The refreshed row set reaches the grid asynchronously: a
+                  // pending draft-commit focus handoff is resolved here, when
+                  // the new row indexes are final.
+                  onModelUpdated={handleModelUpdated}
                   // Header drag-reorder: persists the finished user drag as
                   // normalized `position` values (see persistColumnOrder).
                   onColumnMoved={handleColumnMoved}

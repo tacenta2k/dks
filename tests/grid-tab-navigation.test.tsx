@@ -7,6 +7,13 @@
  * editing column 2 of that new row; Enter commits + keeps continuous-entry
  * focus on the fresh draft; Escape cancels.
  *
+ * Draft-row Tab hand-off regression: the local store returns
+ * `ORDER BY updated_at DESC`, so the committed record moves to the TOP of the
+ * sheet while the cursor was on the BOTTOM draft row. The hand-off must follow
+ * that same new record by ROW ID (never the draft row's old rowIndex, and
+ * never a fixed frame) — including when the new row is scrolled out of view,
+ * which is when the old implementation silently lost the editor.
+ *
  * The REAL SheetPage drives its REAL grid (renderGridInTests opt-in) against
  * the in-memory repository — the exact wiring the packaged app runs.
  */
@@ -68,6 +75,55 @@ async function seedRepository(): Promise<SheetRepository> {
 
 function columnIds(repositoryRowsCols: { id: string }[]): string[] {
   return repositoryRowsCols.map((column) => column.id);
+}
+
+/**
+ * Reproduce the PRODUCTION row order: electron/main/sqlite.ts returns
+ * `SELECT * FROM entries ORDER BY updated_at DESC, id`, so a freshly created
+ * record lands at the TOP of the sheet — the opposite end from the draft row
+ * the user typed in. The in-memory repository appends instead, so without
+ * this wrapper the reordering that triggers the bug never happens.
+ */
+function withNewestRecordFirst(repository: SheetRepository): SheetRepository {
+  const readRows = repository.getRows.bind(repository);
+  repository.getRows = async () => [...(await readRows())].sort((left, right) => (
+    (right.updated_at ?? '').localeCompare(left.updated_at ?? '')
+  ));
+  return repository;
+}
+
+/**
+ * Seed records with DISTINCT, deliberately old `updated_at` values so the
+ * record created during the test is always the newest (deterministic top row,
+ * no reliance on millisecond timing).
+ */
+function seededRow(index: number, data: Record<string, unknown>) {
+  const updatedAt = new Date(Date.UTC(2026, 0, 1, 0, 0, index)).toISOString();
+  return {
+    id: `seed-row-${index}`,
+    data,
+    category: null,
+    deleted: false,
+    updatedAt,
+    updated_at: updatedAt,
+  };
+}
+
+/** Scroll the grid viewport to the bottom draft row, like a user would. */
+async function scrollGridToBottom(): Promise<void> {
+  const viewport = document.querySelector('.ag-body-viewport') as HTMLElement | null;
+  expect(viewport, 'grid body viewport should exist').toBeTruthy();
+  (viewport as HTMLElement).scrollTop = 1_000_000;
+  fireEvent.scroll(viewport as HTMLElement);
+  await waitFor(() => {
+    expect(isDraftRow(logicalRowIndexes().at(-1) as number)).toBe(true);
+  });
+}
+
+/** The grid row that currently renders `rowId` (undefined while not rendered). */
+function rowElementById(rowId: string): HTMLElement | undefined {
+  return Array.from(document.querySelectorAll('.ag-row'))
+    .find((row) => (row as HTMLElement).getAttribute('row-id') === rowId) as HTMLElement | undefined;
 }
 
 async function renderSheet(repository: SheetRepository) {
@@ -283,10 +339,14 @@ describe('Grid Tab navigation end-to-end (SHEET-12)', () => {
 
     // Editing is now ON THE CREATED RECORD's second column — not the fresh
     // draft, not outside the grid, not simply closed.
+    const [created] = await repository.getRows();
     await waitFor(() => {
       const editing = editingCell();
       expect(editing?.getAttribute('col-id')).toBe(expiryId);
       expect(isDraftRow(logicalRowIndexes()[0])).toBe(false);
+      // …the editor is inside the CREATED record's row, matched by its stable
+      // row id — not merely "the first row".
+      expect(editing?.closest('.ag-row')?.getAttribute('row-id')).toBe(created.id);
       expect(
         (rowsByIndex().get(logicalRowIndexes()[0]) ?? [])
           .some((row) => row.contains(editing as Node)),
@@ -298,6 +358,117 @@ describe('Grid Tab navigation end-to-end (SHEET-12)', () => {
     expect(indexes.length).toBeGreaterThanOrEqual(2);
     expect(isDraftRow(indexes[indexes.length - 1])).toBe(true);
   }, 30_000);
+
+  it('draft row: Tab follows the new record to the TOP of the sheet (reorder) and keeps Tabbing in it', async () => {
+    // The reported repro: an existing sheet, the draft row at the BOTTOM, a
+    // record committed from its first cell. The store orders by updated_at
+    // DESC, so the new record moves to the TOP — the draft row's old rowIndex
+    // is stale, and the new row can even be outside the rendered viewport.
+    const seeded = Array.from({ length: 20 }, (_, index) => seededRow(index, {
+      full_name: `Existing ${index}`,
+      visa_expiry: '2027-01-22',
+      notes: '',
+    }));
+    const repository = withNewestRecordFirst(createInMemorySheetRepository({ rows: seeded }));
+    await repository.addColumn({ id: 'full_name', name: 'Full Name', type: 'text' });
+    await repository.addColumn({ id: 'visa_expiry', name: 'Visa expiry', type: 'date_expiry' });
+    await repository.addColumn({ id: 'notes', name: 'Notes', type: 'text' });
+    const columns = columnIds(await repository.getColumns());
+    const [nameId, expiryId, notesId] = columns;
+
+    await renderSheet(repository);
+    await waitFor(() => expect(logicalRowIndexes().length).toBeGreaterThan(0));
+    // The cursor is on the bottom draft row, which only renders once the grid
+    // is scrolled down — the top of the sheet is NOT rendered here.
+    await scrollGridToBottom();
+    const draftIndex = logicalRowIndexes().at(-1) as number;
+    const draftNameCell = cellInRow(draftIndex, nameId);
+    expect(draftNameCell, 'draft row first cell must be rendered').toBeTruthy();
+
+    // 1 + 2: edit the first draft cell, type a value, press Tab.
+    fireEvent.doubleClick(draftNameCell as HTMLElement);
+    const nameEditor = await typeInEditor('Zara');
+    fireEvent.keyDown(nameEditor, { key: 'Tab' });
+
+    // 3: exactly one record was created, and it moved to the TOP.
+    await waitFor(async () => {
+      expect(await repository.getRows()).toHaveLength(seeded.length + 1);
+    });
+    const rowsAfterCommit = await repository.getRows();
+    const created = rowsAfterCommit.filter((row) => row.data.full_name === 'Zara');
+    expect(created).toHaveLength(1);
+    const createdId = created[0].id;
+    expect(rowsAfterCommit[0].id).toBe(createdId); // newest first, like SQLite
+    await waitFor(() => {
+      expect(rowElementById(createdId)?.getAttribute('row-index')).toBe('0');
+    });
+
+    // 4: focus/editing is on the NEXT editable column of THAT SAME new row,
+    // even though the row that was being edited no longer exists at its old
+    // rowIndex — and even though the new row had to be scrolled into view.
+    await waitFor(() => {
+      const editing = editingCell();
+      expect(editing, 'an editor must be open after the reorder').toBeTruthy();
+      expect(editing?.getAttribute('col-id')).toBe(expiryId);
+      expect(editing?.closest('.ag-row')?.getAttribute('row-id')).toBe(createdId);
+    });
+    // Keyboard focus follows the same cell: AG Grid moved browser focus onto
+    // that cell and opened its editor (in jsdom the cell element holds focus,
+    // in the packaged app the editor input inside it) — no extra click and no
+    // second Tab is needed to keep navigating.
+    const focusedEditor = editingCell();
+    expect(focusedEditor?.contains(document.activeElement)).toBe(true);
+    expect(focusedEditor?.classList.contains('ag-cell-focus')).toBe(true);
+    // Generated/system columns are never Tab targets.
+    expect(editingCell()?.getAttribute('col-id')).not.toBe('daysLeft');
+    expect(editingCell()?.getAttribute('col-id')).not.toBe('__actions');
+
+    // 5: the NEXT Tab continues forward in the same record, without creating
+    // a duplicate row and without jumping to the draft or another record.
+    const expiryInput = editingCell()?.querySelector('input') as HTMLInputElement;
+    fireEvent.keyDown(expiryInput, { key: 'Tab' });
+    await waitFor(() => {
+      const editing = editingCell();
+      expect(editing?.getAttribute('col-id')).toBe(notesId);
+      expect(editing?.closest('.ag-row')?.getAttribute('row-id')).toBe(createdId);
+    });
+    const rowsAfterSecondTab = await repository.getRows();
+    expect(rowsAfterSecondTab).toHaveLength(seeded.length + 1);
+    expect(rowsAfterSecondTab.filter((row) => row.data.full_name === 'Zara')).toHaveLength(1);
+    expect(rowsAfterSecondTab[0].id).toBe(createdId);
+  }, 60_000);
+
+  it('draft row: a filter that hides the created record keeps entry on the fresh draft row', async () => {
+    const repository = withNewestRecordFirst(createInMemorySheetRepository({
+      rows: [seededRow(0, { full_name: 'Existing', visa_expiry: '2027-01-22', notes: '' })],
+    }));
+    await repository.addColumn({ id: 'full_name', name: 'Full Name', type: 'text' });
+    await repository.addColumn({ id: 'visa_expiry', name: 'Visa expiry', type: 'date_expiry' });
+    await repository.addColumn({ id: 'notes', name: 'Notes', type: 'text' });
+    const [nameId] = columnIds(await repository.getColumns());
+
+    await renderSheet(repository);
+    // Only rows matching the search stay displayed, so the record created
+    // below is not part of the grid at all.
+    fireEvent.change(screen.getByLabelText('Search records'), { target: { value: 'Existing' } });
+    await waitFor(() => expect(logicalRowIndexes()).toHaveLength(2)); // one record + draft
+
+    const draftIndex = logicalRowIndexes().at(-1) as number;
+    fireEvent.doubleClick(cellInRow(draftIndex, nameId) as HTMLElement);
+    const nameEditor = await typeInEditor('Zara');
+    fireEvent.keyDown(nameEditor, { key: 'Tab' });
+
+    await waitFor(async () => expect(await repository.getRows()).toHaveLength(2));
+    // Nothing to navigate to in the created record: continuous entry stays on
+    // the fresh draft row in the column the user was typing in — focus is
+    // never lost and no second record appears.
+    await waitFor(() => {
+      const editing = editingCell();
+      expect(editing?.getAttribute('col-id')).toBe(nameId);
+      expect(editing?.closest('.ag-row')?.getAttribute('row-id')).toBe('__draft');
+    });
+    expect(await repository.getRows()).toHaveLength(2);
+  }, 60_000);
 
   it('draft row: Enter commits and keeps continuous-entry focus on the fresh draft', async () => {
     const repository = await seedRepository();

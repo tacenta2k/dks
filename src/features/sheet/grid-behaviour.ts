@@ -130,6 +130,74 @@ export function createTabToNextCell<TData>(
 }
 
 /* --------------------------------------------------------------------------
+ * Draft-row commit → focus handoff.
+ *
+ * The draft row is synthetic: committing it creates a REAL record whose place
+ * in the sheet is decided by the repository (the local store returns
+ * `ORDER BY updated_at DESC`, so a new record lands at the TOP) and by the
+ * draft row being pinned last. The draft row's rowIndex before the commit is
+ * therefore meaningless afterwards, and no single animation frame is a safe
+ * moment to act on. The only stable coordinates are the new record's row id
+ * and the target column id; `rowIndexOfRowId` resolves those to the row's
+ * CURRENT grid position once the refreshed data has reached the row model.
+ * ------------------------------------------------------------------------ */
+
+/** Where the cursor must land after a draft-row commit. */
+export interface DraftFocusTarget {
+  /** Stable row id to land in — the created record, or the fresh draft. */
+  rowId: string;
+  /** Editable user column id to edit in that record. */
+  columnId: string;
+  /**
+   * Column to keep editing on the fresh draft when the created record is not
+   * displayed (e.g. an active filter hides it): continuous entry then falls
+   * back to the same column the user typed in.
+   */
+  draftColumnId: string;
+}
+
+/**
+ * The logical record + column a draft commit must hand the cursor to.
+ *
+ * Tab continues into the NEXT editable user column of the created record;
+ * Enter (and Tab at the last editable column) keeps continuous entry on the
+ * fresh draft row, exactly as before. `createdRowId` is always supplied, but
+ * it is only used for the Tab case — the draft row id stays synthetic.
+ */
+export function draftFocusTarget(
+  intent: 'tab' | 'enter' | null,
+  createdRowId: string,
+  committedColumnId: string,
+  editableColumnIds: readonly string[],
+): DraftFocusTarget {
+  const nextColumnId = intent === 'tab'
+    ? nextTabbableColumnId(committedColumnId, editableColumnIds, false)
+    : null;
+  if (nextColumnId) {
+    return { rowId: createdRowId, columnId: nextColumnId, draftColumnId: committedColumnId };
+  }
+  return { rowId: DRAFT_ROW_ID, columnId: committedColumnId, draftColumnId: committedColumnId };
+}
+
+/** Structural subset of GridApi needed to resolve a row's position. */
+export interface RowLookupApi {
+  getRowNode: (id: string) => { rowIndex?: number | null } | undefined | null;
+}
+
+/**
+ * The row's CURRENT index in the grid row model, or null when the row is not
+ * in the model (not applied yet, or not displayed because of a filter).
+ * Never trust a rowIndex captured before a data/model update.
+ */
+export function rowIndexOfRowId(api: RowLookupApi, rowId: string): number | null {
+  const node = api.getRowNode(rowId);
+  if (!node || typeof node.rowIndex !== 'number' || node.rowIndex < 0) {
+    return null;
+  }
+  return node.rowIndex;
+}
+
+/* --------------------------------------------------------------------------
  * Column drag-reorder persistence.
  *
  * AG Grid Community header dragging moves columns visually and reports the
