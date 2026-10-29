@@ -151,7 +151,7 @@ jobs:
       - name: Test
         run: npm test -- --testTimeout=60000
 
-      - name: Bump version and create tag
+      - name: Resolve version and tag
         id: version
         shell: pwsh
         run: |
@@ -165,15 +165,28 @@ jobs:
               exit 1
             }
             $tag = "v$version"
-            # Verify tag does not already exist
             $existing = git tag -l $tag
             if ($existing) {
-              Write-Error "Tag $tag already exists — cannot publish existing version twice. Bump instead."
-              exit 1
+              # v0.1.6 was tagged but produced no GitHub release (the packaging
+              # step failed before upload). Re-running this workflow for that
+              # version must build and publish the SAME version: the tag is an
+              # existing published ref and is never recreated or moved. It only
+              # has to be an ancestor of main so the release is built from the
+              # released history.
+              $tagCommit = (git rev-list -n 1 $tag).Trim()
+              $head = (git rev-parse HEAD).Trim()
+              git merge-base --is-ancestor $tag $head
+              if ($LASTEXITCODE -ne 0) {
+                Write-Error "Tag $tag ($tagCommit) is not an ancestor of main ($head). Refusing to publish a version whose tag does not belong to this history."
+                exit 1
+              }
+              Write-Host "Tag $tag already exists at $tagCommit (main is at $head) — reusing it as-is (not recreated, not moved)."
+            } else {
+              git tag -a $tag -m "chore(release): $tag"
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              Write-Host "Created tag $tag for the existing version $version."
             }
-            git tag -a $tag -m "chore(release): $tag"
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-            Write-Host "Using existing version $version (bump=none), created tag $tag."
+            Write-Host "Publishing existing version $version with bump=none (tag $tag)."
           } else {
             npm version ${{ inputs.bump }} -m "chore(release): v%s"
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -189,7 +202,7 @@ jobs:
           "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          Write-Host "Created version commit and tag $tag."
+          Write-Host "Resolved version $version and tag $tag."
 
       - name: Write Vite build environment
         shell: pwsh
@@ -221,7 +234,12 @@ jobs:
           )
 
       - name: Push version commit and tag
-        run: git push origin main --follow-tags
+        shell: pwsh
+        run: |
+          # bump=none reuses an existing tag: nothing new to push, and an
+          # existing tag is never force-pushed or moved.
+          git push origin main --follow-tags
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows installer and upload draft release
         run: npm run release

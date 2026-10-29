@@ -213,7 +213,7 @@ describe('one-click Release DKS workflow', () => {
 
   it('bumps and pushes the version before writing build secrets and packaging', () => {
     const versionIndex = stepIndex(
-      (step) => step.name === 'Bump version and create tag',
+      (step) => step.name === 'Resolve version and tag',
       'version bump',
     );
     const envIndex = stepIndex(
@@ -246,6 +246,38 @@ describe('one-click Release DKS workflow', () => {
     expect(versionIndex).toBeLessThan(envIndex);
     expect(envIndex).toBeLessThan(pushIndex);
     expect(pushIndex).toBeLessThan(releaseIndex);
+  });
+
+  it('publishes an already-tagged version with bump=none without moving the tag', () => {
+    const versionIndex = stepIndex(
+      (step) => step.name === 'Resolve version and tag',
+      'version resolution',
+    );
+    const versionRun = steps[versionIndex].run ?? '';
+
+    // v0.1.6 was tagged before its GitHub release existed. Re-publishing that
+    // version must reuse the tag, never recreate or move it.
+    expect(versionRun).toContain('$existing = git tag -l $tag');
+    expect(versionRun).toContain('git rev-list -n 1 $tag');
+    expect(versionRun).toContain('git merge-base --is-ancestor $tag $head');
+    expect(versionRun).toContain('reusing it as-is (not recreated, not moved)');
+    expect(versionRun).not.toContain('cannot publish existing version twice');
+    // The tag is only CREATED in the else branch (no existing tag).
+    const existingBranch = versionRun.slice(
+      versionRun.indexOf('$existing = git tag -l $tag'),
+      versionRun.indexOf('} else {', versionRun.indexOf('$existing = git tag -l $tag')),
+    );
+    expect(existingBranch).not.toContain('git tag -a');
+    expect(existingBranch).toContain('git merge-base --is-ancestor');
+
+    // A tag that does not belong to main's history is refused instead of
+    // force-moved.
+    expect(versionRun).not.toContain('git tag -f');
+    expect(versionRun).not.toContain('--force');
+    expect(versionRun).toContain('Refusing to publish a version whose tag does not belong to this history');
+
+    // The version still comes from package.json (bump=none = no new commit).
+    expect(versionRun).toContain("node -p \"require('./package.json').version\"");
   });
 
   it('verifies the exact draft assets before publishing and reporting success', () => {
