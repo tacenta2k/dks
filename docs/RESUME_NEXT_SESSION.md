@@ -274,6 +274,33 @@ Vite starts, but no DKS window appeared, even after native rebuilds;
 
 ---
 
+### B7 — Login required again after the 0.1.6 → 0.1.7 in-app update (FIXED in 0.1.8, VERIFY)
+
+- The installer path was not the cause: electron-updater 6.8.12 runs the new
+  installer with `--updated --force-run` (NsisUpdater `args = ["--updated"]`),
+  the old uninstaller gets `/S /KEEP_APP_DATA --updated`, and
+  `build/installer.nsh` never writes `.dks-isFresh` when `${isUpdated}`.
+  CI case E reproduces this invocation over a real v0.1.6 install and asserts
+  no `session-reset-required` and an unchanged nonce.
+- The session was lost in the app: un-flushed rotated refresh token killed
+  with the app during install, a nonce read error treated as "fresh", a
+  transient restore error shown as the login screen. All fixed in 0.1.8
+  (flush before install, preserve on read error, restore retry + "Retry saved
+  sign-in"). Uninstall/reinstall still requires login.
+- VERIFY on Windows: update 0.1.7 → 0.1.8 in-app and stay signed in; then
+  uninstall + reinstall and confirm login is required.
+
+### B8 — "Signing in…" slow (FIXED in 0.1.8, VERIFY with field logs)
+
+- Measured: button time = password grant + profile read, serial; before 0.1.8
+  a duplicate profile read (and for Office an extra RPC) was added by the auth
+  listener. The password grant was also the cold first request to Supabase.
+- 0.1.8: one profile read, one Office approval RPC, and the connection is
+  pre-warmed (`GET /auth/v1/health`) while the form is shown.
+- `main.log` now has `[dks:timing]` lines (durations, outcome, role, error
+  code, `warm=yes|no` only — no credentials or customer data). Collect them
+  from the affected PC to confirm.
+
 ## 8. Smaller improvements (non-visual)
 
 - S1 Use a human-readable label (for example the first text column value) in
