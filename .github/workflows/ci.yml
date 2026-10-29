@@ -96,8 +96,14 @@ jobs:
           if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_PUBLISHABLE_KEY)) { $env:VITE_SUPABASE_PUBLISHABLE_KEY = "dummy-publishable-key-for-ci" }
           "VITE_SUPABASE_URL=$env:VITE_SUPABASE_URL" | Out-File -FilePath .env -Encoding utf8
           "VITE_SUPABASE_PUBLISHABLE_KEY=$env:VITE_SUPABASE_PUBLISHABLE_KEY" | Out-File -FilePath .env -Append -Encoding utf8
-          npx electron-builder --win --publish never
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx electron-builder --win --publish never 2>&1 | Tee-Object -FilePath "$env:RUNNER_TEMP\build.log"
+          $buildExit = $LASTEXITCODE
+          Get-Content "$env:RUNNER_TEMP\build.log" | ForEach-Object { Write-Host $_ }
+          if ($buildExit -ne 0) {
+            Write-Host "::error::electron-builder failed with $buildExit — printing build.log"
+            Get-Content "$env:RUNNER_TEMP\build.log" | ForEach-Object { Write-Host "BUILD: $_" }
+            exit $buildExit
+          }
           if (-not (Test-Path "release")) { Write-Error "release directory not created"; exit 1 }
           Get-ChildItem release | Format-Table Name, Length
           Write-Host "LOG: electron-builder --win --publish never succeeded"
