@@ -3569,9 +3569,11 @@ Evidence (electron-updater 6.8.12 / app-builder-lib 25.1.8):
   TOKEN_REFRESHED blip ejecting the user.
 - CI case E (after the A–D matrix) installs the PUBLISHED v0.1.6, launches it
   once, plants session sentinels, then runs the new installer exactly as the
-  updater does: E1 `--updated --force-run` (assisted wizard driven through UI
-  Automation — the install-mode page is not skipped on update), E2
-  `--updated /S --force-run`; asserts no `session-reset-required`, no
+  updater does: E1 `--updated --force-run` (non-silent; the wizard could not
+  be clicked on the hosted runner, so E1 falls back — with a warning
+  annotation — to the same arguments plus `--currentuser`, which only answers
+  the install-mode page exactly as its default would; `customInit` does not
+  read it), E2 the exact silent form `--updated /S --force-run`; asserts no `session-reset-required`, no
   `.dks-isFresh`, nonce unchanged, sentinels kept, and the new app logging
   `install nonce matches stored nonce — preserving session`. E3: a genuine
   uninstall still clears session data and the nonce.
@@ -3627,7 +3629,18 @@ Evidence (electron-updater 6.8.12 / app-builder-lib 25.1.8):
 - (c) Manual checks added to `docs/FIXES_UI.md` §15 (Global / Recycle Bin /
   Settings).
 
+### CI harness fix (pre-existing race)
+
+- `Invoke-HangProof` waits for `Uninstall DKS.exe`, which re-launches itself
+  from %TEMP% and exits at once; proof-step stage e asserted after a fixed
+  5 s and lost that race in run 40927111875. Stage e and case E3 now poll up
+  to 60 s more before the same hard assertions. Case E removes the AppData it
+  created after E3.
+
 ### Verification
+
+- CI run 40929793051 (Windows): typecheck, full tests, packaging, A–D,
+  case E, old-release investigation and runtime proof all passed.
 
 - `npx tsc --noEmit -p .` clean; `npx vitest run` 912 passed / 3 skipped (94
   files); `npm run build` OK.
