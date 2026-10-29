@@ -35,9 +35,17 @@
  * vendored or skipped.
  */
 
-const { spawnSync } = require('node:child_process');
 const { existsSync } = require('node:fs');
 const path = require('node:path');
+
+const {
+  DEFAULT_PROBE_TIMEOUT_MS,
+  formatTasklistDiagnostics,
+  releaseExecutableLock,
+  runCapturedProcess,
+  spawnCapture,
+  tasklistArguments,
+} = require('./lib/packaged-process-guard.cjs');
 
 const {
   MODULE_NAME,
@@ -88,8 +96,32 @@ function readReport(stdout) {
  * machine cannot inject lookups into the packaged app's module resolution —
  * and a stray ELECTRON_NO_ASAR cannot silently disable the archive support
  * this verification relies on.
+ *
+ * R9 — the probe runs the PACKAGED executable, and electron-builder edits that
+ * same executable with rcedit immediately after this hook. The process tree is
+ * therefore run to full completion (`close`, not `exit`), killed if it exceeds
+ * the timeout, and the hook then waits until nothing runs from the packaged
+ * image and the file is writable (see scripts/lib/packaged-process-guard.cjs).
+ * Without that, rcedit dies with `Fatal error: Unable to commit changes` while
+ * the image is still locked.
  */
-function probe(electron, appOutDir, appAsarPackageJson) {
+function probeTimeoutMs() {
+  const configured = Number(process.env.DKS_PROBE_TIMEOUT_MS);
+  return Number.isFinite(configured) && configured > 0 ? configured : DEFAULT_PROBE_TIMEOUT_MS;
+}
+
+function logTasklist(imageName, label) {
+  if (process.platform !== 'win32') {
+    return;
+  }
+  const snapshot = spawnCapture('tasklist.exe', tasklistArguments(imageName));
+  console.log(formatTasklistDiagnostics({
+    imageName: `${imageName} (${label})`,
+    output: snapshot.stdout,
+  }));
+}
+
+async function probe(electron, appOutDir, appAsarPackageJson) {
   const env = {
     ...process.env,
     ELECTRON_RUN_AS_NODE: '1',
@@ -99,19 +131,43 @@ function probe(electron, appOutDir, appAsarPackageJson) {
   delete env.NODE_OPTIONS;
   delete env.ELECTRON_NO_ASAR;
 
-  const result = spawnSync(electron, [PROBE_SCRIPT, appAsarPackageJson], {
+  const result = await runCapturedProcess({
+    command: electron,
+    args: [PROBE_SCRIPT, appAsarPackageJson],
     cwd: appOutDir,
     env,
-    encoding: 'utf8',
-    maxBuffer: 20 * 1024 * 1024,
+    timeoutMs: probeTimeoutMs(),
+    imageName: path.basename(electron),
+    log: (line) => console.error(line),
   });
 
   return {
     ...readReport(result.stdout ?? ''),
     status: result.status,
-    spawnError: result.error ? String(result.error.message ?? result.error) : null,
+    timedOut: result.timedOut,
+    spawnError: result.spawnError ?? null,
     output: `${result.stdout ?? ''}\n${result.stderr ?? ''}`,
   };
+}
+
+/**
+ * `taskkill /T /F` on a timed-out probe cannot reliably be observed to have
+ * finished (the tree may already be gone), and a probe that failed on its own
+ * leaves nothing to verify — but a probe that SUCCEEDED must hand over to
+ * rcedit with the image free. Returns the guard error, or null.
+ */
+async function releasePackagedExecutable(electron) {
+  const imageName = path.basename(electron);
+  try {
+    await releaseExecutableLock({
+      exePath: electron,
+      imageName,
+      log: (line) => console.log(line),
+    });
+    return null;
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
 }
 
 function probeFailureError(appOutDir, result) {
@@ -213,9 +269,27 @@ module.exports = async function verifyPackagedNativeModules(context) {
     );
   }
 
-  const result = probe(electron, appOutDir, expected.appAsarPackageJson);
+  logTasklist(path.basename(electron), 'before the packaged-app probe');
+  const result = await probe(electron, appOutDir, expected.appAsarPackageJson);
+
+  // R9: the probe just ran the executable rcedit is about to rewrite. Always
+  // stop leftover processes and wait for the file to become writable — even
+  // when the probe failed, so the runner is left clean — and report the probe
+  // failure first when both went wrong.
+  const lockError = await releasePackagedExecutable(electron);
+
+  if (result.timedOut) {
+    throw new Error(
+      `[dks] the packaged Electron probe did not finish within ${probeTimeoutMs()}ms and was killed. `
+      + 'Raise DKS_PROBE_TIMEOUT_MS only if the machine is genuinely that slow; a probe that never '
+      + 'returns leaves the executable locked and rcedit then fails with "Unable to commit changes".',
+    );
+  }
   if (!result.ok) {
     throw probeFailureError(appOutDir, result);
+  }
+  if (lockError) {
+    throw lockError;
   }
 
   // The probe must have loaded the app's own copies, resolved through the
