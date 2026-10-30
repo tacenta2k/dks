@@ -163,6 +163,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+          # Resolved once, validated once: the dry-run branch used to print
+          # "would create it at ." because $head was only assigned inside the
+          # existing-tag branch.
+          $head = (git rev-parse HEAD).Trim()
+          if ([string]::IsNullOrWhiteSpace($head)) {
+            Write-Error "Could not resolve HEAD in $env:GITHUB_WORKSPACE — refusing to guess which commit a release would be built from."
+            exit 1
+          }
+
           if ("${{ inputs.bump }}" -eq "none") {
             $version = (node -p "require('./package.json').version").Trim()
             if ([string]::IsNullOrWhiteSpace($version)) {
@@ -184,7 +193,10 @@ jobs:
               # describe while latest.yml still says $version. Being an
               # ancestor is therefore not enough — HEAD must BE the tag commit.
               $tagCommit = (git rev-list -n 1 $tag).Trim()
-              $head = (git rev-parse HEAD).Trim()
+              if ([string]::IsNullOrWhiteSpace($tagCommit)) {
+                Write-Error "Tag $tag exists but its commit could not be resolved."
+                exit 1
+              }
               if ($tagCommit -ne $head) {
                 Write-Error "bump=none reuses tag $tag, which points at $tagCommit, but this run checked out $head. A release must build the tagged commit; packaging a newer commit under the old version would publish code the tag does not describe. Either dispatch this workflow from the tag commit (or restore main to it), or bump the version for a new release."
                 exit 1
@@ -227,24 +239,47 @@ jobs:
         run: |
           # Publishing must never overwrite an already-published release, and a
           # transient API problem must never be mistaken for "no release yet".
-          # 404 is the only answer that means "nothing exists"; everything else
-          # is reported and the release stops.
-          $output = gh api "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG" 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          if ($code -eq 0) {
-            $release = $output | ConvertFrom-Json
-            if (-not $release.draft) {
-              $assets = ($release.assets | ForEach-Object { $_.name }) -join ', '
-              Write-Error "Release $env:RELEASE_TAG already exists and is PUBLISHED (assets: $assets). Publishing again would replace that release's installer. Nothing was built or published."
-              exit 1
-            }
-            Write-Host "Draft release $env:RELEASE_TAG already exists (id $($release.id), assets: $($release.assets.Count)) — this run will complete it."
-          } elseif ($output -match 'HTTP 404') {
-            Write-Host "No release exists for $env:RELEASE_TAG — this run will create the draft release (a dry run publishes nothing)."
-          } else {
-            Write-Error "Could not confirm the release state for $env:RELEASE_TAG (gh exit $code): $($output.Trim()). Refusing to continue without knowing whether a release already exists."
+          # Only HTTP 404 means "nothing exists"; everything else stops the run.
+          #
+          # The HTTP STATUS is read from the response, never gh's exit code.
+          # Every 4xx/5xx makes gh exit non-zero, and a PowerShell step ends
+          # with `exit $LASTEXITCODE` — so the previous version of this step
+          # failed with "Process completed with exit code 1" *after* correctly
+          # deciding to proceed on 404. The proceed path now ends with an
+          # explicit `exit 0`.
+          $tag = $env:RELEASE_TAG
+          $response = gh api --include "repos/${{ github.repository }}/releases/tags/$tag" 2>&1 | Out-String
+          $status = $null
+          if ($response -match '(?m)^HTTP/[0-9.]+\s+(\d{3})') {
+            $status = [int]$Matches[1]
+          }
+          if ($null -eq $status) {
+            Write-Error "Could not determine the HTTP status of the release lookup for $tag. Refusing to continue without knowing whether a release already exists. Response: $($response.Trim())"
             exit 1
           }
+
+          if ($status -eq 200) {
+            $json = gh api "repos/${{ github.repository }}/releases/tags/$tag" 2>&1 | Out-String
+            if ($LASTEXITCODE -ne 0) {
+              Write-Error "Release $tag exists (HTTP 200) but could not be read: $($json.Trim())"
+              exit 1
+            }
+            $release = $json | ConvertFrom-Json
+            if (-not $release.draft) {
+              $assets = ($release.assets | ForEach-Object { $_.name }) -join ', '
+              Write-Error "Release $tag already exists and is PUBLISHED (assets: $assets). Publishing again would replace that release's installer. Nothing was built or published."
+              exit 1
+            }
+            Write-Host "Draft release $tag already exists (id $($release.id), assets: $($release.assets.Count)) — this run will complete it."
+          } elseif ($status -eq 404) {
+            Write-Host "No release exists for $tag (HTTP 404) — proceeding. A real run creates the draft release; a dry run publishes nothing."
+          } else {
+            Write-Error "Unexpected HTTP $status for the release lookup of $tag. Refusing to continue without knowing whether a release already exists. Response: $($response.Trim())"
+            exit 1
+          }
+
+          # Proceed path: never inherit gh's non-zero exit code for the 404.
+          exit 0
 
       - name: Write Vite build environment
         shell: pwsh
@@ -285,6 +320,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows installer and upload draft release
+        id: package
         shell: pwsh
         env:
           RELEASE_LOG: ${{ github.workspace }}\release-build.log
@@ -314,6 +350,7 @@ jobs:
             $code = $LASTEXITCODE
           }
           "PACKAGING_EXIT=$code" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "exit=$code" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           if ($code -ne 0) {
             # Name the holder while the packaging output is still on disk: the
             # rcedit message ("Unable to commit changes") never says who held it.
@@ -352,18 +389,34 @@ jobs:
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          # Defined here as well: this step runs with `always()`, so it can run
+          # when the packaging step never did — and an undefined path made
+          # Test-Path throw "Value cannot be null".
+          RELEASE_LOG: ${{ github.workspace }}\release-build.log
         run: |
           $mode = if ("${{ inputs.dry_run }}" -eq "true") { "dry run (--publish never)" } else { "publish" }
+          $tagAction = if ([string]::IsNullOrWhiteSpace($env:TAG_ACTION)) { "unknown (resolve step did not finish)" } else { $env:TAG_ACTION }
+          $packagingExit = if ([string]::IsNullOrWhiteSpace($env:PACKAGING_EXIT)) { "build step did not run" } else { $env:PACKAGING_EXIT }
           $body = @(
             "## release build evidence"
             ""
             "- mode: $mode"
-            "- tag: $env:RELEASE_TAG (action: $env:TAG_ACTION)"
+            "- tag: $env:RELEASE_TAG (action: $tagAction)"
             "- version: $env:RELEASE_VERSION"
-            "- packaging exit code: $env:PACKAGING_EXIT"
+            "- packaging exit code: $packagingExit"
           )
+
           $log = $env:RELEASE_LOG
-          if (Test-Path $log) {
+          if ([string]::IsNullOrWhiteSpace($log)) {
+            # No path at all: never pass $null to Test-Path.
+            $body += ""
+            $body += "build step did not run — no build log path was provided"
+            Write-Host "::warning::build step did not run — no build log path was provided"
+          } elseif (-not (Test-Path -LiteralPath $log)) {
+            $body += ""
+            $body += "build step did not run — no build log was written to $log"
+            Write-Host "::warning::build step did not run — no build log was written to $log"
+          } else {
             $lines = Select-String -Path $log -Pattern "rcedit|Unable to commit|Unable to load|afterPack|\[dks\]|⨯" |
               Select-Object -Last 120 |
               ForEach-Object { $_.Line.Trim() }
@@ -378,11 +431,8 @@ jobs:
                 Write-Host "::notice::release packaging: $line"
               }
             }
-          } else {
-            $body += ""
-            $body += "no $log was captured"
-            Write-Host "::error::no release build log was captured at $log"
           }
+
           $text = ($body -join "`n")
           if ($text.Length -gt 60000) { $text = $text.Substring(0, 60000) }
           try {
@@ -482,34 +532,47 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload installer artifact
+        # Only when the packaging step actually succeeded. With `always()` this
+        # step used to run even after an earlier failure, and its
+        # `if-no-files-found: error` turned a clear failure into a second,
+        # unrelated one.
+        if: ${{ steps.package.outputs.exit == '0' }}
         uses: actions/upload-artifact@v4
         with:
           name: DKS-${{ steps.version.outputs.version }}-win-x64-installer
           path: release/${{ steps.version.outputs.installer }}
-          if-no-files-found: error
+          if-no-files-found: warn
 
       - name: Write job summary
+        if: always()
         shell: pwsh
         env:
           RELEASE_VERSION: ${{ steps.version.outputs.version }}
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
           INSTALLER_NAME: ${{ steps.version.outputs.installer }}
         run: |
-          if ("${{ inputs.dry_run }}" -eq "true") {
+          # Runs with `always()`: every value may be missing when an earlier
+          # step stopped, so nothing here may assume it exists.
+          $version = if ([string]::IsNullOrWhiteSpace($env:RELEASE_VERSION)) { "unknown (resolve step did not finish)" } else { $env:RELEASE_VERSION }
+          $tagAction = if ([string]::IsNullOrWhiteSpace($env:TAG_ACTION)) { "unknown" } else { $env:TAG_ACTION }
+          $packagingExit = if ([string]::IsNullOrWhiteSpace($env:PACKAGING_EXIT)) { "build step did not run" } else { $env:PACKAGING_EXIT }
+          $dryRun = "${{ inputs.dry_run }}" -eq "true"
+
+          if ($dryRun) {
             @(
               "# DKS release DRY RUN — nothing was published"
               ""
-              "- **Version (unchanged):** $env:RELEASE_VERSION"
-              "- **Tag action:** $env:TAG_ACTION"
-              "- **Packaging exit code:** $env:PACKAGING_EXIT"
+              "- **Version (unchanged):** $version"
+              "- **Tag action:** $tagAction"
+              "- **Packaging exit code:** $packagingExit"
               "- No tag was pushed and no GitHub release was created or published."
             ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
-            exit 0
+          } else {
+            @(
+              "# DKS release published"
+              ""
+              "- **Version:** $version"
+              "- **Release:** $env:RELEASE_URL"
+              "- **Installer:** $env:INSTALLER_NAME"
+            ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
           }
-          @(
-            "# DKS release published"
-            ""
-            "- **Version:** $env:RELEASE_VERSION"
-            "- **Release:** $env:RELEASE_URL"
-            "- **Installer:** $env:INSTALLER_NAME"
-          ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8

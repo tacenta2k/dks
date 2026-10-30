@@ -1,0 +1,176 @@
+name: Release step harness (Windows)
+
+# Executes the REAL PowerShell bodies of release.yml steps from this commit and
+# checks their exit codes, without dispatching a release and without touching a
+# tag or a release.
+#
+# Why: the first dry run stopped before packaging for workflow-only reasons —
+# a `gh api` 404 left $LASTEXITCODE=1 so the "proceed" path still exited 1, the
+# dry-run branch printed an empty commit, and the evidence step threw
+# "Value cannot be null" on a missing log. Unit tests can pin the shape of the
+# YAML, but only PowerShell can prove the exit codes. This harness extracts each
+# step body verbatim, substitutes the ${{ }} expressions, appends the same
+# `exit $LASTEXITCODE` line the Actions runner appends, and runs it.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - arena/6eaa6772-dks
+
+permissions:
+  contents: write
+
+jobs:
+  harness:
+    name: Run release.yml step bodies
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies (no scripts)
+        shell: pwsh
+        run: |
+          npm ci --ignore-scripts
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Extract the step bodies from release.yml
+        shell: pwsh
+        run: |
+          $extractor = @'
+          const fs = require('fs');
+          const yaml = require('js-yaml');
+          const [,, workflowPath, outDir, sha] = process.argv;
+          const wf = yaml.load(fs.readFileSync(workflowPath, 'utf8'));
+          const steps = wf.jobs.release.steps;
+          const wrapper = [
+            "$ErrorActionPreference = 'stop'",
+            '',
+            'if ((Test-Path -LiteralPath variable:\\LASTEXITCODE)) { exit $LASTEXITCODE }',
+            '',
+          ].join('\n');
+          const wanted = {
+            'confirm-404.ps1': 'Confirm release state for the tag',
+            'confirm-published.ps1': 'Confirm release state for the tag',
+            'evidence-missing-log.ps1': 'Post release build evidence',
+            'summary-missing-outputs.ps1': 'Write job summary',
+          };
+          for (const [file, stepName] of Object.entries(wanted)) {
+            const step = steps.find((candidate) => candidate.name === stepName);
+            if (!step) { throw new Error(`missing step: ${stepName}`); }
+            let body = step.run;
+            body = body.replace(/\$\{\{\s*github\.repository\s*\}\}/g, 'tacenta2k/dks');
+            body = body.replace(/\$\{\{\s*github\.sha\s*\}\}/g, sha);
+            body = body.replace(/\$\{\{\s*inputs\.dry_run\s*\}\}/g, 'true');
+            // '$' + '{{' rather than a literal: GitHub's workflow parser treats
+            // a stray opener as an expression and rejects the whole file.
+            const opener = '$' + '{{';
+            if (body.includes(opener)) { throw new Error(`unsubstituted expression in ${file}`); }
+            fs.writeFileSync(`${outDir}/${file}`, `${wrapper}${body}\n${wrapper.split('\n')[2]}\n`);
+          }
+          console.log('extracted', Object.keys(wanted).join(', '));
+          '@
+          New-Item -ItemType Directory -Force -Path harness | Out-Null
+          $extractor | Out-File -FilePath harness/extract.cjs -Encoding utf8
+          node harness/extract.cjs .github/workflows/release.yml harness "${{ github.sha }}"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem harness | Format-Table Name, Length
+
+      - name: Run the step bodies and check their exit codes
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Each case runs the real step body with a controlled environment.
+          $cases = @(
+            @{
+              Name = '404 -> proceeds (exit 0)'
+              Script = 'harness/confirm-404.ps1'
+              Expect = 0
+              Env = @{ RELEASE_TAG = 'v0.1.11' }        # tag exists, release does not
+              MustContain = 'No release exists for v0.1.11 (HTTP 404)'
+            },
+            @{
+              Name = 'published release -> exit 1'
+              Script = 'harness/confirm-published.ps1'
+              Expect = 1
+              Env = @{ RELEASE_TAG = 'v0.1.10' }        # published, with assets
+              MustContain = 'already exists and is PUBLISHED'
+            },
+            @{
+              Name = 'missing build log -> summary still works (exit 0)'
+              Script = 'harness/evidence-missing-log.ps1'
+              Expect = 0
+              Env = @{
+                RELEASE_TAG = 'v0.1.11'
+                RELEASE_VERSION = '0.1.11'
+                RELEASE_LOG = ''                        # never set by the build step
+                TAG_ACTION = 'dry-run-would-create'
+              }
+              MustContain = 'build step did not run'
+            },
+            @{
+              Name = 'missing outputs -> job summary still works (exit 0)'
+              Script = 'harness/summary-missing-outputs.ps1'
+              Expect = 0
+              Env = @{ GITHUB_STEP_SUMMARY = "$env:RUNNER_TEMP/summary.md" }
+              # The summary writes to the step summary FILE, not to stdout.
+              SummaryFile = "$env:RUNNER_TEMP/summary.md"
+              MustContain = 'DRY RUN'
+            }
+          )
+
+          $results = @()
+          $failed = 0
+          foreach ($case in $cases) {
+            # Start from a clean slate: only the case's own variables are set.
+            Remove-Item Env:RELEASE_TAG, Env:RELEASE_VERSION, Env:RELEASE_LOG, Env:TAG_ACTION, Env:PACKAGING_EXIT -ErrorAction SilentlyContinue
+            foreach ($key in $case.Env.Keys) { Set-Item -Path "Env:$key" -Value $case.Env[$key] }
+
+            if ($case.ContainsKey('SummaryFile')) {
+              Remove-Item -LiteralPath $case.SummaryFile -Force -ErrorAction SilentlyContinue
+            }
+            $output = & pwsh -NoProfile -NonInteractive -File $case.Script 2>&1 | Out-String
+            $code = $LASTEXITCODE
+            $haystack = $output
+            if ($case.ContainsKey('SummaryFile') -and (Test-Path -LiteralPath $case.SummaryFile)) {
+              $haystack = (Get-Content -Raw -LiteralPath $case.SummaryFile)
+              Write-Host "step summary: $haystack"
+            }
+            $match = $haystack -match [regex]::Escape($case.MustContain)
+            $ok = ($code -eq $case.Expect) -and $match
+            if (-not $ok) { $failed++ }
+            $results += [pscustomobject]@{
+              Case = $case.Name
+              Exit = $code
+              Expected = $case.Expect
+              Message = $match
+              Result = if ($ok) { 'PASS' } else { 'FAIL' }
+            }
+            Write-Host "=== $($case.Name)"
+            Write-Host "exit=$code expected=$($case.Expect) message=$match"
+            Write-Host $output
+            if (-not $ok) { Write-Host "::error::harness case failed: $($case.Name)" }
+          }
+
+          $table = ($results | Format-Table -AutoSize | Out-String)
+          Write-Host $table
+          $body = "## release.yml step harness`n`n```n$table```n"
+          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) }
+          gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$body" 2>&1 | Out-Null
+
+          if ($failed -gt 0) {
+            Write-Error "$failed harness case(s) failed"
+            exit 1
+          }
+          Write-Host "all harness cases passed"
+          exit 0
