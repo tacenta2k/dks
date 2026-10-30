@@ -74,12 +74,20 @@ function describeOpen(result) {
  * of arguments WinPackager.signAndEditResources builds.
  */
 async function runRcedit(filePath) {
+  // Same argument shape electron-builder uses for win.signAndEditResources,
+  // including --set-icon: the icon is one of the things that could make the
+  // resource write itself fail, so the repeatability loop has to exercise it
+  // rather than only the version strings.
   const args = [
     filePath,
-    '--set-version-string', 'FileDescription', 'DKS',
+    '--set-version-string', 'FileDescription', 'DKS offline-first medical and visa office tracker.',
     '--set-version-string', 'ProductName', 'DKS',
+    '--set-version-string', 'LegalCopyright', 'Copyright © 2026 tacenta2k',
     '--set-file-version', '0.1.11',
-    '--set-product-version', '0.1.11',
+    '--set-product-version', '0.1.11.0',
+    '--set-version-string', 'InternalName', 'DKS',
+    '--set-version-string', 'CompanyName', 'tacenta2k',
+    '--set-icon', path.join(projectRoot, 'build', 'icon.ico'),
   ];
   try {
     // eslint-disable-next-line global-require
