@@ -664,7 +664,6 @@ describe('Restart Manager holder reporting', () => {
     expect(success.supported).toBe(true);
     expect(success.holders).toHaveLength(1);
   });
-});
 
   it('the generated PowerShell compiles: FILETIME is not imported ambiguously', () => {
     const script = holdersModule.holdersScript();
