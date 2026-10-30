@@ -330,7 +330,9 @@ describe('one-click Release DKS workflow', () => {
 
     expect(steps[artifactIndex].with).toMatchObject({
       path: 'release/${{ steps.version.outputs.installer }}',
-      'if-no-files-found': 'error',
+      // A missing installer is a warning here, not a second failure: this step
+      // can only run after the packaging step reported success.
+      'if-no-files-found': 'warn',
     });
     expect(steps[summaryIndex].run).toContain('GITHUB_STEP_SUMMARY');
     expect(steps[summaryIndex].env).toMatchObject({
@@ -407,13 +409,13 @@ describe('release state confirmation', () => {
   });
 
   it('treats only HTTP 404 as "no release exists"', () => {
-    expect(run).toContain('releases/tags/$env:RELEASE_TAG');
-    expect(run).toContain("-match 'HTTP 404'");
-    expect(run).toContain('No release exists for $env:RELEASE_TAG');
+    expect(run).toContain('releases/tags/$tag');
+    expect(run).toContain('$status -eq 404');
+    expect(run).toContain('No release exists for $tag (HTTP 404)');
     // Any other answer (auth, rate limit, outage) stops the release.
-    expect(run).toContain('Could not confirm the release state');
+    expect(run).toContain('Could not determine the HTTP status');
+    expect(run).toContain('Unexpected HTTP $status');
     expect(run).toContain('exit 1');
-    expect(run).not.toMatch(/\$code -ne 0[\s\S]{0,80}No release exists/);
   });
 
   it('refuses to publish over an existing published release and allows completing a draft', () => {
@@ -510,5 +512,129 @@ describe('dry run', () => {
     const run = steps[index].run ?? '';
     expect(run).toContain('DRY RUN — nothing was published');
     expect(run.indexOf('DRY RUN')).toBeLessThan(run.indexOf('# DKS release published'));
+  });
+});
+
+/**
+ * Regressions from the first dry run (30 Oct 2026).
+ *
+ * The dry run stopped before packaging for three workflow-only reasons — none
+ * of them in the product code:
+ *
+ *  1. "Confirm release state" decided to proceed on the 404, then the step
+ *     still exited 1, because a `gh api` 404 sets `$LASTEXITCODE = 1` and the
+ *     pwsh wrapper ends with `exit $LASTEXITCODE`.
+ *  2. The resolve step printed "would create it at ." — `$head` was only
+ *     assigned in a branch that a missing tag never reached.
+ *  3. The evidence/summary steps threw "Value cannot be null" from
+ *     `Test-Path $log` when the packaging step never ran.
+ */
+describe('dry-run workflow regressions', () => {
+  const stateIndex = stepIndex(
+    (step) => step.name === 'Confirm release state for the tag',
+    'release state confirmation',
+  );
+  const stateRun = steps[stateIndex].run ?? '';
+  const versionRun = steps[stepIndex((step) => step.name === 'Resolve version and tag', 'version resolution')].run ?? '';
+  const evidenceIndex = stepIndex((step) => step.name === 'Post release build evidence', 'evidence comment');
+  const evidenceRun = steps[evidenceIndex].run ?? '';
+  const summaryRun = steps[stepIndex((step) => step.name === 'Write job summary', 'job summary')].run ?? '';
+
+  /** Text of one PowerShell branch of a step, up to the next branch marker. */
+  function branch(text: string, marker: string, nextMarkers: string[]): string {
+    const start = text.indexOf(marker);
+    expect(start, `missing branch: ${marker}`).toBeGreaterThanOrEqual(0);
+    const rest = text.slice(start + marker.length);
+    const ends = nextMarkers
+      .map((next) => rest.indexOf(next))
+      .filter((position) => position >= 0);
+    return ends.length > 0 ? rest.slice(0, Math.min(...ends)) : rest;
+  }
+
+  it('reads the HTTP status instead of gh\'s exit code', () => {
+    expect(stateRun).toContain('gh api --include');
+    expect(stateRun).toMatch(/HTTP\/\[0-9\.\]\+/);
+    // The old code branched on $LASTEXITCODE, which any 404 makes non-zero.
+    expect(stateRun).not.toMatch(/\$code = \$LASTEXITCODE/);
+  });
+
+  it('404 — proceeds and exits 0', () => {
+    const notFound = branch(stateRun, 'elseif ($status -eq 404) {', ['} else {']);
+    expect(notFound).toContain('No release exists for $tag (HTTP 404)');
+    expect(notFound).not.toContain('exit 1');
+
+    // The step's last statement is an explicit `exit 0`, so the pwsh wrapper's
+    // `exit $LASTEXITCODE` (1, from the 404) can never decide the step's result.
+    const statements = stateRun
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0 && !line.startsWith('#'));
+    expect(statements.at(-1)).toBe('exit 0');
+  });
+
+  it('published release — fails, and never proceeds to build', () => {
+    const published = branch(stateRun, 'if (-not $release.draft) {', ['Write-Host "Draft release']);
+    expect(published).toContain('already exists and is PUBLISHED');
+    expect(published).toContain('exit 1');
+    // The proceed line lives in the *else* of the draft check, so a published
+    // release can never reach `exit 0`.
+    expect(published).not.toContain('exit 0');
+  });
+
+  it('unexpected status — fails instead of assuming "no release yet"', () => {
+    const unexpected = branch(stateRun, '} else {', ['\n          # Proceed path']);
+    expect(unexpected).toContain('Unexpected HTTP $status');
+    expect(unexpected).toContain('exit 1');
+  });
+
+  it('resolves HEAD once, before any branch can use it, and refuses an empty value', () => {
+    const headIndex = versionRun.indexOf('$head = (git rev-parse HEAD).Trim()');
+    const firstBranch = versionRun.indexOf('if ("${{ inputs.bump }}" -eq "none")');
+    expect(headIndex).toBeGreaterThanOrEqual(0);
+    expect(headIndex).toBeLessThan(firstBranch);
+    // Assigned exactly once: a second assignment would re-open the gap.
+    expect(versionRun.match(/\$head = /g)).toHaveLength(1);
+    // Guarded before use.
+    expect(versionRun).toContain('IsNullOrWhiteSpace($head)');
+    expect(versionRun.indexOf('IsNullOrWhiteSpace($head)')).toBeLessThan(
+      versionRun.indexOf('would create it at $head'),
+    );
+  });
+
+  it('the evidence step tolerates a build step that never ran', () => {
+    // The log path is defined in this step; it is not inherited from packaging.
+    expect(steps[evidenceIndex].env).toMatchObject({ RELEASE_LOG: expect.stringContaining('release-build.log') });
+    // Null-guarded before Test-Path, which rejects a null -Path.
+    expect(evidenceRun).toContain('IsNullOrWhiteSpace($log)');
+    expect(evidenceRun.indexOf('IsNullOrWhiteSpace($log)')).toBeLessThan(
+      evidenceRun.indexOf('Test-Path -LiteralPath $log'),
+    );
+    expect(evidenceRun).toContain('build step did not run');
+    // Never the unguarded form that threw "Value cannot be null".
+    expect(evidenceRun).not.toMatch(/Test-Path \$log\b/);
+  });
+
+  it('the job summary tolerates missing outputs', () => {
+    expect(String(steps[stepIndex((step) => step.name === 'Write job summary', 'job summary')].if ?? '')).toBe('always()');
+    expect(summaryRun).toContain('build step did not run');
+    expect(summaryRun).toContain('unknown (resolve step did not finish)');
+    // The dry-run claim is unconditional for a dry run, and unreachable otherwise.
+    const dryBranch = branch(summaryRun, 'if ($dryRun) {', ['} else {']);
+    expect(dryBranch).toContain('nothing was published');
+    expect(dryBranch).not.toContain('# DKS release published');
+  });
+
+  it('the installer artifact only uploads after a successful packaging step', () => {
+    const artifactIndex = stepIndex(
+      (step) => step.uses === 'actions/upload-artifact@v4'
+        && String((step.with as Record<string, unknown> | undefined)?.name ?? '').includes('installer'),
+      'installer artifact upload',
+    );
+    expect(String(steps[artifactIndex].if ?? '')).toContain("steps.package.outputs.exit == '0'");
+    expect(steps[artifactIndex].with).toMatchObject({ 'if-no-files-found': 'warn' });
+    // ...which requires the packaging step to publish that output.
+    const packageIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    expect(steps[packageIndex].id).toBe('package');
+    expect(steps[packageIndex].run).toContain('"exit=$code" | Out-File -FilePath $env:GITHUB_OUTPUT');
   });
 });
