@@ -31,8 +31,18 @@
  *      the full image path, so a developer's installed DKS at
  *      %LOCALAPPDATA%\Programs\DKS\DKS.exe is never touched — and kill its
  *      tree;
- *   3. wait until the executable can actually be opened for writing, which is
- *      exactly the precondition rcedit needs.
+ *   3. wait until the executable can be opened for writing;
+ *   4. then confirm EXCLUSIVE access (scripts/lib/exclusive-open.cjs), which is
+ *      what rcedit really needs.
+ *
+ * Step 3 alone is NOT enough, and this module does not claim it prevents
+ * rcedit failures. Measured on a Windows runner: while another process holds
+ * the exe with FileShare.ReadWrite, the open-for-write in step 3 SUCCEEDS and
+ * rcedit still fails ("Unable to load file"), because rcedit opens the image
+ * with no sharing. Step 4 closes that gap; when it cannot run (no PowerShell,
+ * restricted policy), the log says the guarantee is the weaker "writable" one,
+ * and the Restart Manager holder report is the diagnostic that names whoever
+ * is actually holding the file.
  *
  * Every step logs `tasklist` diagnostics, and every wait is bounded: the hook
  * fails with a message that names the problem instead of letting rcedit fail
@@ -49,6 +59,7 @@ const { closeSync, openSync } = require('node:fs');
 const path = require('node:path');
 
 const { findFileHolders, formatHolders, writeHoldersScript } = require('./file-holders.cjs');
+const { createExclusiveOpenProbe } = require('./exclusive-open.cjs');
 
 /** How long to keep sweeping processes created from the packaged exe. */
 const DEFAULT_PROCESS_SWEEP_TIMEOUT_MS = 20_000;
@@ -204,6 +215,16 @@ function openForWrite(filePath) {
  * `onRetry` receives every failed attempt so the build log shows what is
  * holding the file.
  */
+/**
+ * `EBUSY` alone says nothing about *why*; the message carries "exclusive
+ * access is blocked (IOException: …)" or the open error. Keep both.
+ */
+function describeFailure(error) {
+  const code = error && error.code ? `${error.code}: ` : '';
+  const message = error && error.message ? error.message : String(error);
+  return `${code}${message}`.replace(/\s+/g, ' ').trim();
+}
+
 async function waitForExecutableUnlocked(options) {
   const {
     exePath,
@@ -213,6 +234,10 @@ async function waitForExecutableUnlocked(options) {
     sleep = delay,
     onRetry,
     now = Date.now,
+    // Awaited after a successful open. It may throw to report that the file is
+    // still not usable (e.g. exclusive access is blocked by another handle);
+    // that is treated exactly like a failed open, with the same bounded retry.
+    verifyUnlocked = null,
   } = options;
   const startedAt = now();
   let attempts = 0;
@@ -221,6 +246,9 @@ async function waitForExecutableUnlocked(options) {
     let failure = null;
     try {
       openFile(exePath);
+      if (verifyUnlocked) {
+        await verifyUnlocked(exePath);
+      }
     } catch (error) {
       failure = error;
     }
@@ -231,9 +259,10 @@ async function waitForExecutableUnlocked(options) {
       const waited = Math.round((now() - startedAt) / 1000);
       throw new Error(
         `[dks] ${path.basename(exePath)} is still in use after ${waited}s `
-        + `(open for write failed ${attempts}×: ${failure.code ?? failure.message}). `
-        + 'electron-builder edits the executable with rcedit right after afterPack, and rcedit '
-        + 'fails with "Fatal error: Unable to commit changes" while any process still runs from it. '
+        + `(the last of ${attempts} checks failed: ${describeFailure(failure)}). `
+        + 'electron-builder edits the executable with rcedit right after afterPack. rcedit opens it '
+        + 'with no sharing, so it fails with "Fatal error: Unable to commit changes" while any process '
+        + 'still runs from it, and with "Unable to load file" while any other handle is open. '
         + 'A packaged-app probe or a DKS instance started from release\\win-unpacked did not exit — '
         + 'see the tasklist diagnostics above.',
       );
@@ -321,6 +350,46 @@ async function releaseExecutableLock(options) {
     await tasklistSnapshot('before rcedit');
   }
 
+  // Step 4: an open for writing is not rcedit's precondition — exclusive access
+  // is (see exclusive-open.cjs). Bounded by the same deadline, probed at most
+  // once a second because each probe starts a PowerShell process.
+  // `exclusiveProbe` is injectable (tests, and any caller that already has a
+  // stronger check); by default it runs the PowerShell exclusive-open check.
+  const probeExclusive = options.exclusiveProbe ?? createExclusiveOpenProbe({
+    platform,
+    run: options.exclusiveRun,
+    writeScript: options.exclusiveScript,
+    log,
+  });
+  let lastExclusive = null;
+  let lastExclusiveAt = -Infinity;
+  let exclusiveUnavailable = false;
+  const verifyUnlocked = platform === 'win32'
+    ? async () => {
+      if (now() - lastExclusiveAt < 1_000 && lastExclusive !== null) {
+        // Recent answer: reuse it instead of spawning another PowerShell.
+        if (lastExclusive.exclusive === false) {
+          throw Object.assign(
+            new Error(`exclusive access is blocked (${lastExclusive.reason})`),
+            { code: 'EBUSY' },
+          );
+        }
+        return;
+      }
+      lastExclusiveAt = now();
+      lastExclusive = await probeExclusive(exePath);
+      if (lastExclusive.supported && lastExclusive.exclusive === false) {
+        throw Object.assign(
+          new Error(`exclusive access is blocked (${lastExclusive.reason})`),
+          { code: 'EBUSY' },
+        );
+      }
+      if (!lastExclusive.supported) {
+        exclusiveUnavailable = true;
+      }
+    }
+    : null;
+
   let lastHolderReport = null;
   // Diagnostics only: a failed lookup is logged and must never change whether
   // the build continues, nor mask the timeout error it is meant to explain.
@@ -351,10 +420,11 @@ async function releaseExecutableLock(options) {
     openFile,
     sleep,
     now,
+    verifyUnlocked,
     onRetry: async ({ attempt, error }) => {
       log(
         `[dks] ${path.basename(exePath)} still locked (attempt ${attempt}: `
-        + `${error.code ?? error.message}) — waiting ${pollIntervalMs}ms before the next check`,
+        + `${describeFailure(error)}) — waiting ${pollIntervalMs}ms before the next check`,
       );
       if (platform === 'win32' && (attempt === 1 || attempt % 8 === 0)) {
         await tasklistSnapshot(`while locked, attempt ${attempt}`);
@@ -373,11 +443,28 @@ async function releaseExecutableLock(options) {
     error.message = `${error.message}${detail}`;
     throw error;
   });
-  log(
-    `[dks] ${path.basename(exePath)} is writable (checked ${unlocked.attempts}×, `
-    + `${unlocked.waitedMs}ms) — safe for rcedit`,
-  );
-  return { ...unlocked, holderReport: lastHolderReport };
+  const name = path.basename(exePath);
+  if (lastExclusive && lastExclusive.supported && lastExclusive.exclusive === true) {
+    log(
+      `[dks] ${name} is writable AND exclusively accessible (checked ${unlocked.attempts}×, `
+      + `${unlocked.waitedMs}ms) — rcedit's precondition is confirmed`,
+    );
+  } else {
+    // Never dress the weaker check up as a guarantee: measurement showed a
+    // third-party handle can permit writes and still make rcedit fail.
+    log(
+      `[dks] ${name} is writable (checked ${unlocked.attempts}×, ${unlocked.waitedMs}ms), but `
+      + 'exclusive access could not be verified'
+      + (lastExclusive && lastExclusive.reason ? ` (${lastExclusive.reason})` : '')
+      + ' — this is the weaker check; rcedit can still fail while another handle is open',
+    );
+  }
+  return {
+    ...unlocked,
+    holderReport: lastHolderReport,
+    exclusive: lastExclusive,
+    exclusiveUnavailable,
+  };
 }
 
 /** Async spawn that captures output (used for taskkill / process listing). */

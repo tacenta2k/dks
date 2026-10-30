@@ -67,6 +67,12 @@ const holdersModule = require2(join(ROOT, 'scripts', 'lib', 'file-holders.cjs'))
   }>;
 };
 
+/**
+ * The exclusive-access check spawns PowerShell, so it is stubbed everywhere;
+ * the real semantics are covered by the dedicated tests below.
+ */
+const exclusiveOk = async () => ({ supported: true, exclusive: true, reason: null });
+
 /** Holder lookups are stubbed everywhere: the real one spawns PowerShell. */
 const noHolders = async () => ({ supported: true, holders: [] as unknown[], output: '', reason: null });
 
@@ -241,6 +247,7 @@ describe('packaged-process guard — release before rcedit', () => {
       tasklist,
       findHolders: noHolders,
       writeHolders: () => null,
+      exclusiveProbe: exclusiveOk,
       processSweepTimeoutMs: 5_000,
       unlockTimeoutMs: 5_000,
       pollIntervalMs: 0,
@@ -285,6 +292,7 @@ describe('packaged-process guard — release before rcedit', () => {
       tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
       findHolders: noHolders,
       writeHolders: () => null,
+      exclusiveProbe: exclusiveOk,
       processSweepTimeoutMs: 1_000,
       unlockTimeoutMs: 1_000,
       pollIntervalMs: 250,
@@ -549,6 +557,7 @@ describe('Restart Manager holder reporting', () => {
       tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
       findHolders,
       writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
       unlockTimeoutMs: 5_000,
       pollIntervalMs: 250,
     });
@@ -583,6 +592,7 @@ describe('Restart Manager holder reporting', () => {
         reason: null,
       }),
       writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
       unlockTimeoutMs: 1_000,
       pollIntervalMs: 500,
     }).then(() => null, (caught: Error) => caught);
@@ -614,6 +624,7 @@ describe('Restart Manager holder reporting', () => {
         throw new Error('rstrtmgr.dll unavailable');
       },
       writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
       unlockTimeoutMs: 5_000,
       pollIntervalMs: 250,
     });
@@ -676,5 +687,123 @@ describe('Restart Manager holder reporting', () => {
     expect(script).toContain('RmRegisterResources');
     expect(script).toContain('RmGetList');
     expect(script).toContain('RmEndSession');
+  });
+});
+
+/**
+ * Exclusive access is rcedit's real precondition.
+ *
+ * Measured on a Windows runner (scripts/diagnostics/packaging-lock-probe.cjs):
+ * a third-party handle with FileShare.ReadWrite lets the open-for-write in the
+ * old check succeed, and rcedit still fails — it opens the image with no
+ * sharing at all. The guard therefore confirms exclusive access after the
+ * cheap check, and never claims the weaker check is a guarantee.
+ */
+describe('exclusive access (rcedit\'s real precondition)', () => {
+  const exePath = 'C:\\build\\release\\win-unpacked\\DKS.exe';
+  const baseOptions = {
+    exePath,
+    imageName: 'DKS.exe',
+    platform: 'win32' as const,
+    run: async () => ({ status: 0, stdout: '', stderr: '', error: null }),
+    tasklist: () => ({ status: 0, stdout: '', stderr: '', error: null }),
+    findHolders: noHolders,
+    writeHolders: () => null,
+  };
+
+  it('keeps waiting while a handle blocks exclusive access, then confirms it', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    let answers = 0;
+    const result = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log,
+      sleep: async () => {
+        clock += 1_500;
+      },
+      now: () => clock,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => {
+        answers += 1;
+        return answers === 1
+          ? { supported: true, exclusive: false, reason: 'IOException: The process cannot access the file' }
+          : { supported: true, exclusive: true, reason: null };
+      },
+      unlockTimeoutMs: 10_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(result.exclusive).toMatchObject({ supported: true, exclusive: true });
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('exclusive access is blocked');
+    expect(logged).toContain("rcedit's precondition is confirmed");
+    expect(logged).not.toContain('safe for rcedit');
+  });
+
+  it('fails with the exclusive-access reason when it never clears, naming the holder', async () => {
+    let clock = 0;
+    const error = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log: vi.fn(),
+      sleep: async () => {
+        clock += 1_500;
+      },
+      now: () => clock,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => ({
+        supported: true,
+        exclusive: false,
+        reason: 'IOException: The process cannot access the file',
+      }),
+      findHolders: async () => ({
+        supported: true,
+        holders: [{ pid: 4242, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+        output: '',
+        reason: null,
+      }),
+      unlockTimeoutMs: 3_000,
+      pollIntervalMs: 250,
+    }).then(() => null, (caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain('exclusive access is blocked');
+    expect(error?.message).toContain('pid 4242 MsMpEng.exe');
+  });
+
+  it('degrades to the weaker check when the probe cannot run — and says so', async () => {
+    const log = vi.fn();
+    const result = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log,
+      sleep: tick,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => ({ supported: false, exclusive: null, reason: 'no PowerShell' }),
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.exclusiveUnavailable).toBe(true);
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('is writable');
+    expect(logged).toContain('exclusive access could not be verified');
+    expect(logged).toContain('rcedit can still fail');
+    expect(logged).not.toContain("rcedit's precondition is confirmed");
+  });
+
+  it('does not run the exclusive check outside Windows', async () => {
+    const exclusiveProbe = vi.fn();
+    await guard.releaseExecutableLock({
+      ...baseOptions,
+      platform: 'linux',
+      exePath: '/tmp/linux-unpacked/DKS',
+      log: vi.fn(),
+      sleep: tick,
+      openFile: vi.fn(),
+      exclusiveProbe,
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+    expect(exclusiveProbe).not.toHaveBeenCalled();
   });
 });
