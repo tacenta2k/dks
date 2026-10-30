@@ -27,22 +27,27 @@
 
 :root[data-theme='dark'] {
   color-scheme: dark;
-  --color-background: #111623;
-  --color-surface: #171e2f;
-  --color-surface-raised: #1d2639;
-  --color-surface-muted: #222c40;
-  --color-border: #2b3850;
-  --color-border-strong: #3b4a66;
-  --color-text: #eef2fa;
-  --color-text-muted: #a9b6cb;
-  --color-text-subtle: #74829b;
-  --color-primary: #8490ff;
-  --color-primary-strong: #9aa3ff;
-  --color-primary-soft: #272e58;
-  --color-success: #4fcea0;
-  --color-success-soft: #173d35;
-  --color-shadow: rgba(0, 0, 0, 0.22);
-  --color-shadow-strong: rgba(0, 0, 0, 0.36);
+  --color-background: #000000;
+  --color-surface: #0a0a0a;
+  --color-surface-raised: #171717;
+  --color-surface-muted: #141414;
+  --color-border: #222222;
+  --color-border-strong: #3d3d3d;
+  --color-text: #f5f5f5;
+  --color-text-muted: #b5b5b5;
+  --color-text-subtle: #949494;
+  --color-primary: #6b8afd;
+  --color-primary-strong: #e5e5e5;
+  --color-primary-soft: #1a1a1a;
+  --color-primary-contrast: #0a0a0a;
+  --color-cta-bg: #ededed;
+  --color-cta-hover: #f5f5f5;
+  --color-success: #3fc07a;
+  --color-success-soft: #0d2618;
+  --color-danger: #f87171;
+  --color-warning-text: #fde68a;
+  --color-shadow: rgba(0, 0, 0, 0.55);
+  --color-shadow-strong: rgba(0, 0, 0, 0.78);
 }
 
 * {
@@ -682,7 +687,7 @@ button:focus-visible {
   width: 100%;
   min-height: 0;
   margin: 0;
-  padding: 20px calc(max(0px, (100% - 1280px) / 2) + clamp(18px, 3.5vw, 44px)) 32px;
+  padding: 14px calc(max(0px, (100% - 1280px) / 2) + clamp(18px, 3.5vw, 44px)) 18px;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -1803,3 +1808,105 @@ button:focus-visible {
 }
 .office-approvals__actions { display: flex; gap: 6px; }
 .office-approvals__actions .button { padding: 4px 10px; font-size: 0.85rem; }
+
+.button--ghost {
+  min-height: 34px;
+  padding: 6px 12px;
+  border-color: var(--color-border-strong);
+  border-radius: 8px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.button--ghost:hover:not(:disabled) {
+  background: var(--color-surface-muted);
+}
+
+/* ---------------------------------------------------------------------------
+   AMOLED pure-black dark mode overrides — flat tone steps & crisp neutral
+   borders, zero decorative radial gradients or colored button glows.
+   Light mode rules above remain completely untouched.
+   --------------------------------------------------------------------------- */
+:root[data-theme='dark'] .top-bar {
+  background: var(--color-surface);
+}
+
+:root[data-theme='dark'] .nav-item--active {
+  background: var(--color-primary-soft);
+  color: var(--color-text);
+  box-shadow: inset 0 0 0 1px var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .avatar {
+  background: var(--color-surface-raised);
+  border-color: var(--color-surface);
+  box-shadow: 0 0 0 1px var(--color-border-strong);
+  color: var(--color-text);
+}
+
+:root[data-theme='dark'] .login-page,
+:root[data-theme='dark'] .startup-splash,
+:root[data-theme='dark'] .office-approval-gate {
+  background: var(--color-background);
+}
+
+:root[data-theme='dark'] .login-card,
+:root[data-theme='dark'] .office-approval-card,
+:root[data-theme='dark'] .placeholder-panel {
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .button--primary {
+  background: var(--color-cta-bg);
+  border-color: var(--color-cta-bg);
+  box-shadow: none;
+  color: var(--color-primary-contrast);
+}
+
+:root[data-theme='dark'] .button--primary:hover:not(:disabled) {
+  background: var(--color-cta-hover);
+  border-color: var(--color-cta-hover);
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .topbar-update__button--primary {
+  background: var(--color-cta-bg);
+  border-color: var(--color-cta-bg);
+  color: var(--color-primary-contrast);
+}
+
+:root[data-theme='dark'] .topbar-update__button--primary:hover:not(:disabled) {
+  background: var(--color-cta-hover);
+  color: var(--color-primary-contrast);
+  filter: none;
+}
+
+:root[data-theme='dark'] .button--danger {
+  background: #c9332b;
+  box-shadow: none;
+  color: #f5f5f5;
+}
+
+:root[data-theme='dark'] .button--danger:hover:not(:disabled) {
+  background: #dc3c33;
+}
+
+:root[data-theme='dark'] .confirm-dialog-backdrop {
+  background: rgba(0, 0, 0, 0.76);
+}
+
+:root[data-theme='dark'] .confirm-dialog,
+:root[data-theme='dark'] .topbar-sync__popover,
+:root[data-theme='dark'] .topbar-avatar__popup,
+:root[data-theme='dark'] .notification-bell__panel,
+:root[data-theme='dark'] .audit-log-details {
+  border-color: var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .confirm-dialog__error {
+  color: #fca5a5;
+}
+

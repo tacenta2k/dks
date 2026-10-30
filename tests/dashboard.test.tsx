@@ -1,5 +1,7 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { DashboardPage } from '../src/features/dashboard/DashboardPage';
@@ -171,5 +173,35 @@ describe('dashboard page', () => {
     );
 
     expect(summary.nextTwelveMonths[1]).toMatchObject({ key: '2027-01', month: 'Jan 2027', count: 1 });
+  });
+
+  it('uses a dense 5+4 desktop card grid, side-by-side status breakdown, and active urgency markers', async () => {
+    const repository = createInMemorySheetRepository();
+    await seedFixtureColumns(repository);
+    await repository.createRow({ visa_expiry: '2025-12-31' });
+    await repository.createRow({ visa_expiry: '2026-01-01' });
+
+    const { container } = render(<DashboardPage repository={repository} today="2026-01-01" />);
+
+    const expiredCard = await screen.findByTestId('dashboard-card-expired');
+    const todayCard = screen.getByTestId('dashboard-card-today');
+    const weekCard = screen.getByTestId('dashboard-card-week');
+
+    expect(expiredCard).toHaveAttribute('data-alert', 'active');
+    expect(todayCard).toHaveAttribute('data-alert', 'active');
+    expect(weekCard).not.toHaveAttribute('data-alert');
+    expect(container.querySelector('.dashboard-status-body')).not.toBeNull();
+
+    const css = readFileSync(
+      resolve(__dirname, '../src/features/dashboard/dashboard.css'),
+      'utf8',
+    );
+    expect(css).toMatch(/\.dashboard-cards\s*\{[^}]*grid-template-columns:\s*repeat\(20,\s*minmax\(0,\s*1fr\)\)/s);
+    expect(css).toMatch(/\.dashboard-card:nth-child\(-n \+ 5\)\s*\{[^}]*grid-column:\s*span 4/s);
+    expect(css).toMatch(/\.dashboard-card:nth-child\(n \+ 6\)\s*\{[^}]*grid-column:\s*span 5/s);
+    expect(css).toMatch(/\.dashboard-card\s*\{[^}]*min-height:\s*74px/s);
+    expect(css).toMatch(/\.dashboard-status-body\s*\{[^}]*display:\s*flex/s);
+    expect(css).toContain('@media (max-width: 1040px)');
+    expect(css).toContain('@media (max-width: 680px)');
   });
 });

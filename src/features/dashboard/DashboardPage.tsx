@@ -44,6 +44,24 @@ interface DashboardRefreshFeedback {
   message: string;
 }
 
+const CHART_TOOLTIP_STYLE = {
+  backgroundColor: 'var(--color-surface-raised)',
+  borderColor: 'var(--color-border-strong)',
+  borderRadius: '8px',
+  color: 'var(--color-text)',
+  fontSize: '12px',
+  boxShadow: '0 8px 20px var(--color-shadow)',
+};
+
+const CHART_TOOLTIP_ITEM_STYLE = {
+  color: 'var(--color-text)',
+};
+
+const CHART_TOOLTIP_LABEL_STYLE = {
+  color: 'var(--color-text-muted)',
+  fontWeight: 600,
+};
+
 function emptySummary(): DashboardSummary {
   return getDashboardSummary([], [], {});
 }
@@ -184,19 +202,23 @@ export function DashboardPage({
       ) : null}
 
       <section className="dashboard-cards" aria-label="Expiry summary">
-        {summary.cards.map((card) => (
-          <button
-            className={`dashboard-card dashboard-card--${card.id}`}
-            data-testid={cardTestId(card.id)}
-            type="button"
-            key={card.id}
-            aria-label={`${card.label}: ${card.count}`}
-            onClick={() => onFilter?.(card.id)}
-          >
-            <span className="dashboard-card__label">{card.label}</span>
-            <strong className="dashboard-card__value">{card.count}</strong>
-          </button>
-        ))}
+        {summary.cards.map((card) => {
+          const isUrgentCard = card.id === 'expired' || card.id === 'expiresToday';
+          return (
+            <button
+              className={`dashboard-card dashboard-card--${card.id}`}
+              data-testid={cardTestId(card.id)}
+              data-alert={isUrgentCard && card.count > 0 ? 'active' : undefined}
+              type="button"
+              key={card.id}
+              aria-label={`${card.label}: ${card.count}`}
+              onClick={() => onFilter?.(card.id)}
+            >
+              <span className="dashboard-card__label">{card.label}</span>
+              <strong className="dashboard-card__value">{card.count}</strong>
+            </button>
+          );
+        })}
       </section>
 
       <section className="dashboard-chart-grid" aria-label="Dashboard charts">
@@ -208,35 +230,42 @@ export function DashboardPage({
             </div>
             <span className="dashboard-panel__meta">Active entries</span>
           </div>
-          <div className="dashboard-chart dashboard-chart--pie" role="img" aria-label="Status breakdown">
-            <PieChart width={280} height={230}>
-              <Pie
-                data={summary.statusPie}
-                dataKey="value"
-                nameKey="name"
-                cx="50%"
-                cy="50%"
-                innerRadius={55}
-                outerRadius={85}
-                paddingAngle={2}
-                stroke="none"
-              >
-                {summary.statusPie.map((entry) => <Cell fill={entry.color} key={entry.name} />)}
-              </Pie>
-              <Tooltip />
-            </PieChart>
+          <div className="dashboard-status-body">
+            <div className="dashboard-chart dashboard-chart--pie" role="img" aria-label="Status breakdown">
+              <PieChart width={172} height={172}>
+                <Pie
+                  data={summary.statusPie}
+                  dataKey="value"
+                  nameKey="name"
+                  cx="50%"
+                  cy="50%"
+                  innerRadius={46}
+                  outerRadius={72}
+                  paddingAngle={2}
+                  stroke="var(--color-surface)"
+                  strokeWidth={1.5}
+                >
+                  {summary.statusPie.map((entry) => <Cell fill={entry.color} key={entry.name} />)}
+                </Pie>
+                <Tooltip
+                  contentStyle={CHART_TOOLTIP_STYLE}
+                  itemStyle={CHART_TOOLTIP_ITEM_STYLE}
+                  labelStyle={CHART_TOOLTIP_LABEL_STYLE}
+                />
+              </PieChart>
+            </div>
+            <ul className="dashboard-legend" aria-label="Status counts">
+              {summary.statusPie.map((entry) => (
+                <li key={entry.name}>
+                  <span className="dashboard-legend__name">
+                    <span className="dashboard-legend__swatch" style={{ backgroundColor: entry.color }} aria-hidden="true" />
+                    {entry.name}
+                  </span>
+                  <strong>{entry.value}</strong>
+                </li>
+              ))}
+            </ul>
           </div>
-          <ul className="dashboard-legend" aria-label="Status counts">
-            {summary.statusPie.map((entry) => (
-              <li key={entry.name}>
-                <span className="dashboard-legend__name">
-                  <span className="dashboard-legend__swatch" style={{ backgroundColor: entry.color }} aria-hidden="true" />
-                  {entry.name}
-                </span>
-                <strong>{entry.value}</strong>
-              </li>
-            ))}
-          </ul>
         </article>
 
         <article className="dashboard-panel dashboard-panel--wide">
@@ -248,12 +277,17 @@ export function DashboardPage({
             <span className="dashboard-panel__meta">Upcoming expiries</span>
           </div>
           <div className="dashboard-chart dashboard-chart--bar" role="img" aria-label="Expiries over the next 12 months">
-            <BarChart width={640} height={270} data={summary.nextTwelveMonths} margin={{ top: 10, right: 10, left: -18, bottom: 8 }}>
+            <BarChart width={640} height={206} data={summary.nextTwelveMonths} margin={{ top: 8, right: 8, left: -20, bottom: 4 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--color-border)" />
-              <XAxis dataKey="month" tick={{ fill: 'var(--color-text-muted)', fontSize: 10 }} interval={0} angle={-35} textAnchor="end" height={55} />
-              <YAxis allowDecimals={false} tick={{ fill: 'var(--color-text-muted)', fontSize: 10 }} />
-              <Tooltip />
-              <Bar dataKey="count" name="Expiries" fill="var(--color-primary)" radius={[5, 5, 0, 0]} />
+              <XAxis dataKey="month" tick={{ fill: 'var(--color-text-muted)', fontSize: 10.5 }} interval={0} angle={-30} textAnchor="end" height={42} />
+              <YAxis allowDecimals={false} tick={{ fill: 'var(--color-text-muted)', fontSize: 10.5 }} />
+              <Tooltip
+                cursor={{ fill: 'var(--color-surface-muted)' }}
+                contentStyle={CHART_TOOLTIP_STYLE}
+                itemStyle={CHART_TOOLTIP_ITEM_STYLE}
+                labelStyle={CHART_TOOLTIP_LABEL_STYLE}
+              />
+              <Bar dataKey="count" name="Expiries" fill="var(--color-primary)" radius={[4, 4, 0, 0]} />
             </BarChart>
           </div>
         </article>
