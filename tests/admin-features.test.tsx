@@ -77,7 +77,7 @@ describe('admin renderer integration', () => {
     expect(screen.queryByText(/administrator tools/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/manage records/i)).not.toBeInTheDocument();
     // The Tools menu is its own lazy chunk, so wait for it to mount.
-    expect(await screen.findByRole('button', { name: /^Tools/ }, { timeout: 10_000 })).toBeInTheDocument();
+    expect(await screen.findByRole('button', { name: /^Tools/ })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
@@ -160,7 +160,7 @@ describe('admin renderer integration', () => {
 
     await waitFor(async () => {
       expect((await repository.getRows()).some((row) => row.data.name === 'Grace Hopper')).toBe(true);
-    }, { timeout: 10_000 });
+    });
   }, 30_000);
 
   it('delegates print and PDF report actions from the report modal', async () => {
@@ -178,7 +178,7 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    fireEvent.click(await screen.findByRole('button', { name: /^Tools/ }, { timeout: 10_000 }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Tools/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Print / PDF report' }));
     // R7: the report opens once the toolbar snapshot is loaded.
     expect(await screen.findByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
@@ -188,7 +188,7 @@ describe('admin renderer integration', () => {
     await waitFor(() => {
       expect(onPrint).toHaveBeenCalledWith(expect.objectContaining({ header: 'DKS Expiry Report' }));
       expect(onSavePdf).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'dks-report.pdf' }));
-    }, { timeout: 10_000 });
+    });
   }, 30_000);
 
   it('lists deleted rows and confirms restore and permanent delete actions', async () => {
@@ -226,7 +226,7 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
     // S3: friendly action names (raw code "create" is no longer shown).
-    expect(within(await screen.findByRole('table', {}, { timeout: 10_000 })).getByText('Created record')).toBeInTheDocument();
+    expect(within(await screen.findByRole('table')).getByText('Created record')).toBeInTheDocument();
   }, 30_000);
 
 describe('imported date columns (Blocker 2, integration)', () => {
