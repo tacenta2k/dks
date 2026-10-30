@@ -16,6 +16,7 @@ import { ConfirmDialog } from '../ui/ConfirmDialog';
 import type { OfficeSessionSignOutSummary } from '../auth/office-approval-service';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
 import { prefetchEmailNotificationPrefs, type EmailPrefsClient } from './email-preferences';
+import { currencySymbolDirection } from './currency-symbol';
 import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -803,7 +804,21 @@ export function SettingsPage({
                 </label>
                 <label className="settings-field">
                   <span>Currency symbol</span>
-                  <input aria-label="Currency symbol" type="text" value={settings.currency.symbol} onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, symbol: event.target.value } }))} />
+                  {/*
+                    The symbol is Arabic (ر.ع.) by default. Inside this LTR form
+                    an LTR paragraph direction moves the trailing full stop to
+                    the wrong end, so the field declares its own direction from
+                    its own value — like dir="auto", but deterministic and
+                    testable. Latin symbols ($, OMR, USD, €) stay LTR. The value
+                    is never reordered and no bidi marks are added.
+                  */}
+                  <input
+                    aria-label="Currency symbol"
+                    type="text"
+                    dir={currencySymbolDirection(settings.currency.symbol)}
+                    value={settings.currency.symbol}
+                    onChange={(event) => updateSettings((current) => ({ ...current, currency: { ...current.currency, symbol: event.target.value } }))}
+                  />
                 </label>
                 <label className="settings-field">
                   <span>Currency decimals</span>
