@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { DashboardPage } from '../src/features/dashboard/DashboardPage';
 import { getDashboardSummary } from '../src/features/dashboard/selectors';
 import { createInMemorySheetRepository } from '../src/features/sheet/repository';
+import { contentClassNameForView } from '../src/renderer/components/AppShell';
 import { seedFixtureColumns } from './fixtures/sheet-columns';
 
 describe('dashboard page', () => {
@@ -199,9 +200,94 @@ describe('dashboard page', () => {
     expect(css).toMatch(/\.dashboard-cards\s*\{[^}]*grid-template-columns:\s*repeat\(20,\s*minmax\(0,\s*1fr\)\)/s);
     expect(css).toMatch(/\.dashboard-card:nth-child\(-n \+ 5\)\s*\{[^}]*grid-column:\s*span 4/s);
     expect(css).toMatch(/\.dashboard-card:nth-child\(n \+ 6\)\s*\{[^}]*grid-column:\s*span 5/s);
-    expect(css).toMatch(/\.dashboard-card\s*\{[^}]*min-height:\s*74px/s);
+    expect(css).toMatch(/\.dashboard-card\s*\{[^}]*min-height:\s*clamp\(82px,\s*8\.8vh,\s*98px\)/s);
     expect(css).toMatch(/\.dashboard-status-body\s*\{[^}]*display:\s*flex/s);
+    expect(css).toMatch(/\.dashboard-chart-grid\s*\{[^}]*flex:\s*1 0 310px/s);
+    expect(css).not.toMatch(/overflow:\s*hidden/);
     expect(css).toContain('@media (max-width: 1040px)');
+    expect(css).toContain('@media (max-width: 960px)');
     expect(css).toContain('@media (max-width: 680px)');
+  });
+
+  it('keeps empty expiry repositories truthful without inventing chart values', async () => {
+    const repository = createInMemorySheetRepository();
+    await seedFixtureColumns(repository);
+    await repository.createRow({ name: 'Undated record' });
+
+    render(<DashboardPage repository={repository} today="2026-01-01" />);
+
+    expect(await screen.findByTestId('dashboard-card-total')).toHaveTextContent('1');
+    expect(screen.getByText('No expiry data yet')).toBeInTheDocument();
+    const legendItems = Array.from(
+      screen.getByRole('list', { name: 'Status counts' }).querySelectorAll('strong'),
+    ).map((node) => node.textContent);
+    expect(legendItems).toEqual(['0', '0', '0', '0', '0']);
+  });
+
+  it('scales pie and forecast SVG dimensions to measured container sizes via ResizeObserver', async () => {
+    const callbacks = new Map<Element, ResizeObserverCallback>();
+    const OriginalResizeObserver = globalThis.ResizeObserver;
+
+    class MockResizeObserver {
+      private readonly cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+      }
+      observe(target: Element) {
+        callbacks.set(target, this.cb);
+      }
+      unobserve(target: Element) {
+        callbacks.delete(target);
+      }
+      disconnect() {}
+    }
+
+    globalThis.ResizeObserver = MockResizeObserver as unknown as typeof ResizeObserver;
+    try {
+      const repository = createInMemorySheetRepository();
+      await seedFixtureColumns(repository);
+      await repository.createRow({ visa_expiry: '2026-02-15' });
+
+      render(<DashboardPage repository={repository} today="2026-01-01" />);
+      await screen.findByTestId('dashboard-card-total');
+
+      const pieHost = screen.getByRole('img', { name: 'Status breakdown' });
+      const barHost = screen.getByRole('img', { name: 'Expiries over the next 12 months' });
+
+      act(() => {
+        callbacks.get(pieHost)?.(
+          [{ contentRect: { width: 300, height: 310 } } as ResizeObserverEntry],
+          {} as ResizeObserver,
+        );
+        callbacks.get(barHost)?.(
+          [{ contentRect: { width: 940, height: 420 } } as ResizeObserverEntry],
+          {} as ResizeObserver,
+        );
+      });
+
+      const pieSvg = pieHost.querySelector('svg');
+      const barSvg = barHost.querySelector('svg');
+      expect(pieSvg).toHaveAttribute('width', '300');
+      expect(pieSvg).toHaveAttribute('height', '300');
+      expect(barSvg).toHaveAttribute('width', '940');
+      expect(barSvg).toHaveAttribute('height', '420');
+    } finally {
+      globalThis.ResizeObserver = OriginalResizeObserver;
+    }
+  });
+
+  it('scopes wider container modifiers to data-heavy pages while keeping Settings readable and Sheet full-width', () => {
+    expect(contentClassNameForView('dashboard')).toBe('content content--wide content--dashboard');
+    expect(contentClassNameForView('recycle-bin')).toBe('content content--wide');
+    expect(contentClassNameForView('audit-log')).toBe('content content--wide');
+    expect(contentClassNameForView('settings')).toBe('content');
+    expect(contentClassNameForView('sheet')).toBe('content content--sheet');
+
+    const shellCss = readFileSync(
+      resolve(__dirname, '../src/renderer/styles.css'),
+      'utf8',
+    );
+    expect(shellCss).toMatch(/\.content\.content--wide\s*\{[^}]*--content-wide-max:\s*1680px/s);
+    expect(shellCss).toMatch(/\.content\.content--dashboard\s*\{[^}]*display:\s*flex/s);
   });
 });

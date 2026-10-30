@@ -680,16 +680,33 @@ button:focus-visible {
 }
 
 .content {
-  /* The page column stays centred at min(100%, 1280px), but the scroll
-     container itself spans the full body width so the scrollbar sits at the
-     window edge and the wheel works over the side gutters too. */
+  /* Form- and text-heavy pages (Settings) stay at a comfortable 1280px
+     column, while the scroll container spans the full body width so the
+     scrollbar sits at the window edge and wheel scrolling works over gutters. */
   flex: 1 1 auto;
   width: 100%;
   min-height: 0;
   margin: 0;
-  padding: 14px calc(max(0px, (100% - 1280px) / 2) + clamp(18px, 3.5vw, 44px)) 18px;
+  padding: 18px calc(max(0px, (100% - 1280px) / 2) + clamp(18px, 3.5vw, 44px)) 24px;
   overflow-x: hidden;
   overflow-y: auto;
+}
+
+.content.content--wide {
+  /* Data-heavy pages (Dashboard, Recycle Bin, Audit Log) use ~90-94% of the
+     available workspace width with symmetric responsive gutters, capped at a
+     desktop-readable 1680px. */
+  --content-wide-max: 1680px;
+  --content-wide-gutter: clamp(20px, 2.8vw, 48px);
+  padding:
+    clamp(14px, 1.8vh, 22px)
+    max(var(--content-wide-gutter), calc((100% - var(--content-wide-max)) / 2))
+    clamp(16px, 2.2vh, 26px);
+}
+
+.content.content--dashboard {
+  display: flex;
+  flex-direction: column;
 }
 
 /* FIXES_UI §7/§8: compact page count — the page title lives in the top bar. */
@@ -707,6 +724,8 @@ button:focus-visible {
 .audit-log-page {
   display: grid;
   gap: 12px;
+  min-width: 0;
+  overflow-x: auto;
 }
 
 .recycle-bin-page table,
@@ -714,14 +733,14 @@ button:focus-visible {
   width: 100%;
   border-collapse: collapse;
   border: 1px solid var(--color-border);
-  font-size: 12px;
+  font-size: 12.5px;
 }
 
 .recycle-bin-page th,
 .recycle-bin-page td,
 .audit-log-page th,
 .audit-log-page td {
-  padding: 9px 10px;
+  padding: 10px 12px;
   border-bottom: 1px solid var(--color-border);
   text-align: left;
 }
@@ -762,6 +781,7 @@ button:focus-visible {
 
 .recycle-bin-toolbar__search {
   flex: 1 1 240px;
+  max-width: 420px;
   min-height: 36px;
   padding: 7px 11px;
   border: 1px solid var(--color-border-strong);
@@ -1443,8 +1463,14 @@ button:focus-visible {
     max-width: 20vw;
   }
 
-  .content {
-    padding: 40px 20px;
+  .content,
+  .content.content--wide {
+    padding: 24px 18px;
+    overflow: visible;
+  }
+
+  .content.content--dashboard {
+    display: block;
   }
 }
 
