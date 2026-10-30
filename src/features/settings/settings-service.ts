@@ -39,6 +39,7 @@ const SETTINGS_KEYS = Object.freeze([
   'currency',
   'theme',
   'primary_expiry_column_id',
+  'error_reporting_enabled',
 ] as const);
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -89,6 +90,9 @@ function rowsToSettings(rows: readonly unknown[]): PartialSettings {
     ...(currency ? { currency: currency as PartialSettings['currency'] } : {}),
     ...(theme === 'light' || theme === 'dark' || theme === 'system' ? { theme } : {}),
     ...(typeof primaryExpiryColumnId === 'string' ? { primaryExpiryColumnId } : {}),
+    ...(typeof values.get('error_reporting_enabled') === 'boolean'
+      ? { errorReportingEnabled: values.get('error_reporting_enabled') as boolean }
+      : {}),
   };
 }
 
@@ -112,6 +116,7 @@ export function partialSettingsToRecord(
   if (settings.currency) result.currency = settings.currency;
   if (settings.theme) result.theme = settings.theme;
   if (settings.primaryExpiryColumnId !== undefined) result.primary_expiry_column_id = settings.primaryExpiryColumnId;
+  if (settings.errorReportingEnabled !== undefined) result.error_reporting_enabled = settings.errorReportingEnabled;
   return result;
 }
 
@@ -127,6 +132,7 @@ export function settingsToRows(settings: DksSettings): PersistedSetting[] {
     { key: 'currency', value: settings.currency },
     { key: 'theme', value: settings.theme },
     { key: 'primary_expiry_column_id', value: settings.primaryExpiryColumnId },
+    { key: 'error_reporting_enabled', value: settings.errorReportingEnabled },
   ];
 }
 

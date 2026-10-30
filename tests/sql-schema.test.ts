@@ -181,7 +181,7 @@ describe('Supabase STEP 3 schema', () => {
     expect(serviceGrants.length).toBeGreaterThan(0);
     for (const grant of serviceGrants) {
       expect(grant).toMatch(
-        /claim_email_outbox|complete_email_outbox|dks_parse_iso_date|enqueue_expiry_digest/,
+        /claim_email_outbox|complete_email_outbox|dks_parse_iso_date|enqueue_expiry_digest|ingest_error_report|complete_error_report_delivery/,
       );
     }
 

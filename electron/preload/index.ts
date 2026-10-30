@@ -6,6 +6,12 @@ import type {
   DksNotificationResult,
 } from '../main/notifications';
 import type { UpdateState } from '../main/updater';
+import type { AdminLocalStatusSnapshot } from '../main/diagnostics-ipc';
+import type {
+  ErrorReportingStatusSummary,
+  SanitizedErrorReportEvent,
+  StructuredErrorReportInput,
+} from '../main/error-reporter';
 
 export type DksNavigationTarget = 'dashboard' | 'sheet';
 
@@ -248,10 +254,37 @@ export interface DksLocalApi {
   close: () => Promise<DksLocalCloseResult>;
 }
 
+export interface DksDiagnosticsPreloadApi {
+  readonly getAdminStatus: (input: { role: string }) => Promise<AdminLocalStatusSnapshot>;
+  readonly captureError: (
+    input: StructuredErrorReportInput,
+  ) => Promise<{ accepted: boolean; reason?: string }>;
+  readonly claimErrorReports: (input: {
+    role: string;
+    limit?: number;
+  }) => Promise<SanitizedErrorReportEvent[]>;
+  readonly completeErrorReport: (input: {
+    role: string;
+    fingerprint: string;
+    outcome: 'delivered' | 'suppressed_remote' | 'disabled' | 'retry' | 'terminal';
+    errorCode?: string | null;
+    retryAfterSeconds?: number | null;
+  }) => Promise<{ ok: boolean }>;
+  readonly setErrorReportingEnabled: (input: {
+    role: string;
+    enabled: boolean;
+  }) => Promise<ErrorReportingStatusSummary>;
+  readonly syncWorkspaceErrorReporting: (input: {
+    role: string;
+    enabled: boolean;
+  }) => Promise<{ ok: boolean; enabled: boolean }>;
+}
+
 export interface DksPreloadApi {
   readonly platform: string;
   readonly appVersion: string;
   readonly local: DksLocalApi;
+  readonly diagnostics: DksDiagnosticsPreloadApi;
   readonly notifications: {
     show: (request: DksNotificationRequest) => Promise<DksNotificationResult>;
   };
@@ -279,6 +312,15 @@ const NOTIFICATION_SHOW_CHANNEL = 'dks:notifications:show';
 const UPDATER_CHECK_CHANNEL = 'dks:updater:check';
 const UPDATER_RESTART_CHANNEL = 'dks:updater:restart';
 const UPDATER_STATUS_CHANNEL = 'dks:updater:status';
+
+const DIAGNOSTICS_CHANNELS = {
+  getAdminStatus: 'dks:diagnostics:get-admin-status',
+  captureError: 'dks:diagnostics:capture-error',
+  claimErrorReports: 'dks:diagnostics:claim-error-reports',
+  completeErrorReport: 'dks:diagnostics:complete-error-report',
+  setErrorReportingEnabled: 'dks:diagnostics:set-error-reporting-enabled',
+  syncWorkspaceErrorReporting: 'dks:diagnostics:sync-workspace-error-reporting',
+} as const;
 
 const LOCAL_CHANNELS = {
   getSnapshot: 'dks:local:get-snapshot',
@@ -889,10 +931,130 @@ const updaterApi = Object.freeze({
   onStatus: subscribeToUpdateStatus,
 });
 
+async function invokeDiagnostics<T>(
+  channel: string,
+  payload: unknown,
+  validate?: (value: unknown) => void,
+): Promise<T> {
+  if (validate) {
+    validate(payload);
+  }
+  try {
+    const result = await ipcRenderer.invoke(channel, payload);
+    return cloneSerializable(result) as T;
+  } catch (caught) {
+    const message = caught instanceof Error && caught.message.trim()
+      ? caught.message.trim().slice(0, 400)
+      : 'Diagnostics operation failed';
+    throw new Error(message);
+  }
+}
+
+function validateAdminDiagnosticsInput(value: unknown): void {
+  const input = requireRecord(value, 'diagnostics input');
+  requireRole(input.role);
+  if (input.role !== 'admin') {
+    throw new TypeError('administrator role is required');
+  }
+}
+
+function validateClearedDiagnosticsInput(value: unknown): void {
+  const input = requireRecord(value, 'diagnostics input');
+  requireRole(input.role);
+  if (input.role !== 'admin' && input.role !== 'office') {
+    throw new TypeError('authenticated session role is required');
+  }
+}
+
+const diagnosticsApi: DksDiagnosticsPreloadApi = Object.freeze({
+  getAdminStatus: (input: { role: string }) =>
+    invokeDiagnostics<AdminLocalStatusSnapshot>(
+      DIAGNOSTICS_CHANNELS.getAdminStatus,
+      input,
+      validateAdminDiagnosticsInput,
+    ),
+  captureError: async (input: StructuredErrorReportInput): Promise<{ accepted: boolean; reason?: string }> => {
+    try {
+      const record = requireRecord(input, 'error report input');
+      const result = await ipcRenderer.invoke(DIAGNOSTICS_CHANNELS.captureError, record);
+      if (isRecord(result) && typeof result.accepted === 'boolean') {
+        return {
+          accepted: result.accepted,
+          ...(typeof result.reason === 'string' ? { reason: result.reason } : {}),
+        };
+      }
+      return { accepted: false, reason: 'unavailable' };
+    } catch {
+      return { accepted: false, reason: 'ipc_error' };
+    }
+  },
+  claimErrorReports: (input: { role: string; limit?: number }) =>
+    invokeDiagnostics<SanitizedErrorReportEvent[]>(
+      DIAGNOSTICS_CHANNELS.claimErrorReports,
+      input,
+      (payload) => {
+        validateClearedDiagnosticsInput(payload);
+        const record = payload as Record<string, unknown>;
+        if (
+          record.limit !== undefined
+          && (typeof record.limit !== 'number' || !Number.isInteger(record.limit) || record.limit < 1 || record.limit > 5)
+        ) {
+          throw new TypeError('limit must be an integer between 1 and 5');
+        }
+      },
+    ),
+  completeErrorReport: (input: {
+    role: string;
+    fingerprint: string;
+    outcome: 'delivered' | 'suppressed_remote' | 'disabled' | 'retry' | 'terminal';
+    errorCode?: string | null;
+    retryAfterSeconds?: number | null;
+  }) =>
+    invokeDiagnostics<{ ok: boolean }>(
+      DIAGNOSTICS_CHANNELS.completeErrorReport,
+      input,
+      (payload) => {
+        validateClearedDiagnosticsInput(payload);
+        const record = payload as Record<string, unknown>;
+        if (typeof record.fingerprint !== 'string' || !/^[0-9a-f]{32}$/.test(record.fingerprint)) {
+          throw new TypeError('valid report fingerprint is required');
+        }
+        if (typeof record.outcome !== 'string') {
+          throw new TypeError('delivery outcome is required');
+        }
+      },
+    ),
+  setErrorReportingEnabled: (input: { role: string; enabled: boolean }) =>
+    invokeDiagnostics<ErrorReportingStatusSummary>(
+      DIAGNOSTICS_CHANNELS.setErrorReportingEnabled,
+      input,
+      (payload) => {
+        validateAdminDiagnosticsInput(payload);
+        const record = payload as Record<string, unknown>;
+        if (typeof record.enabled !== 'boolean') {
+          throw new TypeError('enabled must be a boolean');
+        }
+      },
+    ),
+  syncWorkspaceErrorReporting: (input: { role: string; enabled: boolean }) =>
+    invokeDiagnostics<{ ok: boolean; enabled: boolean }>(
+      DIAGNOSTICS_CHANNELS.syncWorkspaceErrorReporting,
+      input,
+      (payload) => {
+        validateClearedDiagnosticsInput(payload);
+        const record = payload as Record<string, unknown>;
+        if (typeof record.enabled !== 'boolean') {
+          throw new TypeError('enabled must be a boolean');
+        }
+      },
+    ),
+});
+
 const dksApi: DksPreloadApi = Object.freeze({
   platform: typeof process === 'undefined' ? 'unknown' : process.platform,
   appVersion: getAppVersion(),
   local: localApi,
+  diagnostics: diagnosticsApi,
   notifications: notificationApi,
   updater: updaterApi,
   openExternal: async (url: string): Promise<boolean> => {

@@ -39,6 +39,7 @@ import {
 import type { AuditProfile } from '../../features/audit/AuditLogPage';
 import type { AuditClearRemoteClient } from '../../features/audit/audit-service';
 import { ConfirmDialog } from '../../features/ui/ConfirmDialog';
+import { AdminStatusPanel } from '../../features/diagnostics/AdminStatusPanel';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -50,6 +51,7 @@ export interface SyncPendingItem {
   operation: string;
   attempts: number;
   lastError: string | null;
+  status?: string;
 }
 
 export interface AppShellProps {
@@ -108,6 +110,8 @@ export interface AppShellProps {
   onNotificationSnooze?: (record: NotificationRecord, duration: SnoozeDuration, customUntil?: string) => void;
   /** Admin-only Office sign-in approvals control (renders next to the bell). */
   officeApprovalsSlot?: ReactNode;
+  /** Admin-only system status button and dialog slot. */
+  adminStatusSlot?: ReactNode;
   onLogout?: () => void | Promise<void>;
 }
 
@@ -351,6 +355,7 @@ export function AppShell({
   onNotificationRestore,
   onNotificationSnooze,
   officeApprovalsSlot = null,
+  adminStatusSlot,
   onLogout = () => undefined,
 }: AppShellProps) {
   const [isSettingsOpen, setIsSettingsOpen] = useState(activeView === 'settings');
@@ -636,6 +641,24 @@ export function AppShell({
                 ) : null}
               </div>
             </div>
+            {can(role, 'adminStatus')
+              ? (adminStatusSlot ?? (
+                <AdminStatusPanel
+                  role={role}
+                  appVersion={appVersion}
+                  syncStatus={syncStatus}
+                  localStoreError={localStoreError}
+                  updateState={updateState}
+                  errorReportingEnabled={settings?.errorReportingEnabled}
+                  outboxFailures={{
+                    failedCount: pendingOutbox.filter(
+                      (item) => item.status === 'failed' || (item.status !== 'terminal' && item.attempts > 0 && Boolean(item.lastError)),
+                    ).length,
+                    terminalCount: pendingOutbox.filter((item) => item.status === 'terminal').length,
+                  }}
+                />
+              ))
+              : null}
             {officeApprovalsSlot ?? null}
             <NotificationBell
               notifications={notifications}

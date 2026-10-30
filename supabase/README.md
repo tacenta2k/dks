@@ -324,3 +324,70 @@ verification sections are read-only (`SELECT`s).
 
 Then redeploy `send-email` with the temporary-copy command above. Do not run
 either file against production without a backup.
+
+## Automated error reporting — `report-error` Edge Function (optional, approval required)
+
+`supabase/edge-functions/report-error/index.ts` (backed by
+`ARENA/sql/error-reporting.sql` on existing deployments and mirrored in
+`supabase/schema.sql` for fresh installs) delivers privacy-safe, strictly
+allowlisted diagnostic error reports to GitHub Issues.
+
+### Privacy & public-repository posture
+
+- GitHub Issues on `tacenta2k/dks` are assumed **public**.
+- Only fixed, allowlisted technical fields are accepted at client, IPC, SQL, and
+  Edge Function boundaries: `fingerprint`, `category`, `severity`, `code`,
+  `component`, `process`, `appVersion`, `platform`, `arch`, `osRelease`,
+  `electronVersion`, `packaged`, `sqliteSchemaVersion`, `httpStatus`,
+  `postgresCode`, `occurrences`, and minute-rounded UTC `firstOccurredAt` /
+  `lastOccurredAt`.
+- Customer names, Passport numbers, Civil IDs, email addresses, row UUIDs, user
+  IDs, free-form error messages, raw log lines, stack traces, URLs, and file
+  paths are **rejected** (never relied on regex redaction of arbitrary logs).
+- Administrators can disable reporting workspace-wide at any time in
+  **Settings → About & updates → Automatic error reporting**
+  (`public.settings` key `error_reporting_enabled`); disabling immediately stops
+  background delivery and clears unsent local queue items.
+
+### GitHub credential & rate limits
+
+- Credential location: **Supabase Edge Function secrets ONLY**
+  (`GITHUB_ERROR_REPORT_TOKEN`). Never place a GitHub token in `.env`, Vite
+  env vars, Electron main/preload/renderer code, SQL tables, or git.
+- Recommended scope: GitHub **Fine-grained Personal Access Token** (or GitHub
+  App installation token) restricted to the single repository `tacenta2k/dks`
+  with **Issues: Read and write** (`Metadata: Read` auto-selected) and **no
+  other repository or account permissions**.
+- GitHub API limits vs DKS server caps:
+  - GitHub primary limit: **5,000 requests/hour** (authenticated PAT / App).
+  - GitHub secondary content-creation limits: **80 requests/minute** and
+    **500 requests/hour**; honors `Retry-After` and `x-ratelimit-reset`.
+  - DKS PostgreSQL server enforcement (`public.ingest_error_report`):
+    max **10 reports / 10 min** and **30 / hour** per authenticated user,
+    **24-hour fingerprint deduplication** (new issue once, at most one 24h
+    rollup comment thereafter), and a global ceiling of **20 GitHub mutations /
+    hour** and **60 / 24 hours** across the entire workspace.
+
+### Manual deployment steps (requires explicit owner approval)
+
+1. Run ONLY the §0 read-only preflight `SELECT` queries in
+   `ARENA/sql/error-reporting.sql` in the Supabase SQL Editor and review output.
+2. Apply `ARENA/sql/error-reporting.sql` (§1 transaction) and run §2 read-only
+   verification queries.
+3. Deploy the Edge Function using the temporary-copy bundle pattern (note: do
+   **not** pass `--no-verify-jwt` unless desired — the function also verifies the
+   caller JWT + Office session approval directly against PostgreSQL via
+   `verify_error_report_caller`):
+
+```bash
+mkdir -p supabase/functions
+cp -r supabase/edge-functions/_shared supabase/edge-functions/report-error \
+  supabase/functions/
+supabase functions deploy report-error --project-ref <PROJECT_REF>
+rm -rf supabase/functions
+
+supabase secrets set --project-ref <PROJECT_REF> \
+  GITHUB_ERROR_REPORT_TOKEN=github_pat_... \
+  GITHUB_ERROR_REPORT_REPO=tacenta2k/dks
+```
+

@@ -1,8 +1,12 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 
+import { DiagnosticsErrorBoundary } from '../features/diagnostics/ErrorBoundary';
+import { defaultErrorReporter, installGlobalRendererErrorHandlers } from '../features/diagnostics/error-reporting';
 import { App } from './App';
 import './styles.css';
+
+installGlobalRendererErrorHandlers(defaultErrorReporter);
 
 const rootElement = document.getElementById('root');
 
@@ -12,6 +16,8 @@ if (!rootElement) {
 
 createRoot(rootElement).render(
   <StrictMode>
-    <App />
+    <DiagnosticsErrorBoundary componentName="renderer/root">
+      <App />
+    </DiagnosticsErrorBoundary>
   </StrictMode>,
 );

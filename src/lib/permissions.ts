@@ -25,7 +25,8 @@ export type Capability =
   | 'restore'
   | 'permanentDelete'
   | 'protectedSettings'
-  | 'manageUsers';
+  | 'manageUsers'
+  | 'adminStatus';
 
 const OFFICE_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'dashboard',
@@ -57,6 +58,7 @@ const ADMIN_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'permanentDelete',
   'protectedSettings',
   'manageUsers',
+  'adminStatus',
 ]);
 
 /**

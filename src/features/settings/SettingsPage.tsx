@@ -44,6 +44,7 @@ export interface DksSettings {
   currency: CurrencySettings;
   primaryExpiryColumnId: string;
   theme: ThemePreference;
+  errorReportingEnabled: boolean;
 }
 
 export type SettingsState = DksSettings;
@@ -63,6 +64,7 @@ export interface PartialSettings {
   currency?: Partial<CurrencySettings>;
   primaryExpiryColumnId?: string;
   theme?: ThemePreference;
+  errorReportingEnabled?: boolean;
 }
 
 export interface SettingsPageProps {
@@ -174,6 +176,7 @@ export const DEFAULT_SETTINGS: DksSettings = {
   },
   primaryExpiryColumnId: '',
   theme: 'light',
+  errorReportingEnabled: true,
 };
 
 const STATUS_COLOR_FIELDS: ReadonlyArray<{
@@ -280,6 +283,9 @@ function resolveSettings(
     },
     primaryExpiryColumnId: resolvedExpiryId,
     theme: input?.theme ?? DEFAULT_SETTINGS.theme,
+    errorReportingEnabled: typeof input?.errorReportingEnabled === 'boolean'
+      ? input.errorReportingEnabled
+      : DEFAULT_SETTINGS.errorReportingEnabled,
   };
 }
 
@@ -924,6 +930,33 @@ export function SettingsPage({
                       </button>
                     ) : null}
                   </div>
+                </div>
+
+                <div className="settings-maintenance__card settings-error-reporting" aria-labelledby="error-reporting-settings-title">
+                  <div>
+                    <p className="settings-eyebrow">Diagnostics &amp; privacy</p>
+                    <h3 id="error-reporting-settings-title">Automated error reporting</h3>
+                  </div>
+                  <label className="settings-toggle" htmlFor="settings-error-reporting-enabled">
+                    <input
+                      id="settings-error-reporting-enabled"
+                      aria-label="Automatic error reporting"
+                      type="checkbox"
+                      checked={settings.errorReportingEnabled}
+                      onChange={(event) =>
+                        updateSettings((current) => ({
+                          ...current,
+                          errorReportingEnabled: event.target.checked,
+                        }))}
+                    />
+                    <span>
+                      <strong>Automatic error reporting</strong>
+                      <small>Send structured diagnostic error reports automatically in the background.</small>
+                    </span>
+                  </label>
+                  <p className="settings-muted">
+                    When enabled, DKS sends only allowlisted technical fields (error code, app component, DKS version, OS platform and release, and minute-rounded timestamp) through the DKS server worker to project GitHub Issues, which may be publicly visible. Customer names, Passport numbers, Civil IDs, email addresses, record IDs, user-entered text, file paths, and raw stack traces are never sent. Turning this off stops background reporting immediately and clears any unsent diagnostic items on this device.
+                  </p>
                 </div>
               </div>
             </section>

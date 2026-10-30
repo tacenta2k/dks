@@ -190,6 +190,8 @@ export interface LocalIpcDependencies {
    * precedence and is validated exactly like every other role parameter.
    */
   sessionRole?: () => LocalSessionRole | null;
+  /** Optional observer for unexpected storage/runtime errors; never suppresses throws. */
+  onUnexpectedError?: (info: { channel: LocalIpcChannel; error: unknown }) => void;
 }
 
 export type LocalIpcHandler = (payload?: unknown, event?: unknown) => unknown;
@@ -1095,6 +1097,23 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
   return handlers;
 }
 
+function isExpectedIpcValidationOrAuthError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const msg = error.message;
+  return (
+    msg.includes('is required')
+    || msg.includes('must be ')
+    || msg.includes('must not ')
+    || msg.includes('Invalid ')
+    || msg.includes('Unknown sheet ')
+    || msg.includes('Waiting for admin approval')
+    || msg.includes('Only administrators')
+    || msg.includes('Office users cannot')
+    || msg.includes('cannot delete a non-empty')
+    || msg.includes('is unavailable in this local store')
+  );
+}
+
 export function registerLocalIpcHandlers(
   dependencies: LocalIpcDependencies & { ipcMain: LocalIpcMain },
 ): () => void {
@@ -1109,7 +1128,28 @@ export function registerLocalIpcHandlers(
       if (!CLEARANCE_EXEMPT_CHANNELS.has(channel) && sessionGate() === 'office-pending') {
         throw new Error('Waiting for admin approval — this session cannot access local records.');
       }
-      return handlers[channel](payload, _event);
+      const notifyUnexpected = (error: unknown): void => {
+        if (!isExpectedIpcValidationOrAuthError(error)) {
+          try {
+            dependencies.onUnexpectedError?.({ channel, error });
+          } catch {
+            // Never let diagnostic observers interfere with normal IPC error handling.
+          }
+        }
+      };
+      try {
+        const result = handlers[channel](payload, _event);
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+          return Promise.resolve(result).catch((error: unknown) => {
+            notifyUnexpected(error);
+            throw error;
+          });
+        }
+        return result;
+      } catch (error) {
+        notifyUnexpected(error);
+        throw error;
+      }
     });
   }
 

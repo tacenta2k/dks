@@ -6,6 +6,14 @@ import { AuthScreen } from '../features/auth/AuthScreen';
 import { RESTORE_UNREACHABLE_CODE } from '../features/auth/auth-errors';
 import { OfficeApprovalGate } from '../features/auth/OfficeApprovalGate';
 import { OfficeApprovalsPanel } from '../features/admin/OfficeApprovalsPanel';
+import { AdminStatusPanel } from '../features/diagnostics/AdminStatusPanel';
+import type { ConnectivityQueryClient } from '../features/diagnostics/connectivity-checks';
+import {
+  defaultErrorReporter,
+  extractSafeHttpStatus,
+  extractSafePostgresCode,
+  isRoutineOfflineError,
+} from '../features/diagnostics/error-reporting';
 import { createOfficeApprovalService, type OfficeApprovalService } from '../features/auth/office-approval-service';
 import {
   hasSavedThemePreference,
@@ -502,6 +510,7 @@ export function App({
     }
     lastSettingsSignature.current = signature;
     setWorkspaceSettings(settings);
+    void defaultErrorReporter.setEnabledByAdmin(settings.errorReportingEnabled);
 
     const local = typeof window !== 'undefined' ? window.dks?.local : undefined;
     const cache = partialSettingsToRecord(settings);
@@ -548,6 +557,16 @@ export function App({
       await local?.acknowledgeSettings?.();
       setSettingsLoadError(null);
     } catch (error) {
+      if (!isRoutineOfflineError(error)) {
+        void defaultErrorReporter.report({
+          category: 'settings',
+          severity: 'error',
+          code: 'SETTINGS_SAVE_FAILED',
+          component: 'renderer/settings',
+          httpStatus: extractSafeHttpStatus(error),
+          postgresCode: extractSafePostgresCode(error),
+        });
+      }
       setSettingsLoadError(error instanceof Error ? error.message : 'Workspace settings sync failed.');
       throw error;
     }
@@ -741,6 +760,12 @@ export function App({
       markOutboxTerminal: async (id, message) => {
         if (!local.markOutboxTerminal) throw new Error('Terminal outbox recording is unavailable.');
         await local.markOutboxTerminal({ id, message });
+        void defaultErrorReporter.report({
+          category: 'sync',
+          severity: 'warning',
+          code: 'SYNC_OUTBOX_TERMINAL',
+          component: 'renderer/sync',
+        });
       },
       retryFailedOutbox: async () => (await local.retryFailedOutbox?.())?.requeued ?? 0,
       // R3 batch B: adopt the server's column id after a duplicate-name
@@ -781,6 +806,16 @@ export function App({
         });
         if (!stopped && result.status === 'healthy') {
           setRepositoryRevision((revision) => revision + 1);
+        } else if (!stopped && result.status === 'error') {
+          const firstErr = result.error ?? result.errors[0] ?? '';
+          if (firstErr && !isRoutineOfflineError(firstErr)) {
+            void defaultErrorReporter.report({
+              category: 'sync',
+              severity: 'warning',
+              code: 'SYNC_REMOTE_FAILED',
+              component: 'renderer/sync',
+            });
+          }
         }
         return result;
       })().finally(() => {
@@ -938,6 +973,7 @@ export function App({
             operation: item.operation ?? 'change',
             attempts: item.attempts ?? 0,
             lastError: sanitizeSyncError(item.lastError ?? item.last_error ?? '') || null,
+            status: item.status,
           })));
       })
       .catch(() => undefined);
@@ -1087,6 +1123,51 @@ export function App({
     });
   };
 
+  // Keep the background error-reporting controller synchronized with the
+  // cleared session and shared workspace preference without blocking UI flows.
+  useEffect(() => {
+    const role = profile?.role === 'admin' || profile?.role === 'office' ? profile.role : null;
+    const sessionCleared = authStatus === 'authenticated' && isWorkspaceVisible && role !== null;
+    defaultErrorReporter.setSessionContext({
+      accessToken: sessionCleared ? (session?.access_token ?? null) : null,
+      role: sessionCleared ? role : null,
+      sessionCleared,
+    });
+
+    if (!sessionCleared) {
+      return undefined;
+    }
+
+    const enabled = workspaceSettings?.errorReportingEnabled ?? true;
+    void defaultErrorReporter.syncWorkspacePreference(enabled, role);
+    if (!enabled) {
+      return undefined;
+    }
+
+    const flushSoon = window.setTimeout(() => {
+      void defaultErrorReporter.flushPending();
+    }, 1_200);
+    const interval = window.setInterval(() => {
+      void defaultErrorReporter.flushPending();
+    }, 120_000);
+    const onOnline = () => {
+      void defaultErrorReporter.flushPending();
+    };
+    window.addEventListener('online', onOnline);
+
+    return () => {
+      window.clearTimeout(flushSoon);
+      window.clearInterval(interval);
+      window.removeEventListener('online', onOnline);
+    };
+  }, [
+    authStatus,
+    isWorkspaceVisible,
+    profile?.role,
+    session?.access_token,
+    workspaceSettings?.errorReportingEnabled,
+  ]);
+
   if (!isWorkspaceVisible) {
     // A password-authenticated Office session with no approval yet gets the
     // dedicated gate — never the AuthScreen (that would let it re-sign-in in
@@ -1164,6 +1245,25 @@ export function App({
       onNotificationSnooze={handleNotificationSnooze}
       officeApprovalsSlot={profile?.role === 'admin'
         ? <OfficeApprovalsPanel service={approvalService} />
+        : null}
+      adminStatusSlot={profile?.role === 'admin'
+        ? (
+          <AdminStatusPanel
+            role="admin"
+            syncStatus={syncStatus}
+            localStoreError={localStoreError}
+            updateState={updateState}
+            errorReportingEnabled={workspaceSettings?.errorReportingEnabled}
+            accessToken={session?.access_token ?? null}
+            dataClient={authService.authClient as unknown as ConnectivityQueryClient | null}
+            outboxFailures={{
+              failedCount: pendingOutbox.filter(
+                (item) => item.status === 'failed' || (item.status !== 'terminal' && item.attempts > 0 && Boolean(item.lastError)),
+              ).length,
+              terminalCount: pendingOutbox.filter((item) => item.status === 'terminal').length,
+            }}
+          />
+        )
         : null}
       onLogout={() => appStore.getState().signOut()}
     />
