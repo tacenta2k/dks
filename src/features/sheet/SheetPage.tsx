@@ -9,7 +9,18 @@ import {
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
 } from 'react';
-import type { CellValueChangedEvent, ColDef, ColumnMovedEvent, GridApi, PostSortRowsParams } from 'ag-grid-community';
+import type {
+  CellValueChangedEvent,
+  ColDef,
+  ColumnMovedEvent,
+  GetContextMenuItemsParams,
+  GetRowIdParams,
+  GridApi,
+  GridReadyEvent,
+  IsFullWidthRowParams,
+  PostSortRowsParams,
+  RowClassParams,
+} from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
 import 'ag-grid-community/styles/ag-theme-quartz.css';
@@ -155,6 +166,45 @@ function pinDraftRowToEnd(params: PostSortRowsParams<SheetGridRendererData>): vo
   }
 }
 
+/**
+ * Grid options that never depend on render state. They are module constants so
+ * their identity is stable across renders: ag-grid-react diffs props by
+ * reference (`!==`) and applies a changed `defaultColDef` with `force: true`,
+ * which fires AG Grid's `recreateColumnDefs` — a full column-tree rebuild
+ * (createColumnTree + destroyColumnTree + valueCache.expire) on every render,
+ * including each keystroke in the toolbar search box.
+ */
+const SHEET_DEFAULT_COL_DEF: ColDef<SheetGridRendererData> = Object.freeze({
+  flex: 1,
+  minWidth: 120,
+  resizable: true,
+  sortable: true,
+  editable: true,
+});
+
+function sheetRowId(params: GetRowIdParams<SheetGridRendererData>): string {
+  return params.data.__rowId;
+}
+
+function sheetRowClass(params: RowClassParams<SheetGridRendererData>): string {
+  if (!params.data) {
+    return '';
+  }
+  // R3 batch E: the draft row carries its own class so its cells keep visible
+  // borders wherever it sits.
+  if (params.data.__rowId === DRAFT_ROW_ID) {
+    return 'sheet-draft-row';
+  }
+  if (isGroupHeaderRow(params.data)) {
+    return '';
+  }
+  return rowClassForStatus(params.data.status ?? null);
+}
+
+function sheetIsFullWidthRow(params: IsFullWidthRowParams<SheetGridRendererData>): boolean {
+  return isGroupHeaderRow(params.rowNode.data);
+}
+
 function accessibleCellValue(row: SheetRow, column: ColumnDefinition): string {
   const value = dataValue(row, column);
   if (value === null || value === undefined || value === '') {
@@ -262,8 +312,9 @@ export function SheetPage({
   const gridApiRef = useRef<GridApi<SheetGridRendererData> | null>(null);
   // AG Grid needs real layout measurements; jsdom uses the deterministic
   // table below unless a keyboard-editing e2e test opts into the real grid.
-  const isTestEnvironment = import.meta.env.MODE === 'test';
-  const renderRealGrid = !isTestEnvironment || renderGridInTests;
+  // Build-time constant, not a runtime probe: the jsdom-only table below is
+  // deleted from production bundles (see PERFORMANCE_AUDIT.md H3).
+  const renderRealGrid = !__DKS_TEST_SURFACE__ || renderGridInTests;
   // FIXES_UI §5.2 "Smaller windows": the last two chips move into a menu.
   const collapsedFilters = useCollapsedQuickFilters();
   const moreFiltersRef = useRef<HTMLDivElement>(null);
@@ -605,6 +656,30 @@ export function SheetPage({
     [activeColumns, gridContext, role],
   );
 
+  // Event callbacks and the context menu are grid *properties* too, so they
+  // must keep a stable identity between renders (see SHEET_DEFAULT_COL_DEF).
+  const handleGridReady = useCallback((event: GridReadyEvent<SheetGridRendererData>) => {
+    gridApiRef.current = event.api;
+  }, []);
+
+  const getSheetContextMenuItems = useCallback(
+    (params: GetContextMenuItemsParams<SheetGridRendererData>) => {
+      // FIXES_UI §5.6 (SHEET-14): row right-click menu. Synthetic rows (group
+      // header / pinned draft) have no menu.
+      const data = params.node?.data as SheetGridRendererData | null | undefined;
+      const row = data?.__sheetRow;
+      if (!row || data?.__rowId === DRAFT_ROW_ID) {
+        return [];
+      }
+      return buildRowContextMenuItems(row, {
+        onDuplicate: handleDuplicate,
+        onDelete: handleDelete,
+        onRenew: handleRenew,
+      });
+    },
+    [handleDelete, handleDuplicate, handleRenew],
+  );
+
   /**
    * SHEET-12 Tab contract: the ordered editable user columns (system columns
    * # / Actions / + / Days Left are never tab targets). The same predicate as
@@ -768,6 +843,11 @@ export function SheetPage({
       setError(caught instanceof Error ? caught.message : 'Unable to save the cell.');
     }
   }, [activeColumns, repository, refresh, createFromDraft]);
+
+  const handleCellValueChangedEvent = useCallback(
+    (event: CellValueChangedEvent<SheetGridRendererData>) => void handleCellValueChanged(event),
+    [handleCellValueChanged],
+  );
 
   const addColumn = async (column: ColumnDefinition) => {
     try {
@@ -1143,7 +1223,7 @@ export function SheetPage({
                       and stays clickable (the hint ignores pointer events). In
                       test/host environments the same ONE hint renders in flow
                       next to the accessible table instead — never both. */}
-                  {isTestEnvironment ? null : emptyNotice}
+                  {__DKS_TEST_SURFACE__ ? null : emptyNotice}
               <div
                 className={`sheet-grid ${sheetGridThemeClass(theme)}`}
                 data-testid="sheet-grid"
@@ -1154,54 +1234,20 @@ export function SheetPage({
                   rowData={displayRows as SheetGridRendererData[]}
                   columnDefs={gridColumnDefs as ColDef<SheetGridRendererData>[]}
                   context={gridContext}
-                  defaultColDef={{
-                    flex: 1,
-                    minWidth: 120,
-                    resizable: true,
-                    sortable: true,
-                    editable: true,
-                  }}
-                  getRowId={(params) => params.data.__rowId}
-                  getRowClass={(params) => {
-                    if (!params.data) {
-                      return '';
-                    }
-                    // R3 batch E: the draft row carries its own class so its
-                    // cells keep visible borders wherever it sits.
-                    if (params.data.__rowId === DRAFT_ROW_ID) {
-                      return 'sheet-draft-row';
-                    }
-                    if (isGroupHeaderRow(params.data)) {
-                      return '';
-                    }
-                    return rowClassForStatus(params.data.status ?? null);
-                  }}
+                  defaultColDef={SHEET_DEFAULT_COL_DEF}
+                  getRowId={sheetRowId}
+                  getRowClass={sheetRowClass}
                   // Sorting must never move the blank draft row away from the
                   // end of the list (Community API: postSortRows). The callback
                   // is hoisted to module scope so its identity NEVER changes —
                   // a new function reference after each render would trigger a
                   // full sort-stage grid refresh that destroys open editors.
                   postSortRows={pinDraftRowToEnd}
-                  isFullWidthRow={(params) => isGroupHeaderRow(params.rowNode.data)}
+                  isFullWidthRow={sheetIsFullWidthRow}
                   fullWidthCellRenderer={GroupHeaderCell}
-                  getContextMenuItems={(params) => {
-                    // FIXES_UI §5.6 (SHEET-14): row right-click menu. Synthetic
-                    // rows (group header / pinned draft) have no menu.
-                    const data = params.node?.data as SheetGridRendererData | null | undefined;
-                    const row = data?.__sheetRow;
-                    if (!row || data?.__rowId === DRAFT_ROW_ID) {
-                      return [];
-                    }
-                    return buildRowContextMenuItems(row, {
-                      onDuplicate: handleDuplicate,
-                      onDelete: handleDelete,
-                      onRenew: handleRenew,
-                    });
-                  }}
-                  onGridReady={(event) => {
-                    gridApiRef.current = event.api;
-                  }}
-                  onCellValueChanged={(event) => void handleCellValueChanged(event)}
+                  getContextMenuItems={getSheetContextMenuItems}
+                  onGridReady={handleGridReady}
+                  onCellValueChanged={handleCellValueChangedEvent}
                   // The refreshed row set reaches the grid asynchronously: a
                   // pending draft-commit focus handoff is resolved here, when
                   // the new row indexes are final.
@@ -1245,98 +1291,104 @@ export function SheetPage({
               ) : null}
             </div>
           ) : null}
-          <div className={`sheet-accessible-table-wrap${isTestEnvironment ? ' sheet-accessible-table-wrap--test' : ''}`}>
-            <table className="sheet-accessible-table" aria-label="Visa records table">
-              <thead>
-                <tr>
-                  <th scope="col">Actions</th>
-                  {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
-                  {/* SHEET-10: the `+` add-column header (same surface as the
-                      grid's pinned `+` column; the accessible table is only
-                      rendered in test/host environments). */}
-                  <th scope="col" className="sheet-add-column-th">
-                    <button
-                      className="sheet-add-column-header"
-                      type="button"
-                      aria-label="Add column"
-                      title="Add column"
-                      onClick={() => setWizardOpen(true)}
-                    >
-                      +
-                    </button>
-                  </th>
-                  <th scope="col">Days Left</th>
-                </tr>
-              </thead>
-              <tbody>
-                {matchingRows.map((row) => {
-                  const derived = expiryValues(
-                    primaryExpiry && typeof dataValue(row, primaryExpiry) === 'string'
-                      ? dataValue(row, primaryExpiry) as string
-                      : null,
-                    today,
-                  );
-                  return (
-                    <tr key={row.id} className={rowClassForStatus(derived.status)}>
-                      <td>
-                        <RowActions
-                          row={row}
-                          rowLabel={displayLabel(row, activeColumns)}
-                          onDuplicate={handleDuplicate}
-                          onDelete={handleDelete}
-                          onRenew={handleRenew}
+          {/* jsdom-only surface: AG Grid needs layout geometry that jsdom does
+              not provide, so keyboard/draft-row behaviour is asserted against
+              this table instead. `__DKS_TEST_SURFACE__` is false in every
+              production build, which removes the whole block — production
+              renders the real grid above and nothing else. */}
+          {__DKS_TEST_SURFACE__ ? (
+            <div className="sheet-accessible-table-wrap sheet-accessible-table-wrap--test">
+              <table className="sheet-accessible-table" aria-label="Visa records table">
+                <thead>
+                  <tr>
+                    <th scope="col">Actions</th>
+                    {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
+                    {/* SHEET-10: the `+` add-column header (same surface as the
+                        grid's pinned `+` column; the accessible table is only
+                        rendered in test/host environments). */}
+                    <th scope="col" className="sheet-add-column-th">
+                      <button
+                        className="sheet-add-column-header"
+                        type="button"
+                        aria-label="Add column"
+                        title="Add column"
+                        onClick={() => setWizardOpen(true)}
+                      >
+                        +
+                      </button>
+                    </th>
+                    <th scope="col">Days Left</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {matchingRows.map((row) => {
+                    const derived = expiryValues(
+                      primaryExpiry && typeof dataValue(row, primaryExpiry) === 'string'
+                        ? dataValue(row, primaryExpiry) as string
+                        : null,
+                      today,
+                    );
+                    return (
+                      <tr key={row.id} className={rowClassForStatus(derived.status)}>
+                        <td>
+                          <RowActions
+                            row={row}
+                            rowLabel={displayLabel(row, activeColumns)}
+                            onDuplicate={handleDuplicate}
+                            onDelete={handleDelete}
+                            onRenew={handleRenew}
+                          />
+                        </td>
+                        {activeColumns.map((column) => {
+                          const value = accessibleCellValue(row, column);
+                          const isCategory = column.id.toLowerCase() === 'category'
+                            || column.name.toLowerCase() === 'category';
+                          return (
+                            <td key={column.id} aria-label={`${column.name}: ${value}`}>
+                              {isCategory ? null : value}
+                            </td>
+                          );
+                        })}
+                        <td>{derived.daysLeft === null ? '—' : derived.daysLeft}</td>
+                      </tr>
+                    );
+                  })}
+                  {/* SHEET-11: the test/host table gets the same pinned draft
+                      row, so the "first meaningful value creates one record"
+                      behaviour is exercised without a layout engine. */}
+                  <tr className="sheet-draft-row" aria-label="New record">
+                    <td />
+                    {activeColumns.map((column) => (
+                      <td key={column.id}>
+                        <input
+                          className="sheet-draft-input"
+                          aria-label={`New record ${column.name}`}
+                          type="text"
+                          defaultValue=""
+                          onBlur={(event) => {
+                            const value = event.target.value;
+                            if (isMeaningfulDraftValue(value)) {
+                              event.target.value = '';
+                              void createFromDraft(column.id, value);
+                            }
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter') {
+                              event.currentTarget.blur();
+                            }
+                          }}
                         />
                       </td>
-                      {activeColumns.map((column) => {
-                        const value = accessibleCellValue(row, column);
-                        const isCategory = column.id.toLowerCase() === 'category'
-                          || column.name.toLowerCase() === 'category';
-                        return (
-                          <td key={column.id} aria-label={`${column.name}: ${value}`}>
-                            {isCategory ? null : value}
-                          </td>
-                        );
-                      })}
-                      <td>{derived.daysLeft === null ? '—' : derived.daysLeft}</td>
-                    </tr>
-                  );
-                })}
-                {/* SHEET-11: the test/host table gets the same pinned draft
-                    row, so the "first meaningful value creates one record"
-                    behaviour is exercised without a layout engine. */}
-                <tr className="sheet-draft-row" aria-label="New record">
-                  <td />
-                  {activeColumns.map((column) => (
-                    <td key={column.id}>
-                      <input
-                        className="sheet-draft-input"
-                        aria-label={`New record ${column.name}`}
-                        type="text"
-                        defaultValue=""
-                        onBlur={(event) => {
-                          const value = event.target.value;
-                          if (isMeaningfulDraftValue(value)) {
-                            event.target.value = '';
-                            void createFromDraft(column.id, value);
-                          }
-                        }}
-                        onKeyDown={(event) => {
-                          if (event.key === 'Enter') {
-                            event.currentTarget.blur();
-                          }
-                        }}
-                      />
-                    </td>
-                  ))}
-                  <td />
-                  <td>—</td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-          {/* Test/host environments render the accessible table instead of
-              the virtualised grid; the same ONE hint appears in flow there. */}
-          {isTestEnvironment ? emptyNotice : null}
+                    ))}
+                    <td />
+                    <td>—</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {/* In tests the one non-blocking hint sits in flow beside the table. */}
+          {__DKS_TEST_SURFACE__ ? emptyNotice : null}
         </section>
       )}
 

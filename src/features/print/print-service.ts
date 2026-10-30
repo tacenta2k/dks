@@ -1,6 +1,3 @@
-import { jsPDF } from 'jspdf';
-import autoTable from 'jspdf-autotable';
-
 import { getPrimaryExpiryColumn, type ColumnDefinition } from '../../lib/columns';
 import { calculateDaysLeft, formatDisplayDate, isValidIsoDate } from '../../lib/date';
 import { can } from '../../lib/permissions';
@@ -332,9 +329,22 @@ function pdfFileName(fileName?: string): string {
   return value.toLowerCase().endsWith('.pdf') ? value : `${value}.pdf`;
 }
 
-/** Create PDF bytes and optionally hand them to an application-owned saver. */
-export function exportReportToPdf(model: PrintReportModel, options: PdfExportOptions = {}): PdfExportFile {
+/**
+ * Create PDF bytes and optionally hand them to an application-owned saver.
+ *
+ * jsPDF and its table plugin are fetched here, on the first PDF export. The
+ * permission check runs before the import so an Office caller is refused
+ * without downloading anything, and the print dialog path never fetches them.
+ */
+export async function exportReportToPdf(
+  model: PrintReportModel,
+  options: PdfExportOptions = {},
+): Promise<PdfExportFile> {
   assertPrintAccess(options.role);
+  const [{ jsPDF }, { default: autoTable }] = await Promise.all([
+    import('jspdf'),
+    import('jspdf-autotable'),
+  ]);
   const document = new jsPDF();
   document.setProperties({ title: model.header, subject: model.filterSummary });
   document.setFontSize(16);

@@ -11,6 +11,9 @@ export default defineConfig({
   plugins: [react()],
   define: {
     __DKS_VERSION__: JSON.stringify(packageVersion),
+    // The only place the jsdom sheet table is switched on (see H3 and
+    // vite.config.ts, where it is false for every production build).
+    __DKS_TEST_SURFACE__: JSON.stringify(true),
   },
   test: {
     environment: 'jsdom',

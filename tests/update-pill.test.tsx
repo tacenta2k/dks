@@ -85,7 +85,8 @@ describe('top-bar update-ready pill', () => {
     );
     const { container, rerender, unmount } = render(ui);
 
-    fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
+    // Settings is a lazy route: wait for its chunk before using its controls.
+    fireEvent.click(await screen.findByRole('button', { name: /About & updates/i }));
     expect(await screen.findByText('Update 0.1.1 is ready to install.')).toBeInTheDocument();
     fireEvent.click(screen.getByRole('button', { name: 'Later' }));
 
@@ -147,7 +148,7 @@ describe('top-bar update-ready pill', () => {
     );
 
     expect(screen.getByText('Update 0.1.1 ready')).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /About & updates/i }));
 
     expect(
       await screen.findByText('Update 0.1.1 is ready to install.'),

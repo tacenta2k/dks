@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentProps, type ReactNode } from 'react';
+import { Suspense, useEffect, useRef, useState, type ReactNode } from 'react';
 
 import { can } from '../../lib/permissions';
 import { formatLocalDateTime } from '../../lib/date';
@@ -13,7 +13,7 @@ import type {
   ResolvedTheme,
   ThemePreference,
 } from '../../lib/types';
-import { DashboardPage } from '../../features/dashboard/DashboardPage';
+import type { DashboardPageProps } from '../../features/dashboard/DashboardPage';
 import type { DashboardFilterId } from '../../features/dashboard/selectors';
 import dksLogo from '../../assets/dks-logo.png';
 import dksLogoDark from '../../assets/dks-logo-dark.png';
@@ -22,24 +22,27 @@ import type {
   NotificationRecord,
   SnoozeDuration,
 } from '../../features/notifications/alert-service';
-import {
-  AdminAuditLogPanel,
-  AdminRecycleBinPanel,
-  AdminSheetActions,
-  type AdminActor,
-} from '../../features/admin';
+import type { AdminActor } from '../../features/admin/AdminTools';
 import type { ExportSaveCallback } from '../../features/import-export/export-service';
 import type { PdfExportFile, PrintReportModel } from '../../features/print/print-service';
-import { SheetPage } from '../../features/sheet/SheetPage';
 import type { SheetRepository } from '../../features/sheet/repository';
-import {
-  SettingsPage,
-  type PartialSettings,
+import type {
+  PartialSettings,
+  SettingsPageProps,
 } from '../../features/settings/SettingsPage';
 import type { AuditProfile } from '../../features/audit/AuditLogPage';
 import type { AuditClearRemoteClient } from '../../features/audit/audit-service';
 import { ConfirmDialog } from '../../features/ui/ConfirmDialog';
 import { AdminStatusPanel } from '../../features/diagnostics/AdminStatusPanel';
+import {
+  AdminAuditLogView,
+  AdminRecycleBinView,
+  AdminSheetActionsView,
+  DashboardView,
+  LazyView,
+  SettingsView,
+  SheetView,
+} from './LazyView';
 
 type AdminView = 'recycle-bin' | 'audit-log';
 type ShellView = AppView | 'settings' | AdminView;
@@ -79,22 +82,22 @@ export interface AppShellProps {
   isDemoMode?: boolean;
   sheetRepository?: SheetRepository;
   repositoryRevision?: number;
-  dashboardThresholds?: Parameters<typeof DashboardPage>[0]['thresholds'];
-  dashboardColors?: Parameters<typeof DashboardPage>[0]['colors'];
+  dashboardThresholds?: DashboardPageProps['thresholds'];
+  dashboardColors?: DashboardPageProps['colors'];
   onDashboardFilter?: (filter: DashboardFilterId) => void;
-  onDashboardRefresh?: ComponentProps<typeof DashboardPage>['onRefresh'];
+  onDashboardRefresh?: DashboardPageProps['onRefresh'];
   /** Pending dashboard-card filter for the Visa Sheet (token re-applies it). */
   sheetDashboardFilter?: { filter: DashboardFilterId; token: number } | null;
   settings?: PartialSettings;
   initialSettings?: PartialSettings;
-  settingsColumns?: ComponentProps<typeof SettingsPage>['columns'];
-  onSettingsChange?: ComponentProps<typeof SettingsPage>['onSettingsChange'];
+  settingsColumns?: SettingsPageProps['columns'];
+  onSettingsChange?: SettingsPageProps['onSettingsChange'];
   /** Admin-only: client for the "Email notifications" settings section. */
-  emailPrefsClient?: ComponentProps<typeof SettingsPage>['emailPrefsClient'];
+  emailPrefsClient?: SettingsPageProps['emailPrefsClient'];
   appVersion?: string;
-  onCheckForUpdates?: ComponentProps<typeof SettingsPage>['onCheckForUpdates'];
-  onSignOutAllOfficeSessions?: ComponentProps<typeof SettingsPage>['onSignOutAllOfficeSessions'];
-  settingsError?: ComponentProps<typeof SettingsPage>['settingsError'];
+  onCheckForUpdates?: SettingsPageProps['onCheckForUpdates'];
+  onSignOutAllOfficeSessions?: SettingsPageProps['onSignOutAllOfficeSessions'];
+  settingsError?: SettingsPageProps['settingsError'];
   auditProfiles?: readonly AuditProfile[];
   /** Supabase client for the admin-only clear-audit RPC (R2-10). */
   auditRemoteClient?: AuditClearRemoteClient | null;
@@ -761,81 +764,97 @@ export function AppShell({
             </div>
           ) : null}
 
-           {effectiveView === 'dashboard' ? (
-             // No revision in the key: remounting on every sync destroyed
-             // in-progress input focus. The token below re-fetches in place.
-             <DashboardPage
+          {/*
+            Every screen below is a dynamic import (LazyView). The fallback and
+            the error boundary live INSIDE <main>, so the shell — navigation,
+            sync status, notifications, updater pill — stays mounted and usable
+            while a chunk loads or if one cannot be read from disk.
+          */}
+          <LazyView label={copy.title} boundaryKey={effectiveView}>
+            {effectiveView === 'dashboard' ? (
+              // No revision in the key: remounting on every sync destroyed
+              // in-progress input focus. The token below re-fetches in place.
+              <DashboardView
                 repository={sheetRepository}
-               thresholds={dashboardThresholds}
+                thresholds={dashboardThresholds}
                 colors={dashboardColors}
                 onFilter={onDashboardFilter}
                 onRefresh={onDashboardRefresh}
                 refreshToken={pageRefreshToken}
               />
-           ) : effectiveView === 'sheet' ? (
-             // R2-09: no centered wrapper and no Administrator Tools card. The
-             // grid fills the page; the Admin-only Tools menu lives in the
-             // sheet's single toolbar, and Office gets no tools at all.
-             <SheetPage
-               repository={sheetRepository}
-               role={role}
-               refreshToken={pageRefreshToken}
-               dashboardFilter={sheetDashboardFilter?.filter ?? null}
-               dashboardFilterToken={sheetDashboardFilter?.token ?? 0}
-               theme={resolvedTheme}
-               thresholds={dashboardThresholds}
-               toolsMenu={(
-                 <AdminSheetActions
-                   repository={sheetRepository}
-                   role={role}
-                   actor={actor}
-                   onSaveExport={onSaveExport}
-                   onSavePdf={onSavePdf}
-                   onPrint={onPrint}
-                   onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
-                 />
-               )}
-             />
-           ) : effectiveView === 'recycle-bin' ? (
-              <AdminRecycleBinPanel
+            ) : effectiveView === 'sheet' ? (
+              // R2-09: no centered wrapper and no Administrator Tools card. The
+              // grid fills the page; the Admin-only Tools menu lives in the
+              // sheet's single toolbar, and Office gets no tools at all.
+              <SheetView
+                repository={sheetRepository}
+                role={role}
+                refreshToken={pageRefreshToken}
+                dashboardFilter={sheetDashboardFilter?.filter ?? null}
+                dashboardFilterToken={sheetDashboardFilter?.token ?? 0}
+                theme={resolvedTheme}
+                thresholds={dashboardThresholds}
+                toolsMenu={
+                  // Own boundary: the Tools menu is a separate chunk, and a
+                  // missing one must not take the sheet down with it. The menu
+                  // itself renders nothing for a role without these rights, so
+                  // Office never fetches the chunk at all.
+                  can(role, 'export') || can(role, 'import') || can(role, 'print') ? (
+                    <Suspense fallback={null}>
+                      <AdminSheetActionsView
+                        repository={sheetRepository}
+                        role={role}
+                        actor={actor}
+                        onSaveExport={onSaveExport}
+                        onSavePdf={onSavePdf}
+                        onPrint={onPrint}
+                        onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
+                      />
+                    </Suspense>
+                  ) : null
+                }
+              />
+            ) : effectiveView === 'recycle-bin' ? (
+              <AdminRecycleBinView
                 repository={sheetRepository}
                 role={role}
                 actor={actor}
                 onRepositoryChanged={() => setSheetRevision((revision) => revision + 1)}
                 refreshToken={pageRefreshToken}
               />
-           ) : effectiveView === 'audit-log' ? (
-             <AdminAuditLogPanel
-               key={`audit-log-${sheetRevision}`}
-               repository={sheetRepository}
-               role={role}
-               profiles={auditProfiles}
-               actorLabel={actor?.name ?? null}
-               remoteClient={auditRemoteClient ?? null}
-             />
-           ) : (
-             <SettingsPage
-               role={role}
-               settings={settings}
-               initialSettings={initialSettings}
-               columns={settingsColumns}
-               repository={sheetRepository}
-               onSettingsChange={onSettingsChange}
-               emailPrefsClient={emailPrefsClient}
-               appVersion={appVersion}
-               updater={updater}
-               updateState={updateState}
-               onUpdateStateChange={onUpdateStateChange}
+            ) : effectiveView === 'audit-log' ? (
+              <AdminAuditLogView
+                key={`audit-log-${sheetRevision}`}
+                repository={sheetRepository}
+                role={role}
+                profiles={auditProfiles}
+                actorLabel={actor?.name ?? null}
+                remoteClient={auditRemoteClient ?? null}
+              />
+            ) : (
+              <SettingsView
+                role={role}
+                settings={settings}
+                initialSettings={initialSettings}
+                columns={settingsColumns}
+                repository={sheetRepository}
+                onSettingsChange={onSettingsChange}
+                emailPrefsClient={emailPrefsClient}
+                appVersion={appVersion}
+                updater={updater}
+                updateState={updateState}
+                onUpdateStateChange={onUpdateStateChange}
                 onCheckForUpdates={onCheckForUpdates}
                 onSignOutAllOfficeSessions={onSignOutAllOfficeSessions}
                 settingsError={settingsError}
-               onClose={() => {
-                 setIsSettingsOpen(false);
-                 setAdminView(null);
-                 onNavigate('dashboard');
-               }}
-             />
-           )}
+                onClose={() => {
+                  setIsSettingsOpen(false);
+                  setAdminView(null);
+                  onNavigate('dashboard');
+                }}
+              />
+            )}
+          </LazyView>
         </main>
       </div>
     </div>

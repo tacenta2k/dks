@@ -76,18 +76,21 @@ describe('admin renderer integration', () => {
     // Admin-only "Tools ▾" toolbar menu (no Administrator Tools card).
     expect(screen.queryByText(/administrator tools/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/manage records/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Tools/ })).toBeInTheDocument();
+    // The Tools menu is its own lazy chunk, so wait for it to mount.
+    expect(await screen.findByRole('button', { name: /^Tools/ })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
     fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
 
     // R7: the toolbar waits for its own snapshot before exporting, so the save
-    // happens asynchronously. Wait for it (and for the Tools button to be
-    // re-enabled) before opening the menu a second time.
+    // happens asynchronously. The button also disables itself while the export
+    // runs (Excel now loads its chunk first), and a click on a busy button is
+    // dropped — so wait for the save AND for it to re-enable before reopening.
     await waitFor(() => expect(saved).toHaveLength(1));
-    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Excel' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Tools/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /^Tools/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Export Excel' }));
 
     await waitFor(() => expect(saved).toHaveLength(2));
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
@@ -148,7 +151,9 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    // The Tools menu (and its file input) is its own lazy chunk, so it can
+    // still be in flight when the sheet rows have already painted.
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(['Name,Passport No\nGrace Hopper,G-2'], 'people.csv', { type: 'text/csv' });
     fireEvent.change(input, { target: { files: [file] } });
     expect((input as HTMLInputElement).files?.[0]?.name).toBe('people.csv');
@@ -159,7 +164,7 @@ describe('admin renderer integration', () => {
 
     await waitFor(async () => {
       expect((await repository.getRows()).some((row) => row.data.name === 'Grace Hopper')).toBe(true);
-    }, { timeout: 10_000 });
+    });
   }, 30_000);
 
   it('delegates print and PDF report actions from the report modal', async () => {
@@ -177,7 +182,7 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Tools/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Print / PDF report' }));
     // R7: the report opens once the toolbar snapshot is loaded.
     expect(await screen.findByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
@@ -187,7 +192,7 @@ describe('admin renderer integration', () => {
     await waitFor(() => {
       expect(onPrint).toHaveBeenCalledWith(expect.objectContaining({ header: 'DKS Expiry Report' }));
       expect(onSavePdf).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'dks-report.pdf' }));
-    }, { timeout: 10_000 });
+    });
   }, 30_000);
 
   it('lists deleted rows and confirms restore and permanent delete actions', async () => {
@@ -200,7 +205,9 @@ describe('admin renderer integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    // The heading is shell chrome; the panel (and its row actions) arrive with
+    // the lazily imported Recycle Bin chunk.
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore' }));
     // SET-11: an in-app confirmation dialog (native window.confirm is gone).
     const restoreDialog = await screen.findByRole('dialog', { name: 'Restore this record?' });
     fireEvent.click(within(restoreDialog).getByRole('button', { name: 'Restore' }));
@@ -225,7 +232,7 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
     // S3: friendly action names (raw code "create" is no longer shown).
-    expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();
+    expect(within(await screen.findByRole('table')).getByText('Created record')).toBeInTheDocument();
   }, 30_000);
 
 describe('imported date columns (Blocker 2, integration)', () => {
@@ -247,7 +254,7 @@ describe('imported date columns (Blocker 2, integration)', () => {
     );
     await screen.findByText('Ada Lovelace');
 
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(
       ['Name,Expiry Date\nGrace Hopper,10/01/2004\nMarianne,11/02/2005'],
       'people.csv',
@@ -286,7 +293,7 @@ describe('imported date columns (Blocker 2, integration)', () => {
     );
     await screen.findByText('Ada Lovelace');
 
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(
       ['Name,Start date\nNew Person,10/01/2004'],
       'dates.csv',

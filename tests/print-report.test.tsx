@@ -89,10 +89,10 @@ describe('print and report workflows', () => {
     expect(screen.queryByRole('dialog', { name: 'Print report' })).not.toBeInTheDocument();
   });
 
-  it('creates PDF bytes through the injectable save callback and rejects office PDF export', () => {
+  it('creates PDF bytes through the injectable save callback and rejects office PDF export', async () => {
     const model = buildPrintReportModel(rows, columns, { role: 'admin', today: '2026-01-01' });
     const save = vi.fn();
-    const result = exportReportToPdf(model, {
+    const result = await exportReportToPdf(model, {
       role: 'admin',
       fileName: 'report.pdf',
       save,
@@ -101,6 +101,8 @@ describe('print and report workflows', () => {
     expect(result.fileName).toBe('report.pdf');
     expect(result.data.byteLength).toBeGreaterThan(0);
     expect(save).toHaveBeenCalledWith(expect.objectContaining({ fileName: 'report.pdf' }));
-    expect(() => exportReportToPdf(model, { role: 'office' })).toThrow(/administrator/i);
+    // The permission check runs before the lazy PDF import, so Office is
+    // refused without downloading the library.
+    await expect(exportReportToPdf(model, { role: 'office' })).rejects.toThrow(/administrator/i);
   });
 });

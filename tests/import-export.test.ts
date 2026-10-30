@@ -53,8 +53,8 @@ describe('admin import and export workflows', () => {
     );
   });
 
-  it('exports an XLSX workbook with explicit headers, DD/MM/YYYY dates, and Days Left', () => {
-    const result = createXlsxExport({
+  it('exports an XLSX workbook with explicit headers, DD/MM/YYYY dates, and Days Left', async () => {
+    const result = await createXlsxExport({
       role: 'admin',
       rows,
       columns,
