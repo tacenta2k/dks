@@ -9,8 +9,8 @@
  */
 import { readFileSync } from 'node:fs';
 
-import { build } from 'esbuild';
-import { describe, expect, it } from 'vitest';
+import { build, stop } from 'esbuild';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const TABLE_MARKERS = ['Visa records table', 'sheet-accessible-table-wrap'];
 
@@ -30,6 +30,12 @@ async function compileSheetPage(testSurface: 'true' | 'false'): Promise<string> 
   });
   return result.outputFiles[0].text;
 }
+
+// esbuild keeps a long-lived service child process; leaving it running can keep
+// the Vitest worker alive past the run.
+afterAll(() => {
+  stop();
+});
 
 describe('jsdom sheet table is build-time only (H3)', () => {
   it('is absent from the production compilation of SheetPage', async () => {

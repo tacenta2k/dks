@@ -14,8 +14,8 @@
  * (`forbidSheetTestSurface` in vite.config.ts) — this test keeps the signal
  * inside `npm test`.
  */
-import { build } from 'esbuild';
-import { describe, expect, it } from 'vitest';
+import { build, stop } from 'esbuild';
+import { afterAll, describe, expect, it } from 'vitest';
 
 const ENTRY = 'src/renderer/main.tsx';
 
@@ -108,6 +108,12 @@ function packageOf(moduleId: string): string | null {
   const rest = normalised.slice(index + marker.length);
   return rest.startsWith('@') ? rest.split('/').slice(0, 2).join('/') : rest.split('/')[0];
 }
+
+// esbuild keeps a long-lived service child process; leaving it running can keep
+// the Vitest worker alive past the run.
+afterAll(() => {
+  stop();
+});
 
 describe('renderer startup module graph (H1)', () => {
   it('never statically imports a screen or a heavy library from the entry', async () => {

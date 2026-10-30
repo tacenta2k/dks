@@ -126,6 +126,13 @@ jobs:
           # build.log covers packaging failures; test-output.txt covers a failing
           # npm test. Both land as a commit comment because the job log is not
           # always retrievable from an API-only client.
+          # Annotations are readable through the API even when the job log is
+          # not, so the failing test lines are also emitted as ::error::.
+          if (Test-Path "test-output.txt") {
+            Select-String -Path "test-output.txt" -Pattern '^\s*(FAIL|×|×\s)' |
+              Select-Object -First 10 |
+              ForEach-Object { Write-Host "::error::test: $($_.Line.Trim())" }
+          }
           $sources = @("$env:RUNNER_TEMP/build.log", "test-output.txt")
           foreach ($source in $sources) {
             if (-not (Test-Path $source)) { continue }
