@@ -227,7 +227,7 @@ describe('SQLite v3 -> v4 migration, deduplication, bounds, and customer outbox 
   });
 
   it('deduplicates within 6 hours, caps queue at 50 & dedupe table at 200, backs off retries, and isolates customer outbox', () => {
-    const store = createSqliteStore(createTempDbPath());
+    const store = createSqliteStore({ filename: ':memory:' });
     try {
       store.createEntry({
         id: '22222222-2222-4222-8222-222222222222',

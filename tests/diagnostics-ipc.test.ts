@@ -1,9 +1,5 @@
 // @vitest-environment node
-import { mkdtempSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-
-import { afterEach, describe, expect, it } from 'vitest';
+import { describe, expect, it } from 'vitest';
 
 import {
   DIAGNOSTICS_IPC_CHANNELS,
@@ -15,12 +11,8 @@ import { createLocalStoreFailure } from '../electron/main/local-store-diagnostic
 import { createSqliteStore, type SqliteStore } from '../electron/main/sqlite';
 import { can } from '../src/lib/permissions';
 
-const tempDirs: string[] = [];
-
 function createTempStore(): SqliteStore {
-  const dir = mkdtempSync(join(tmpdir(), 'dks-diag-ipc-'));
-  tempDirs.push(dir);
-  return createSqliteStore(join(dir, 'dks.sqlite'));
+  return createSqliteStore({ filename: ':memory:' });
 }
 
 function fakeIpcMain() {
@@ -35,19 +27,6 @@ function fakeIpcMain() {
   };
   return { ipcMain, handlers };
 }
-
-afterEach(() => {
-  while (tempDirs.length > 0) {
-    const dir = tempDirs.pop();
-    if (dir) {
-      try {
-        rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-      } catch {
-        // Best-effort temp cleanup on Windows when AV/WAL handles release asynchronously.
-      }
-    }
-  }
-});
 
 describe('diagnostics permissions & IPC authorization boundary', () => {
   it('grants adminStatus capability ONLY to admin role', () => {

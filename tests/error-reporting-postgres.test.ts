@@ -6,10 +6,10 @@
 import { readFileSync } from 'node:fs';
 
 import { PGlite } from '@electric-sql/pglite';
-import { describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-const migrationSql = readFileSync('ARENA/sql/error-reporting.sql', 'utf8');
-const freshSchemaSql = readFileSync('supabase/schema.sql', 'utf8');
+const migrationSql = readFileSync('ARENA/sql/error-reporting.sql', 'utf8').replace(/\r\n/g, '\n');
+const freshSchemaSql = readFileSync('supabase/schema.sql', 'utf8').replace(/\r\n/g, '\n');
 
 const ADMIN_ID = '846536af-f3c6-47c1-8559-d13442c1490a';
 const OFFICE_ID = '2a959122-d789-4f2e-8fdf-958260c2e3f9';
@@ -135,6 +135,18 @@ async function createDatabase(): Promise<PGlite> {
 }
 
 describe('ARENA/sql/error-reporting.sql on real PostgreSQL (PGlite)', () => {
+  let db!: PGlite;
+
+  beforeAll(async () => {
+    db = await createDatabase();
+  });
+
+  afterAll(async () => {
+    if (db) {
+      await db.close();
+    }
+  });
+
   it('keeps verify_error_report_caller, ingest_error_report, and complete_error_report_delivery aligned between schema.sql and migration', () => {
     for (const fnName of [
       'verify_error_report_caller',
@@ -153,92 +165,85 @@ describe('ARENA/sql/error-reporting.sql on real PostgreSQL (PGlite)', () => {
   });
 
   it('enforces RLS, revokes anon & client writes, and gates verify_error_report_caller by role + Office session approval', async () => {
-    const db = await createDatabase();
-    try {
-      const privs = await db.query<{
-        anon_can_read_fp: boolean;
-        auth_can_insert_fp: boolean;
-        auth_can_insert_ev: boolean;
-        auth_can_verify: boolean;
-        auth_can_ingest: boolean;
-        service_can_ingest: boolean;
-        service_can_complete: boolean;
-      }>(`
-        select has_table_privilege('anon', 'public.error_report_fingerprints', 'select') as anon_can_read_fp,
-               has_table_privilege('authenticated', 'public.error_report_fingerprints', 'insert') as auth_can_insert_fp,
-               has_table_privilege('authenticated', 'public.error_report_events', 'insert') as auth_can_insert_ev,
-               has_function_privilege('authenticated', 'public.verify_error_report_caller()', 'execute') as auth_can_verify,
-               has_function_privilege('authenticated', 'public.ingest_error_report(uuid, text, jsonb)', 'execute') as auth_can_ingest,
-               has_function_privilege('service_role', 'public.ingest_error_report(uuid, text, jsonb)', 'execute') as service_can_ingest,
-               has_function_privilege('service_role', 'public.complete_error_report_delivery(uuid, text, text, integer, text, text)', 'execute') as service_can_complete;
-      `);
+    const privs = await db.query<{
+      anon_can_read_fp: boolean;
+      auth_can_insert_fp: boolean;
+      auth_can_insert_ev: boolean;
+      auth_can_verify: boolean;
+      auth_can_ingest: boolean;
+      service_can_ingest: boolean;
+      service_can_complete: boolean;
+    }>(`
+      select has_table_privilege('anon', 'public.error_report_fingerprints', 'select') as anon_can_read_fp,
+             has_table_privilege('authenticated', 'public.error_report_fingerprints', 'insert') as auth_can_insert_fp,
+             has_table_privilege('authenticated', 'public.error_report_events', 'insert') as auth_can_insert_ev,
+             has_function_privilege('authenticated', 'public.verify_error_report_caller()', 'execute') as auth_can_verify,
+             has_function_privilege('authenticated', 'public.ingest_error_report(uuid, text, jsonb)', 'execute') as auth_can_ingest,
+             has_function_privilege('service_role', 'public.ingest_error_report(uuid, text, jsonb)', 'execute') as service_can_ingest,
+             has_function_privilege('service_role', 'public.complete_error_report_delivery(uuid, text, text, integer, text, text)', 'execute') as service_can_complete;
+    `);
 
-      expect(privs.rows[0]).toEqual({
-        anon_can_read_fp: false,
-        auth_can_insert_fp: false,
-        auth_can_insert_ev: false,
-        auth_can_verify: true,
-        auth_can_ingest: false,
-        service_can_ingest: true,
-        service_can_complete: true,
-      });
+    expect(privs.rows[0]).toEqual({
+      anon_can_read_fp: false,
+      auth_can_insert_fp: false,
+      auth_can_insert_ev: false,
+      auth_can_verify: true,
+      auth_can_ingest: false,
+      service_can_ingest: true,
+      service_can_complete: true,
+    });
 
-      const verifyAs = async (claims: Record<string, string>) => {
-        await db.exec('begin;');
-        try {
-          await db.exec('set local role authenticated;');
-          await db.query('select set_config($1, $2, true)', [
-            'request.jwt.claims',
-            JSON.stringify(claims),
-          ]);
-          const out = await db.query<{ res: Record<string, unknown> }>(
-            'select public.verify_error_report_caller() as res',
-          );
-          await db.exec('commit;');
-          return out.rows[0].res;
-        } catch (err) {
-          await db.exec('rollback;');
-          throw err;
-        }
-      };
+    const verifyAs = async (claims: Record<string, string>) => {
+      await db.exec('begin;');
+      try {
+        await db.exec('set local role authenticated;');
+        await db.query('select set_config($1, $2, true)', [
+          'request.jwt.claims',
+          JSON.stringify(claims),
+        ]);
+        const out = await db.query<{ res: Record<string, unknown> }>(
+          'select public.verify_error_report_caller() as res',
+        );
+        await db.exec('commit;');
+        return out.rows[0].res;
+      } catch (err) {
+        await db.exec('rollback;');
+        throw err;
+      }
+    };
 
-      expect(await verifyAs({ role: 'authenticated', sub: ADMIN_ID })).toEqual({
-        authorized: true,
-        user_id: ADMIN_ID,
-        role: 'admin',
-        reporting_enabled: true,
-      });
+    expect(await verifyAs({ role: 'authenticated', sub: ADMIN_ID })).toEqual({
+      authorized: true,
+      user_id: ADMIN_ID,
+      role: 'admin',
+      reporting_enabled: true,
+    });
 
-      expect(
-        await verifyAs({
-          role: 'authenticated',
-          sub: OFFICE_ID,
-          session_id: SESSION_APPROVED,
-        }),
-      ).toEqual({
-        authorized: true,
-        user_id: OFFICE_ID,
-        role: 'office',
-        reporting_enabled: true,
-      });
+    expect(
+      await verifyAs({
+        role: 'authenticated',
+        sub: OFFICE_ID,
+        session_id: SESSION_APPROVED,
+      }),
+    ).toEqual({
+      authorized: true,
+      user_id: OFFICE_ID,
+      role: 'office',
+      reporting_enabled: true,
+    });
 
-      // Pending/unapproved Office session MUST fail with 42501!
-      await expect(
-        verifyAs({
-          role: 'authenticated',
-          sub: OFFICE_ID,
-          session_id: SESSION_UNAPPROVED,
-        }),
-      ).rejects.toThrow(/approved DKS session is required/i);
-    } finally {
-      await db.close();
-    }
+    // Pending/unapproved Office session MUST fail with 42501!
+    await expect(
+      verifyAs({
+        role: 'authenticated',
+        sub: OFFICE_ID,
+        session_id: SESSION_UNAPPROVED,
+      }),
+    ).rejects.toThrow(/approved DKS session is required/i);
   });
 
   it('deduplicates 24h fingerprints, enforces 10/10m per-user rate limits, prunes >30d events, and honors error_reporting_enabled=false', async () => {
-    const db = await createDatabase();
-    try {
-      const ingestAsServiceRole = async (
+    const ingestAsServiceRole = async (
         userId: string,
         role: 'admin' | 'office',
         payload: Record<string, unknown>,
@@ -390,8 +395,5 @@ describe('ARENA/sql/error-reporting.sql on real PostgreSQL (PGlite)', () => {
         ok: true,
         action: 'disabled',
       });
-    } finally {
-      await db.close();
-    }
   });
 });
