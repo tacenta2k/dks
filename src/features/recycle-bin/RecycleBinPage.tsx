@@ -143,16 +143,26 @@ export function RecycleBinPage({
                   </td>
                   <td>{deletedByText(row) ?? '—'}</td>
                   <td>
-                    {can(role, 'restore') ? (
-                      <button type="button" onClick={() => void onRestore?.(row)}>
-                        Restore
-                      </button>
-                    ) : null}
-                    {can(role, 'permanentDelete') ? (
-                      <button type="button" onClick={() => void onPermanentDelete?.(row)}>
-                        Delete
-                      </button>
-                    ) : null}
+                    <div className="recycle-bin-actions">
+                      {can(role, 'restore') ? (
+                        <button
+                          type="button"
+                          className="recycle-bin-action recycle-bin-action--restore"
+                          onClick={() => void onRestore?.(row)}
+                        >
+                          Restore
+                        </button>
+                      ) : null}
+                      {can(role, 'permanentDelete') ? (
+                        <button
+                          type="button"
+                          className="recycle-bin-action recycle-bin-action--delete"
+                          onClick={() => void onPermanentDelete?.(row)}
+                        >
+                          Delete
+                        </button>
+                      ) : null}
+                    </div>
                   </td>
                 </tr>
               );

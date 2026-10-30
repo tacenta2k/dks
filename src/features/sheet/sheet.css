@@ -667,14 +667,18 @@
   display: flex;
   width: 100%;
   max-width: none;
-  /* Fills the shell body below the top bar; the grid scrolls internally, so
+  /* Fills the shell body below the top bar with the same outer inset as
+     Dashboard, Recycle Bin, and Audit Log; the grid scrolls internally, so
      the sheet page itself never scrolls. */
   height: auto;
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   margin: 0;
-  padding: 10px 12px 12px;
+  padding:
+    clamp(14px, 1.8vh, 22px)
+    clamp(20px, 2.6vw, 44px)
+    clamp(16px, 2.2vh, 24px);
   overflow: hidden;
 }
 
@@ -1084,6 +1088,7 @@
   .content.content--sheet {
     height: calc(100vh - 50px);
     flex: none;
+    padding: 24px 18px;
   }
 }
 

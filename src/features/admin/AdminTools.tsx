@@ -1097,24 +1097,24 @@ export function AdminAuditLogPanel({
     <div className="admin-panel">
       {error ? <p className="admin-inline-message admin-inline-message--error" role="alert">{error}</p> : null}
       {status ? <p className="admin-inline-message" role="status">{status}</p> : null}
-      <div className="admin-panel__toolbar">
-        <button
-          className="button button--danger"
-          type="button"
-          onClick={() => {
-            setConfirmation('');
-            setConfirmingClear(true);
-          }}
-        >
-          Clear audit log
-        </button>
-      </div>
       <AuditLogPage
         role={role}
         entries={entries}
         profiles={profiles}
         columns={auditColumns}
         rows={auditRows}
+        headerActions={(
+          <button
+            className="button button--danger audit-log-clear-button"
+            type="button"
+            onClick={() => {
+              setConfirmation('');
+              setConfirmingClear(true);
+            }}
+          >
+            Clear audit log
+          </button>
+        )}
       />
       {confirmingClear ? (
         <div

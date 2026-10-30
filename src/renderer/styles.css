@@ -712,20 +712,41 @@ button:focus-visible {
 /* FIXES_UI §7/§8: compact page count — the page title lives in the top bar. */
 .recycle-bin-page__count,
 .audit-log-page__count {
-  margin: 0 0 12px;
+  margin: 0;
   color: var(--color-text-muted);
-  font-size: 12px;
+  font-size: 12.5px;
   font-weight: 650;
 }
 
+.audit-log-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+
+.audit-log-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-left: auto;
+}
+
+.audit-log-clear-button {
+  min-height: 36px;
+  padding: 6px 14px;
+  box-shadow: none;
+}
+
 /* FIXES_UI §7/§8 (RBIN-01 / AUDIT-01): full-width tables, compact toolbars,
-   and sticky headers on the admin pages. The page title lives in the top bar. */
+   and sticky headers on the admin pages. The page title lives in the top bar.
+   No overflow container here so thead th sticks relative to main.content. */
 .recycle-bin-page,
 .audit-log-page {
   display: grid;
   gap: 12px;
   min-width: 0;
-  overflow-x: auto;
 }
 
 .recycle-bin-page table,
@@ -776,7 +797,72 @@ button:focus-visible {
 
 .recycle-bin-toolbar__delete-all {
   flex: none;
+  min-height: 36px;
+  padding: 6px 14px;
+  box-shadow: none;
   white-space: nowrap;
+}
+
+.recycle-bin-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recycle-bin-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 11px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  box-shadow: none;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  white-space: nowrap;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
+}
+
+.recycle-bin-action--restore {
+  border-color: #16a34a;
+  background: #ecfdf3;
+  color: #166534;
+}
+
+.recycle-bin-action--restore:hover:not(:disabled) {
+  border-color: #15803d;
+  background: #dcfce7;
+  color: #14532d;
+}
+
+.recycle-bin-action--restore:focus-visible {
+  outline: 2px solid #15803d;
+  outline-offset: 2px;
+}
+
+.recycle-bin-action--delete {
+  border-color: #dc2626;
+  background: #fef2f2;
+  color: #b91c1c;
+}
+
+.recycle-bin-action--delete:hover:not(:disabled) {
+  border-color: #b91c1c;
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.recycle-bin-action--delete:focus-visible {
+  outline: 2px solid #dc2626;
+  outline-offset: 2px;
 }
 
 .recycle-bin-toolbar__search {
@@ -1934,5 +2020,37 @@ button:focus-visible {
 
 :root[data-theme='dark'] .confirm-dialog__error {
   color: #fca5a5;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--restore {
+  border-color: #1f7a4c;
+  background: #071f14;
+  color: #6ee7b7;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--restore:hover:not(:disabled) {
+  border-color: #2c9d63;
+  background: #0b2d1d;
+  color: #a7f3d0;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--restore:focus-visible {
+  outline-color: #34d399;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--delete {
+  border-color: #b91c1c;
+  background: #240a0c;
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--delete:hover:not(:disabled) {
+  border-color: #ef4444;
+  background: #350f12;
+  color: #fecaca;
+}
+
+:root[data-theme='dark'] .recycle-bin-action--delete:focus-visible {
+  outline-color: #f87171;
 }
 

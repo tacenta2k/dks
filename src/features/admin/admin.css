@@ -19,13 +19,6 @@
   gap: 12px;
 }
 
-.admin-panel__toolbar {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-}
-
 .admin-sheet-actions {
   display: grid;
   gap: 14px;

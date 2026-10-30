@@ -1,7 +1,10 @@
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
+import { AdminAuditLogPanel } from '../src/features/admin/AdminTools';
 import {
   AuditLogPage,
   entryActor,
@@ -11,6 +14,7 @@ import {
   summarizeAuditDetails,
 } from '../src/features/audit/AuditLogPage';
 import type { AuditEntry } from '../src/features/audit/audit-types';
+import { createInMemorySheetRepository } from '../src/features/sheet/repository';
 
 const entries: AuditEntry[] = [
   {
@@ -249,5 +253,29 @@ describe('audit log page', () => {
     expect(formatAuditTime({ action: 'x', timestamp: '2026-01-01T12:00:00.000Z' })).toMatch(/^\d{2}\/\d{2}\/\d{4} \d{2}:\d{2}$/);
     expect(entryActor({ action: 'x', actorId: 'unknown-id', actor: null })).toBe('System (local action)');
     expect(entryActor({ action: 'x', actor: '846536af-f3c6-47c1-8559-d13442c1490a', actorId: '846536af-f3c6-47c1-8559-d13442c1490a' }, profiles)).toBe('Ahmed K');
+  });
+
+  it('places the recorded action count and Clear audit log on one header row directly above filters and table', async () => {
+    const repository = createInMemorySheetRepository();
+    await repository.createRow({ name: 'Record A' });
+
+    const { container } = render(<AdminAuditLogPanel role="admin" repository={repository} />);
+
+    const count = await screen.findByText(/1 recorded action/);
+    const clearButton = screen.getByRole('button', { name: 'Clear audit log' });
+    const header = container.querySelector('.audit-log-header');
+    expect(header).not.toBeNull();
+    expect(header).toContainElement(count);
+    expect(header).toContainElement(clearButton);
+
+    const auditPage = container.querySelector('.audit-log-page');
+    const directChildren = Array.from(auditPage?.children ?? []);
+    expect(directChildren[0]).toBe(header);
+    expect(directChildren[1]).toHaveClass('audit-log-filters');
+    expect(directChildren[2]?.tagName).toBe('TABLE');
+
+    const shellCss = readFileSync(resolve(__dirname, '../src/renderer/styles.css'), 'utf8');
+    expect(shellCss).toMatch(/\.audit-log-header\s*\{[^}]*display:\s*flex[^}]*justify-content:\s*space-between/s);
+    expect(shellCss).not.toMatch(/\.recycle-bin-page,\s*\.audit-log-page\s*\{[^}]*overflow-x:\s*auto/s);
   });
 });
