@@ -242,7 +242,41 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Build Windows installer and upload draft release
-        run: npm run release
+        shell: pwsh
+        env:
+          RELEASE_LOG: ${{ github.workspace }}\release-build.log
+        run: |
+          # Tee the electron-builder output to a file so a failure is
+          # diagnosable: the job log is not always retrievable, and the
+          # rcedit/packaging error used to be visible only there. Publishing
+          # behaviour is unchanged (npm run release still decides it).
+          cmd.exe /d /c "npm run release 1>%RELEASE_LOG% 2>&1"
+          $code = $LASTEXITCODE
+          if ($code -ne 0) {
+            Write-Host "npm run release failed with exit code $code — last 120 lines:"
+            if (Test-Path $env:RELEASE_LOG) {
+              Get-Content -LiteralPath $env:RELEASE_LOG -Tail 120 | ForEach-Object { Write-Host "RELEASE: $_" }
+              Select-String -Path $env:RELEASE_LOG -Pattern "Fatal error|Unable to commit|rcedit|⨯" |
+                Select-Object -Last 20 |
+                ForEach-Object { Write-Host "::error::release build: $($_.Line.Trim())" }
+            } else {
+              Write-Host "::error::no build log was captured at $env:RELEASE_LOG"
+            }
+            exit $code
+          }
+          if (Test-Path $env:RELEASE_LOG) {
+            Select-String -Path $env:RELEASE_LOG -Pattern "rcedit|afterPack|dks\]|packaging" |
+              Select-Object -Last 40 |
+              ForEach-Object { Write-Host "RELEASE: $($_.Line)" }
+          }
+
+      - name: Upload release build log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-build-log
+          path: ${{ github.workspace }}/release-build.log
+          if-no-files-found: warn
 
       - name: Verify draft release assets
         id: verify

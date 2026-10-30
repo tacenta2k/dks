@@ -1,0 +1,127 @@
+name: Packaging lock diagnostics (Windows)
+
+# Evidence run for the v0.1.11 release failure ("Fatal error: Unable to commit
+# changes." from app-builder rcedit). It packages with --publish never, the same
+# code path the release uses minus publishing, and then measures what the
+# afterPack lock guard actually proves. No release is created or modified.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - arena/ee8d55f0-dks
+
+jobs:
+  diagnostics:
+    name: Package (no publish) and probe the executable lock
+    runs-on: windows-2022
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Set up Python for node-gyp
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: '3.11'
+
+      - name: Configure node-gyp toolchain
+        shell: pwsh
+        env:
+          SELECTED_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        run: |
+          "npm_config_python=$env:SELECTED_PYTHON" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "npm_config_msvs_version=2022" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node -e "require('better-sqlite3')"
+          if ($LASTEXITCODE -ne 0) {
+            npm rebuild better-sqlite3
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            node -e "require('better-sqlite3')"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Write Vite build environment
+        shell: pwsh
+        env:
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_PUBLISHABLE_KEY: ${{ secrets.VITE_SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_URL)) { $env:VITE_SUPABASE_URL = "https://example.supabase.co" }
+          if ([string]::IsNullOrWhiteSpace($env:VITE_SUPABASE_PUBLISHABLE_KEY)) { $env:VITE_SUPABASE_PUBLISHABLE_KEY = "dummy-publishable-key-for-diagnostics" }
+          $envPath = Join-Path $env:GITHUB_WORKSPACE ".env"
+          [System.IO.File]::WriteAllLines($envPath, @(
+            "VITE_SUPABASE_URL=$env:VITE_SUPABASE_URL",
+            "VITE_SUPABASE_PUBLISHABLE_KEY=$env:VITE_SUPABASE_PUBLISHABLE_KEY"
+          ), [System.Text.UTF8Encoding]::new($false))
+
+      - name: Build renderer and electron
+        run: npm run build
+
+      - name: Verify native module against Electron (release step)
+        run: npm run verify:native
+
+      - name: Package installer (publish never, debug log)
+        shell: pwsh
+        env:
+          DEBUG: electron-builder*
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE "packaging.log"
+          npx electron-builder --win --publish never --config electron-builder.yml 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          Write-Host "electron-builder exit code: $code"
+          if (Test-Path $log) {
+            Select-String -Path $log -Pattern "rcedit|Unable to commit|afterPack|dks\]" |
+              Select-Object -Last 60 |
+              ForEach-Object { Write-Host "PACKAGING: $($_.Line)" }
+          }
+          "ELECTRON_BUILDER_EXIT=$code" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Lock-semantics and hand-off experiments
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "release/win-unpacked/DKS.exe") {
+            node scripts/diagnostics/packaging-lock-probe.cjs 2>&1 | Tee-Object -FilePath "$env:GITHUB_WORKSPACE\lock-probe.log"
+            Write-Host "probe exit code: $LASTEXITCODE"
+          } else {
+            Write-Host "::warning::no packaged DKS.exe — packaging failed before the probe could run"
+          }
+
+      - name: Summarise
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path "$env:GITHUB_WORKSPACE\lock-probe.log") {
+            Get-Content "$env:GITHUB_WORKSPACE\lock-probe.log" | Select-String -Pattern "^\[probe\]" |
+              ForEach-Object { Write-Host $_.Line }
+          }
+          if (Test-Path "$env:GITHUB_WORKSPACE\packaging.log") {
+            $failures = Get-Content "$env:GITHUB_WORKSPACE\packaging.log" | Select-String -Pattern "Fatal error|Unable to commit|⨯"
+            foreach ($failure in $failures) { Write-Host "::error::packaging: $($failure.Line.Trim())" }
+          }
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: packaging-lock-diagnostics
+          path: |
+            packaging.log
+            lock-probe.log
+          if-no-files-found: warn
