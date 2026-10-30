@@ -70,7 +70,7 @@ describe('one-click Release DKS workflow', () => {
 
     const dispatch = asMap(on.workflow_dispatch, 'workflow_dispatch trigger');
     const inputs = asMap(dispatch.inputs, 'workflow_dispatch inputs');
-    expect(Object.keys(inputs)).toEqual(['bump']);
+    expect(Object.keys(inputs)).toEqual(['bump', 'dry_run']);
 
     const bump = asMap(inputs.bump, 'bump input');
     expect(bump.type).toBe('choice');
@@ -255,12 +255,16 @@ describe('one-click Release DKS workflow', () => {
     );
     const versionRun = steps[versionIndex].run ?? '';
 
-    // v0.1.6 was tagged before its GitHub release existed. Re-publishing that
-    // version must reuse the tag, never recreate or move it.
+    // v0.1.6 and v0.1.11 were tagged before their GitHub release existed.
+    // Re-publishing that version must reuse the tag, never recreate or move it.
     expect(versionRun).toContain('$existing = git tag -l $tag');
     expect(versionRun).toContain('git rev-list -n 1 $tag');
-    expect(versionRun).toContain('git merge-base --is-ancestor $tag $head');
     expect(versionRun).toContain('reusing it as-is (not recreated, not moved)');
+    // And it must build THAT commit: a later main must not be published under
+    // the old version/tag (ancestor-only checks allowed exactly that).
+    expect(versionRun).toContain('if ($tagCommit -ne $head)');
+    expect(versionRun).toContain('bump=none reuses tag');
+    expect(versionRun).toContain('A release must build the tagged commit');
     expect(versionRun).not.toContain('cannot publish existing version twice');
     // The tag is only CREATED in the else branch (no existing tag).
     const existingBranch = versionRun.slice(
@@ -268,13 +272,11 @@ describe('one-click Release DKS workflow', () => {
       versionRun.indexOf('} else {', versionRun.indexOf('$existing = git tag -l $tag')),
     );
     expect(existingBranch).not.toContain('git tag -a');
-    expect(existingBranch).toContain('git merge-base --is-ancestor');
+    expect(existingBranch).toContain('$tagCommit -ne $head');
 
-    // A tag that does not belong to main's history is refused instead of
-    // force-moved.
+    // A tag is never moved or force-pushed.
     expect(versionRun).not.toContain('git tag -f');
     expect(versionRun).not.toContain('--force');
-    expect(versionRun).toContain('Refusing to publish a version whose tag does not belong to this history');
 
     // The version still comes from package.json (bump=none = no new commit).
     expect(versionRun).toContain("node -p \"require('./package.json').version\"");
@@ -293,8 +295,11 @@ describe('one-click Release DKS workflow', () => {
       (step) => runIncludes(step, 'gh release edit'),
       'release publication',
     );
+    // The workflow uploads two artifacts (the release build log and the
+    // installer); this asserts the INSTALLER one comes after publishing.
     const artifactIndex = stepIndex(
-      (step) => step.uses === 'actions/upload-artifact@v4',
+      (step) => step.uses === 'actions/upload-artifact@v4'
+        && String((step.with as Record<string, unknown> | undefined)?.name ?? '').includes('installer'),
       'installer artifact upload',
     );
     const summaryIndex = stepIndex(
@@ -375,5 +380,135 @@ describe('electron-builder release safety', () => {
     });
     expect(builder.afterPack).toBe('scripts/after-pack.cjs');
     expect(builder.asarUnpack).toContain('node_modules/better-sqlite3/**');
+  });
+});
+
+/**
+ * Release state lookup (v0.1.11 recovery).
+ *
+ * v0.1.11 was tagged but its release run failed while packaging, so the tag
+ * exists and no GitHub release does. Re-running with bump=none is the intended
+ * recovery — but only if the workflow (a) builds the tagged commit and (b)
+ * refuses to overwrite a release that already exists. A failed API call must
+ * never be read as "no release yet".
+ */
+describe('release state confirmation', () => {
+  const index = stepIndex(
+    (step) => step.name === 'Confirm release state for the tag',
+    'release state confirmation',
+  );
+  const run = steps[index].run ?? '';
+
+  it('runs before anything is built or published', () => {
+    const versionIndex = stepIndex((step) => step.name === 'Resolve version and tag', 'version resolution');
+    const releaseIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    expect(versionIndex).toBeLessThan(index);
+    expect(index).toBeLessThan(releaseIndex);
+  });
+
+  it('treats only HTTP 404 as "no release exists"', () => {
+    expect(run).toContain('releases/tags/$env:RELEASE_TAG');
+    expect(run).toContain("-match 'HTTP 404'");
+    expect(run).toContain('No release exists for $env:RELEASE_TAG');
+    // Any other answer (auth, rate limit, outage) stops the release.
+    expect(run).toContain('Could not confirm the release state');
+    expect(run).toContain('exit 1');
+    expect(run).not.toMatch(/\$code -ne 0[\s\S]{0,80}No release exists/);
+  });
+
+  it('refuses to publish over an existing published release and allows completing a draft', () => {
+    expect(run).toContain('if (-not $release.draft)');
+    expect(run).toContain('already exists and is PUBLISHED');
+    expect(run).toContain('Nothing was built or published');
+    expect(run).toContain('this run will complete it');
+  });
+});
+
+describe('release failure diagnostics', () => {
+  it('names the file holder while the packaging output still exists', () => {
+    const releaseIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    const run = steps[releaseIndex].run ?? '';
+    // rcedit's "Unable to commit changes" does not say who held the file, and
+    // the log is the only place the release can explain itself afterwards.
+    expect(run).toContain('npm run release 1>%RELEASE_LOG% 2>&1');
+    expect(steps[releaseIndex].env).toMatchObject({ RELEASE_LOG: expect.stringContaining('release-build.log') });
+    expect(run).toContain('holder-lookup.cjs release/win-unpacked/DKS.exe');
+    const failureBranch = run.slice(run.indexOf('if ($code -ne 0)'));
+    expect(failureBranch).toContain('holder-lookup.cjs');
+    expect(failureBranch.indexOf('holder-lookup.cjs')).toBeLessThan(
+      failureBranch.indexOf('last 120 lines'),
+    );
+  });
+});
+
+/**
+ * Dry run (Option B before publishing v0.1.11).
+ *
+ * A dry run must exercise the release sequence — build, verify:native, then
+ * electron-builder — while changing nothing: `--publish never`, no tag push,
+ * no release verification or publication. Anything that could publish has to
+ * be conditionally skipped, not merely "usually fast".
+ */
+describe('dry run', () => {
+  const inputs = asMap(workflowOn(workflow).workflow_dispatch, 'workflow_dispatch inputs');
+  const inputMap = asMap(inputs.inputs, 'workflow inputs');
+
+  it('is an explicit boolean input, off by default', () => {
+    const dryRun = asMap(inputMap.dry_run, 'dry_run input');
+    expect(dryRun.type).toBe('boolean');
+    expect(dryRun.default).toBe(false);
+    expect(dryRun.required).toBe(false);
+  });
+
+  it('packages with --publish never instead of npm run release', () => {
+    const releaseIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    const run = steps[releaseIndex].run ?? '';
+    expect(run).toContain('if ("${{ inputs.dry_run }}" -eq "true")');
+    expect(run).toContain('npx electron-builder --config electron-builder.yml --publish never');
+    expect(run).toContain('npm run verify:native');
+    expect(run).toContain('npm run build 1>%RELEASE_LOG% 2>&1');
+    // The publish path is the else branch, unchanged.
+    const elseBranch = run.slice(run.indexOf('} else {'));
+    expect(elseBranch).toContain('npm run release 1>%RELEASE_LOG% 2>&1');
+    expect(elseBranch).not.toContain('--publish never');
+  });
+
+  it('never pushes a tag, verifies assets or publishes in a dry run', () => {
+    for (const name of ['Push version commit and tag', 'Verify draft release assets', 'Publish verified release']) {
+      const index = stepIndex((step) => step.name === name, name);
+      expect(String(steps[index].if ?? '')).toContain('inputs.dry_run != true');
+    }
+    // The upload steps are evidence, not publication: they still run.
+    const uploadLog = stepIndex((step) => step.name === 'Upload release build log', 'log upload');
+    expect(String(steps[uploadLog].if ?? '')).toBe('always()');
+  });
+
+  it('does not create a local tag in a dry run, and says what a real run would do', () => {
+    const versionIndex = stepIndex((step) => step.name === 'Resolve version and tag', 'version resolution');
+    const run = steps[versionIndex].run ?? '';
+    const dryBranchStart = run.indexOf('} elseif ($dryRun) {');
+    expect(dryBranchStart).toBeGreaterThan(-1);
+    const dryBranch = run.slice(dryBranchStart, run.indexOf('} else {', dryBranchStart));
+    expect(dryBranch).toContain('DRY RUN: tag $tag does not exist');
+    expect(dryBranch).toContain('TAG_ACTION=dry-run-would-create');
+    expect(dryBranch).not.toContain('git tag -a');
+  });
+
+  it('posts the packaging evidence where an API-only reader can see it', () => {
+    const index = stepIndex((step) => step.name === 'Post release build evidence', 'evidence comment');
+    expect(String(steps[index].if ?? '')).toBe('always()');
+    const run = steps[index].run ?? '';
+    expect(run).toContain('commits/${{ github.sha }}/comments');
+    // The log path comes from the step env (RELEASE_LOG), not a literal.
+    expect(run).toContain('$log = $env:RELEASE_LOG');
+    expect(run).toContain('PACKAGING_EXIT');
+    expect(run).toContain('TAG_ACTION');
+  });
+
+  it('the job summary never claims a publication happened in a dry run', () => {
+    const index = stepIndex((step) => step.name === 'Write job summary', 'job summary');
+    const run = steps[index].run ?? '';
+    expect(run).toContain('DRY RUN — nothing was published');
+    expect(run.indexOf('DRY RUN')).toBeLessThan(run.indexOf('# DKS release published'));
   });
 });

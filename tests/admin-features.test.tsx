@@ -9,6 +9,39 @@ import { seedFixtureColumns } from './fixtures/sheet-columns';
 import type { CsvExportArtifact, ExportArtifact } from '../src/features/import-export/export-service';
 import type { PdfExportFile, PrintReportModel } from '../src/features/print/print-service';
 
+/**
+ * Open the Admin "Tools ▾" menu.
+ *
+ * The menu is state-driven: a click on the button toggles it. A
+ * `fireEvent.click` on a detached button (React replaced the node during a
+ * re-render) is silently dropped, which used to surface as a mysterious
+ * timeout on `findByRole('menuitem')`. This therefore (1) waits until the
+ * button is enabled, (2) only clicks when the menu is actually closed, so it
+ * can never toggle a menu shut, and (3) re-clicks if the menu did not open.
+ */
+async function openToolsMenu() {
+  await waitFor(() => {
+    const button = screen.getByRole('button', { name: /^Tools/ }) as HTMLButtonElement;
+    expect(button).toBeEnabled();
+    if (!screen.queryByRole('menu')) {
+      fireEvent.click(button);
+    }
+    expect(screen.queryByRole('menu')).toBeInTheDocument();
+  });
+  return screen.getByRole('menu');
+}
+
+/** Click an item of an open menu and wait for the menu to close. */
+async function chooseMenuItem(menu: HTMLElement, label: string) {
+  fireEvent.click(within(menu).getByRole('menuitem', { name: label }));
+  await waitFor(() => expect(screen.queryByRole('menu')).not.toBeInTheDocument());
+}
+
+/** Open the menu and click an item in one step. */
+async function clickMenuItem(label: string) {
+  await chooseMenuItem(await openToolsMenu(), label);
+}
+
 function adminProfile() {
   return {
     id: 'admin-1',
@@ -79,23 +112,48 @@ describe('admin renderer integration', () => {
     // The Tools menu is its own lazy chunk, so wait for it to mount.
     expect(await screen.findByRole('button', { name: /^Tools/ })).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
-    expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
+    const toolsMenu = await openToolsMenu();
+    expect(within(toolsMenu).getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
+    await chooseMenuItem(toolsMenu, 'Export CSV');
 
     // R7: the toolbar waits for its own snapshot before exporting, so the save
     // happens asynchronously. The button also disables itself while the export
-    // runs (Excel now loads its chunk first), and a click on a busy button is
+    // runs (Excel loads its chunk first), and a click on a busy button is
     // dropped — so wait for the save AND for it to re-enable before reopening.
     await waitFor(() => expect(saved).toHaveLength(1));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^Tools/ })).toBeEnabled());
-    fireEvent.click(screen.getByRole('button', { name: /^Tools/ }));
-    fireEvent.click(await screen.findByRole('menuitem', { name: 'Export Excel' }));
+    expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
+  }, 30_000);
 
+  // The second export used to run in the same test as the first, sharing one
+  // 15 s budget. On the Windows runner the two lazy chunk loads together
+  // sometimes exceeded it, and the failure said only "Test timed out" — with
+  // no way to tell which export stalled. Each export now has its own budget
+  // and its own assertion, so a flake names the export that stalled.
+  it('exports the current rows as Excel after a CSV export', async () => {
+    const repository = await seededRepository();
+    const saved: ExportArtifact[] = [];
+    render(
+      <AppShell
+        activeView="sheet"
+        profile={adminProfile()}
+        sheetRepository={repository}
+        onSaveExport={(artifact) => saved.push(artifact)}
+      />,
+    );
+
+    await screen.findByText('Ada Lovelace');
+    await screen.findByRole('button', { name: /^Tools/ });
+
+    await clickMenuItem('Export CSV');
+    await waitFor(() => expect(saved).toHaveLength(1));
+
+    // The toolbar disables itself while exporting; the helper waits for it.
+    await clickMenuItem('Export Excel');
     await waitFor(() => expect(saved).toHaveLength(2));
+
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
     expect(saved[1]).toEqual(expect.objectContaining({ fileName: 'dks-export.xlsx', rowCount: 1 }));
-  }, 15_000);
+  }, 30_000);
 
   it('waits for the toolbar snapshot before exporting (R7 regression)', async () => {
     const repository = await seededRepository();

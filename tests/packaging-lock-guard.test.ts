@@ -41,7 +41,12 @@ interface Guard {
   openForWrite(filePath: string): void;
   parseProcessPathList(output: string): Array<{ pid: number; executablePath: string | null }>;
   parseTasklistCsv(output: string): Array<{ imageName: string; pid: number }>;
-  releaseExecutableLock(options: Record<string, unknown>): Promise<{ attempts: number; waitedMs: number }>;
+  releaseExecutableLock(options: Record<string, unknown>): Promise<{
+    attempts: number;
+    waitedMs: number;
+    exclusive?: { supported: boolean; exclusive: boolean | null; reason: string | null } | null;
+    exclusiveUnavailable?: boolean;
+  }>;
   runCapturedProcess(options: Record<string, unknown>): Promise<{
     status: number | null;
     signal: string | null;
@@ -56,6 +61,25 @@ interface Guard {
 }
 
 const guard = require2(join(ROOT, 'scripts', 'lib', 'packaged-process-guard.cjs')) as Guard;
+const holdersModule = require2(join(ROOT, 'scripts', 'lib', 'file-holders.cjs')) as {
+  formatHolders(filePath: string, holders: unknown[]): string;
+  parseHoldersOutput(stdout: string): Array<{ pid: number; appName: string | null; applicationType: string; service: string | null }>;
+  holdersScript(): string;
+  findFileHolders(filePath: string, options?: Record<string, unknown>): Promise<{
+    supported: boolean;
+    holders: unknown[];
+    reason: string | null;
+  }>;
+};
+
+/**
+ * The exclusive-access check spawns PowerShell, so it is stubbed everywhere;
+ * the real semantics are covered by the dedicated tests below.
+ */
+const exclusiveOk = async () => ({ supported: true, exclusive: true, reason: null });
+
+/** Holder lookups are stubbed everywhere: the real one spawns PowerShell. */
+const noHolders = async () => ({ supported: true, holders: [] as unknown[], output: '', reason: null });
 
 function readNormalised(file: string): string {
   return readFileSync(resolve(ROOT, file), 'utf8').replace(/\r\n?/g, '\n');
@@ -226,6 +250,9 @@ describe('packaged-process guard — release before rcedit', () => {
       sleep: tick,
       openFile,
       tasklist,
+      findHolders: noHolders,
+      writeHolders: () => null,
+      exclusiveProbe: exclusiveOk,
       processSweepTimeoutMs: 5_000,
       unlockTimeoutMs: 5_000,
       pollIntervalMs: 0,
@@ -268,6 +295,9 @@ describe('packaged-process guard — release before rcedit', () => {
       now: () => clock,
       openFile: vi.fn(),
       tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: noHolders,
+      writeHolders: () => null,
+      exclusiveProbe: exclusiveOk,
       processSweepTimeoutMs: 1_000,
       unlockTimeoutMs: 1_000,
       pollIntervalMs: 250,
@@ -461,5 +491,324 @@ describe('after-pack hook wiring (R9)', () => {
     );
     expect(guardSyntax.status, guardSyntax.stderr).toBe(0);
     expect(hook).not.toContain('\r');
+  });
+});
+
+/**
+ * Naming the holder.
+ *
+ * The v0.1.11 release failed with rcedit's "Fatal error: Unable to commit
+ * changes." and the log could only say "the file was in use". The guard now
+ * asks the Restart Manager API which process holds the file, and reports that
+ * process — including when the wait ultimately fails.
+ *
+ * A lookup failure must never change what the build does, so every path is
+ * covered here: unsupported platform, thrown error, non-zero exit, and a
+ * holding process.
+ */
+describe('Restart Manager holder reporting', () => {
+  const exePath = 'C:\\build\\release\\win-unpacked\\DKS.exe';
+
+  it('parses holder lines into process identities', () => {
+    const holders = holdersModule.parseHoldersOutput([
+      'HOLDER|6260|1003|MsMpEng.exe||not-restartable',
+      'HOLDER|7184|1001|DKS.exe||restartable',
+      'HOLDER|9001|1005||DksUpdateSvc|not-restartable',
+      'noise that must be ignored',
+      'HOLDER|notapid|1001|x||restartable',
+    ].join('\n'));
+
+    expect(holders).toEqual([
+      { pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false },
+      { pid: 7184, applicationType: 'main-window', appName: 'DKS.exe', service: null, restartable: true },
+      { pid: 9001, applicationType: 'console', appName: null, service: 'DksUpdateSvc', restartable: false },
+    ]);
+  });
+
+  it('formats an empty and a non-empty holder list for the build log', () => {
+    expect(holdersModule.formatHolders(exePath, [])).toContain('no process holds');
+    const formatted = holdersModule.formatHolders(exePath, [
+      { pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false },
+    ]);
+    expect(formatted).toContain('1 process(es) hold');
+    expect(formatted).toContain('pid 6260 MsMpEng.exe (service)');
+  });
+
+  it('reports the holder while the file stays locked', async () => {
+    const log = vi.fn();
+    let ticks = 0;
+    const findHolders = vi.fn(async () => ({
+      supported: true,
+      holders: [{ pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+      output: '',
+      reason: null,
+    }));
+    const openFile = vi.fn()
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      });
+
+    const result = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        ticks += 1;
+      },
+      now: () => ticks * 250,
+      openFile,
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders,
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(findHolders).toHaveBeenCalledWith(exePath, expect.objectContaining({ platform: 'win32' }));
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('pid 6260 MsMpEng.exe');
+  });
+
+  it('names the holder in the error when the wait gives up', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    const error = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        clock += 500;
+      },
+      now: () => clock,
+      openFile: () => {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      },
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: async () => ({
+        supported: true,
+        holders: [{ pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+        output: '',
+        reason: null,
+      }),
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
+      unlockTimeoutMs: 1_000,
+      pollIntervalMs: 500,
+    }).then(() => null, (caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain('still in use');
+    expect(error?.message).toContain('pid 6260 MsMpEng.exe');
+  });
+
+  it('a failing holder lookup never breaks the wait or hides the timeout', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    const result = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        clock += 250;
+      },
+      now: () => clock,
+      openFile: vi.fn()
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        }),
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: async () => {
+        throw new Error('rstrtmgr.dll unavailable');
+      },
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      exclusiveProbe: exclusiveOk,
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('Restart Manager lookup threw');
+    expect(logged).toContain('is writable');
+  });
+
+  it('findFileHolders reports unsupported instead of throwing when the lookup cannot run', async () => {
+    const log = vi.fn();
+    const linux = await holdersModule.findFileHolders(exePath, { platform: 'linux', log });
+    expect(linux).toMatchObject({ supported: false, holders: [] });
+
+    // A caller that injects nothing still gets a real script written and run:
+    // the lookup must never degrade to "cannot tell" just because the caller
+    // did not pass a writer.
+    let scriptSeen = '';
+    const defaultWriter = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      run: (scriptPath: string) => {
+        scriptSeen = scriptPath;
+        return { status: 0, stdout: '', stderr: '', error: null };
+      },
+    });
+    expect(defaultWriter.supported).toBe(true);
+    expect(defaultWriter.holders).toEqual([]);
+    expect(scriptSeen).toMatch(/file-holders\.ps1$/);
+
+    const failing = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      writeScript: () => 'C:\\temp\\holders.ps1',
+      run: () => ({ status: 1, stdout: '', stderr: 'Add-Type failed: access denied', error: null }),
+    });
+    expect(failing.supported).toBe(false);
+    expect(failing.reason).toContain('Add-Type failed');
+    expect(log.mock.calls.join('\n')).toContain('Restart Manager lookup failed');
+
+    const success = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      writeScript: () => 'C:\\temp\\holders.ps1',
+      run: () => ({ status: 0, stdout: 'HOLDER|6260|1003|MsMpEng.exe||not-restartable', stderr: '', error: null }),
+    });
+    expect(success.supported).toBe(true);
+    expect(success.holders).toHaveLength(1);
+  });
+
+  it('the generated PowerShell compiles: FILETIME is not imported ambiguously', () => {
+    const script = holdersModule.holdersScript();
+    // Add-Type fails with CS0104 when both namespaces are imported and the
+    // struct says plain `FILETIME` — the first CI run of this lookup did
+    // exactly that, so the failure mode is pinned here.
+    expect(script).not.toContain('using System.Runtime.InteropServices.ComTypes;');
+    expect(script).toContain('System.Runtime.InteropServices.ComTypes.FILETIME');
+    expect(script).toContain('RmStartSession');
+    expect(script).toContain('RmRegisterResources');
+    expect(script).toContain('RmGetList');
+    expect(script).toContain('RmEndSession');
+  });
+});
+
+/**
+ * Exclusive access is rcedit's real precondition.
+ *
+ * Measured on a Windows runner (scripts/diagnostics/packaging-lock-probe.cjs):
+ * a third-party handle with FileShare.ReadWrite lets the open-for-write in the
+ * old check succeed, and rcedit still fails — it opens the image with no
+ * sharing at all. The guard therefore confirms exclusive access after the
+ * cheap check, and never claims the weaker check is a guarantee.
+ */
+describe('exclusive access (rcedit\'s real precondition)', () => {
+  const exePath = 'C:\\build\\release\\win-unpacked\\DKS.exe';
+  const baseOptions = {
+    exePath,
+    imageName: 'DKS.exe',
+    platform: 'win32' as const,
+    run: async () => ({ status: 0, stdout: '', stderr: '', error: null }),
+    tasklist: () => ({ status: 0, stdout: '', stderr: '', error: null }),
+    findHolders: noHolders,
+    writeHolders: () => null,
+  };
+
+  it('keeps waiting while a handle blocks exclusive access, then confirms it', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    let answers = 0;
+    const result = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log,
+      sleep: async () => {
+        clock += 1_500;
+      },
+      now: () => clock,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => {
+        answers += 1;
+        return answers === 1
+          ? { supported: true, exclusive: false, reason: 'IOException: The process cannot access the file' }
+          : { supported: true, exclusive: true, reason: null };
+      },
+      unlockTimeoutMs: 10_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(result.exclusive).toMatchObject({ supported: true, exclusive: true });
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('exclusive access is blocked');
+    expect(logged).toContain("rcedit's precondition is confirmed");
+    expect(logged).not.toContain('safe for rcedit');
+  });
+
+  it('fails with the exclusive-access reason when it never clears, naming the holder', async () => {
+    let clock = 0;
+    const error = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log: vi.fn(),
+      sleep: async () => {
+        clock += 1_500;
+      },
+      now: () => clock,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => ({
+        supported: true,
+        exclusive: false,
+        reason: 'IOException: The process cannot access the file',
+      }),
+      findHolders: async () => ({
+        supported: true,
+        holders: [{ pid: 4242, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+        output: '',
+        reason: null,
+      }),
+      unlockTimeoutMs: 3_000,
+      pollIntervalMs: 250,
+    }).then(() => null, (caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain('exclusive access is blocked');
+    expect(error?.message).toContain('pid 4242 MsMpEng.exe');
+  });
+
+  it('degrades to the weaker check when the probe cannot run — and says so', async () => {
+    const log = vi.fn();
+    const result = await guard.releaseExecutableLock({
+      ...baseOptions,
+      log,
+      sleep: tick,
+      openFile: vi.fn(),
+      exclusiveProbe: async () => ({ supported: false, exclusive: null, reason: 'no PowerShell' }),
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.exclusiveUnavailable).toBe(true);
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('is writable');
+    expect(logged).toContain('exclusive access could not be verified');
+    expect(logged).toContain('rcedit can still fail');
+    expect(logged).not.toContain("rcedit's precondition is confirmed");
+  });
+
+  it('does not run the exclusive check outside Windows', async () => {
+    const exclusiveProbe = vi.fn();
+    await guard.releaseExecutableLock({
+      ...baseOptions,
+      platform: 'linux',
+      exePath: '/tmp/linux-unpacked/DKS',
+      log: vi.fn(),
+      sleep: tick,
+      openFile: vi.fn(),
+      exclusiveProbe,
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+    expect(exclusiveProbe).not.toHaveBeenCalled();
   });
 });
