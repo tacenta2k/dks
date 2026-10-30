@@ -224,7 +224,10 @@ async function findFileHolders(filePath, options = {}) {
   const {
     platform = process.platform,
     run = null,
-    writeScript = null,
+    // The real writer is the default: a caller that forgets to inject one must
+    // still get an answer. (The probe passed no writer once and the lookup
+    // silently reported "no script writer injected" instead of a holder.)
+    writeScript = writeHoldersScript,
     log = () => {},
   } = options;
 
@@ -234,9 +237,9 @@ async function findFileHolders(filePath, options = {}) {
 
   let scriptPath = null;
   try {
-    scriptPath = writeScript ? writeScript(holdersScript()) : null;
+    scriptPath = writeScript(holdersScript());
     if (!scriptPath) {
-      return { supported: false, holders: [], output: '', reason: 'no script writer injected' };
+      return { supported: false, holders: [], output: '', reason: 'the script writer returned no path' };
     }
     const result = (run ?? runPowerShellScript)(scriptPath, filePath);
     const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.trim();

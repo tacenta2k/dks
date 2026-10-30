@@ -423,3 +423,20 @@ describe('release state confirmation', () => {
     expect(run).toContain('this run will complete it');
   });
 });
+
+describe('release failure diagnostics', () => {
+  it('names the file holder while the packaging output still exists', () => {
+    const releaseIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    const run = steps[releaseIndex].run ?? '';
+    // rcedit's "Unable to commit changes" does not say who held the file, and
+    // the log is the only place the release can explain itself afterwards.
+    expect(run).toContain('npm run release 1>%RELEASE_LOG% 2>&1');
+    expect(steps[releaseIndex].env).toMatchObject({ RELEASE_LOG: expect.stringContaining('release-build.log') });
+    expect(run).toContain('holder-lookup.cjs release/win-unpacked/DKS.exe');
+    const failureBranch = run.slice(run.indexOf('if ($code -ne 0)'));
+    expect(failureBranch).toContain('holder-lookup.cjs');
+    expect(failureBranch.indexOf('holder-lookup.cjs')).toBeLessThan(
+      failureBranch.indexOf('last 120 lines'),
+    );
+  });
+});

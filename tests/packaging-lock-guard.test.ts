@@ -629,9 +629,21 @@ describe('Restart Manager holder reporting', () => {
     const linux = await holdersModule.findFileHolders(exePath, { platform: 'linux', log });
     expect(linux).toMatchObject({ supported: false, holders: [] });
 
-    const noWriter = await holdersModule.findFileHolders(exePath, { platform: 'win32', log });
-    expect(noWriter.supported).toBe(false);
-    expect(noWriter.reason).toContain('no script writer');
+    // A caller that injects nothing still gets a real script written and run:
+    // the lookup must never degrade to "cannot tell" just because the caller
+    // did not pass a writer.
+    let scriptSeen = '';
+    const defaultWriter = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      run: (scriptPath: string) => {
+        scriptSeen = scriptPath;
+        return { status: 0, stdout: '', stderr: '', error: null };
+      },
+    });
+    expect(defaultWriter.supported).toBe(true);
+    expect(defaultWriter.holders).toEqual([]);
+    expect(scriptSeen).toMatch(/file-holders\.ps1$/);
 
     const failing = await holdersModule.findFileHolders(exePath, {
       platform: 'win32',
