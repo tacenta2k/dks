@@ -1,5 +1,3 @@
-import * as XLSX from 'xlsx';
-
 import {
   DAYS_LEFT_COLUMN_ID,
   DAYS_LEFT_COLUMN_NAME,
@@ -166,18 +164,24 @@ export function createCsvExport(
   };
 }
 
-/** Build an XLSX artifact without opening a dialog or writing to disk. */
-export function createXlsxExport(request: ExportRequest): XlsxExportArtifact;
+/**
+ * Build an XLSX artifact without opening a dialog or writing to disk.
+ *
+ * The spreadsheet library is a separate chunk that is fetched here, on the
+ * first Excel export — signing in and opening the Visa sheet never pay for it.
+ * That is why this is async while the CSV path stays synchronous.
+ */
+export function createXlsxExport(request: ExportRequest): Promise<XlsxExportArtifact>;
 export function createXlsxExport(
   rows: readonly SheetRow[],
   columns: readonly ColumnDefinition[],
   options?: Omit<ExportRequest, 'rows' | 'columns'>,
-): XlsxExportArtifact;
-export function createXlsxExport(
+): Promise<XlsxExportArtifact>;
+export async function createXlsxExport(
   requestOrRows: ExportRequest | readonly SheetRow[],
   providedColumns?: readonly ColumnDefinition[],
   providedOptions: Omit<ExportRequest, 'rows' | 'columns'> = {},
-): XlsxExportArtifact {
+): Promise<XlsxExportArtifact> {
   const request: ExportRequest = isSheetRowArray(requestOrRows)
     ? { ...providedOptions, rows: requestOrRows, columns: providedColumns ?? [] }
     : requestOrRows;
@@ -187,6 +191,7 @@ export function createXlsxExport(
     columns.map((column) => column.name),
     ...request.rows.map((row) => columns.map((column) => exportCell(row, column, request))),
   ];
+  const XLSX = await import('xlsx');
   const workbook = XLSX.utils.book_new();
   const worksheet = XLSX.utils.aoa_to_sheet(values);
   XLSX.utils.book_append_sheet(workbook, worksheet, request.sheetName?.trim() || 'DKS Export');
@@ -212,8 +217,10 @@ export function saveCsvExport(request: ExportRequest & { save: ExportSaveCallbac
 }
 
 /** Invoke an application-provided save callback for an XLSX artifact. */
-export function saveXlsxExport(request: ExportRequest & { save: ExportSaveCallback }): XlsxExportArtifact {
-  const artifact = createXlsxExport(request);
+export async function saveXlsxExport(
+  request: ExportRequest & { save: ExportSaveCallback },
+): Promise<XlsxExportArtifact> {
+  const artifact = await createXlsxExport(request);
   request.save(artifact);
   return artifact;
 }
@@ -228,12 +235,12 @@ export function exportRowsToCsv(
 }
 
 /** Convenience API for callers that already have rows and columns separately. */
-export function exportRowsToXlsx(
+export async function exportRowsToXlsx(
   rows: readonly SheetRow[],
   columns: readonly ColumnDefinition[],
   options: Omit<ExportRequest, 'rows' | 'columns'> = {},
-): Uint8Array {
-  return createXlsxExport({ ...options, rows, columns }).data;
+): Promise<Uint8Array> {
+  return (await createXlsxExport({ ...options, rows, columns })).data;
 }
 
 export const exportToCsv = createCsvExport;

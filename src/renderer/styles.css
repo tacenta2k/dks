@@ -709,6 +709,78 @@ button:focus-visible {
   flex-direction: column;
 }
 
+/* Lazy route fallback: the final layout at its real sizes in flat grey, with a
+   polite live region and no shimmer — see PERFORMANCE_AUDIT.md H1. This lives
+   in the eager stylesheet because it is shown while the screen's own CSS chunk
+   is still in flight. */
+.view-loading {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-width: 880px;
+  padding: 18px 0;
+}
+
+.view-loading__caption {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  font-weight: 650;
+}
+
+.view-loading__bars {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.view-loading__bar {
+  display: block;
+  height: 14px;
+  border-radius: 7px;
+  background: var(--color-surface-muted);
+}
+
+.view-loading__bar--toolbar {
+  height: 32px;
+  border-radius: var(--radius-sm);
+}
+
+.view-loading__bar--short {
+  width: 45%;
+}
+
+/* A screen chunk that could not be read: contained to the content area so the
+   top bar, navigation and status stay usable. */
+.view-load-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  max-width: 640px;
+  padding: 20px;
+  border: 1px solid var(--color-border-strong);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.view-load-error__title {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.view-load-error__body {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 /* FIXES_UI §7/§8: compact page count — the page title lives in the top bar. */
 .recycle-bin-page__count,
 .audit-log-page__count {

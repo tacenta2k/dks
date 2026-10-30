@@ -76,7 +76,8 @@ describe('admin renderer integration', () => {
     // Admin-only "Tools ▾" toolbar menu (no Administrator Tools card).
     expect(screen.queryByText(/administrator tools/i)).not.toBeInTheDocument();
     expect(screen.queryByText(/manage records/i)).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /^Tools/ })).toBeInTheDocument();
+    // The Tools menu is its own lazy chunk, so wait for it to mount.
+    expect(await screen.findByRole('button', { name: /^Tools/ })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
     expect(screen.getByText(/exported files contain sensitive data/i)).toBeInTheDocument();
@@ -177,7 +178,7 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Tools/ }));
     fireEvent.click(screen.getByRole('menuitem', { name: 'Print / PDF report' }));
     // R7: the report opens once the toolbar snapshot is loaded.
     expect(await screen.findByRole('dialog', { name: 'Print report' })).toBeInTheDocument();
@@ -225,7 +226,7 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
     expect(await screen.findByRole('heading', { name: 'Audit log' })).toBeInTheDocument();
     // S3: friendly action names (raw code "create" is no longer shown).
-    expect(within(screen.getByRole('table')).getByText('Created record')).toBeInTheDocument();
+    expect(within(await screen.findByRole('table')).getByText('Created record')).toBeInTheDocument();
   }, 30_000);
 
 describe('imported date columns (Blocker 2, integration)', () => {

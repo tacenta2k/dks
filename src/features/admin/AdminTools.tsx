@@ -126,7 +126,7 @@ export async function exportCurrentRows(
   const [columns, rows] = await Promise.all([repository.getColumns(), repository.getRows()]);
   const request = { role, columns, rows: activeRows(rows) };
   if (format === 'xlsx') {
-    const artifact = createXlsxExport(request);
+    const artifact = await createXlsxExport(request);
     save(artifact);
     return artifact;
   }
@@ -429,7 +429,7 @@ export function AdminSheetActions({
       const loadedRows = activeRows(rowsRef.current);
       const loadedColumns = columnsRef.current;
       const artifact = format === 'xlsx'
-        ? createXlsxExport({ role, rows: loadedRows, columns: loadedColumns })
+        ? await createXlsxExport({ role, rows: loadedRows, columns: loadedColumns })
         : createCsvExport({ role, rows: loadedRows, columns: loadedColumns });
       // The service builds pure artifacts; invoke the injected/native saver here.
       saveExport(artifact);
@@ -607,11 +607,18 @@ export function AdminSheetActions({
     }
   };
 
-  const handlePdf = (model: PrintReportModel) => {
-    exportReportToPdf(model, {
-      role,
-      save: onSavePdf ?? saveArtifactWithBrowserFallback,
-    });
+  const handlePdf = async (model: PrintReportModel) => {
+    setError(null);
+    try {
+      // The PDF libraries arrive with this call, so report a failed download
+      // instead of an unhandled rejection.
+      await exportReportToPdf(model, {
+        role,
+        save: onSavePdf ?? saveArtifactWithBrowserFallback,
+      });
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : 'Unable to create the PDF.');
+    }
   };
 
   if (!can(role, 'export') && !can(role, 'import') && !can(role, 'print')) {

@@ -1,5 +1,3 @@
-import * as XLSX from 'xlsx';
-
 import { isReservedSystemColumnName, type ColumnDefinition } from '../../lib/columns';
 import { formatDisplayDate, toStorableDateValue } from '../../lib/date';
 import { can } from '../../lib/permissions';
@@ -142,6 +140,10 @@ async function parseSource(source: ImportSource, fileName?: string): Promise<Par
     return { fileName: resolvedName, matrix: parseCsvMatrix(text) };
   }
 
+  // Spreadsheet files are rare compared with opening the sheet, so the XLSX
+  // parser is its own chunk: CSV imports never fetch it and neither does
+  // anything on the startup path.
+  const XLSX = await import('xlsx');
   const workbook = XLSX.read(input, {
     type: 'array',
     raw: true,
