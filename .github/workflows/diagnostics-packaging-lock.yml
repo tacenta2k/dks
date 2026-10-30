@@ -116,6 +116,34 @@ jobs:
             foreach ($failure in $failures) { Write-Host "::error::packaging: $($failure.Line.Trim())" }
           }
 
+      # The job log and artifact downloads are not always retrievable (blob
+      # storage), so the probe results are also posted as a commit comment —
+      # the same channel the CI failure reports use.
+      - name: Post diagnostics as a commit comment
+        if: always()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          $parts = @()
+          if (Test-Path "$env:GITHUB_WORKSPACE\lock-probe.log") {
+            $parts += "## lock probe`n``````"
+            $parts += (Get-Content -Raw "$env:GITHUB_WORKSPACE\lock-probe.log")
+            $parts += "``````"
+          }
+          if (Test-Path "$env:GITHUB_WORKSPACE\packaging.log") {
+            $lines = Get-Content "$env:GITHUB_WORKSPACE\packaging.log" |
+              Select-String -Pattern "rcedit|Unable to commit|afterPack|dks\]|⨯|packaging" |
+              Select-Object -Last 80
+            $parts += "## packaging log (filtered)`n``````"
+            $parts += ($lines | ForEach-Object { $_.Line })
+            $parts += "``````"
+          }
+          if ($parts.Count -eq 0) { Write-Host "nothing to post"; exit 0 }
+          $body = ($parts -join "`n")
+          if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) }
+          try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "posted diagnostics comment" } catch { Write-Host "comment failed: $_" }
+
       - name: Upload diagnostics
         if: always()
         uses: actions/upload-artifact@v4
