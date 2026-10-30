@@ -133,7 +133,7 @@ jobs:
             if ($text.Length -gt 60000) { $text = $text.Substring(0, 60000) }
             $body = "$title``n``````n$text``````"
             try {
-              $body | gh api "repos/$repo/commits/$sha/comments" -F body=@- 2>&1 | Out-Null
+              gh api "repos/$repo/commits/$sha/comments" -f body="$body" 2>&1 | Out-Null
               Write-Host "posted: $title"
             } catch {
               Write-Host "::warning::could not post '$title': $_"
@@ -148,7 +148,7 @@ jobs:
             for ($i = 0; $i -lt $lines.Count -and $emitted -lt 10; $i++) {
               if ($lines[$i] -match '^\s*(FAIL|×)\s') {
                 $emitted++
-                for ($j = $i; $j -lt [Math]::Min($i + 16, $lines.Count); $j++) {
+                for ($j = $i; $j -lt [Math]::Min($i + 45, $lines.Count); $j++) {
                   if ($j -gt $i -and $lines[$j] -match '^\s*(FAIL|×)\s') { break }
                   $text = $lines[$j].Trim()
                   if ($text) { Write-Host "::error::test: $text" }
