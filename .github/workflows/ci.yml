@@ -123,13 +123,16 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          $logPath = "$env:RUNNER_TEMP/build.log"
-          if (Test-Path $logPath) {
-            $content = Get-Content -Raw $logPath -ErrorAction SilentlyContinue
-            if ($content) {
-              $body = "Build log (first 50000 chars) for $env:GITHUB_SHA`n``````n" + $content.Substring(0, [Math]::Min(50000, $content.Length)) + "`n``````"
-              try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted build log comment" } catch { Write-Host "Comment failed: $_" }
-            }
+          # build.log covers packaging failures; test-output.txt covers a failing
+          # npm test. Both land as a commit comment because the job log is not
+          # always retrievable from an API-only client.
+          $sources = @("$env:RUNNER_TEMP/build.log", "test-output.txt")
+          foreach ($source in $sources) {
+            if (-not (Test-Path $source)) { continue }
+            $content = Get-Content -Raw $source -ErrorAction SilentlyContinue
+            if (-not $content) { continue }
+            $body = "Log (\($source), first 50000 chars) for $env:GITHUB_SHA`n``````n" + $content.Substring(0, [Math]::Min(50000, $content.Length)) + "`n``````"
+            try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted $source comment" } catch { Write-Host "Comment failed: $_" }
           }
 
       - name: Verify packaged app-update.yml has no publisherName (unsigned v0.1.5)

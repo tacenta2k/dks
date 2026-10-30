@@ -149,7 +149,9 @@ describe('admin renderer integration', () => {
     );
 
     await screen.findByText('Ada Lovelace');
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    // The Tools menu (and its file input) is its own lazy chunk, so it can
+    // still be in flight when the sheet rows have already painted.
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(['Name,Passport No\nGrace Hopper,G-2'], 'people.csv', { type: 'text/csv' });
     fireEvent.change(input, { target: { files: [file] } });
     expect((input as HTMLInputElement).files?.[0]?.name).toBe('people.csv');
@@ -250,7 +252,7 @@ describe('imported date columns (Blocker 2, integration)', () => {
     );
     await screen.findByText('Ada Lovelace');
 
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(
       ['Name,Expiry Date\nGrace Hopper,10/01/2004\nMarianne,11/02/2005'],
       'people.csv',
@@ -289,7 +291,7 @@ describe('imported date columns (Blocker 2, integration)', () => {
     );
     await screen.findByText('Ada Lovelace');
 
-    const input = screen.getByLabelText('Import CSV or Excel file');
+    const input = await screen.findByLabelText('Import CSV or Excel file');
     const file = new File(
       ['Name,Start date\nNew Person,10/01/2004'],
       'dates.csv',
