@@ -201,7 +201,9 @@ describe('admin renderer integration', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
     expect(await screen.findByRole('heading', { name: 'Recycle bin' })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    // The heading is shell chrome; the panel (and its row actions) arrive with
+    // the lazily imported Recycle Bin chunk.
+    fireEvent.click(await screen.findByRole('button', { name: 'Restore' }));
     // SET-11: an in-app confirmation dialog (native window.confirm is gone).
     const restoreDialog = await screen.findByRole('dialog', { name: 'Restore this record?' });
     fireEvent.click(within(restoreDialog).getByRole('button', { name: 'Restore' }));
