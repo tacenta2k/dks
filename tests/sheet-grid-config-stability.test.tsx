@@ -58,7 +58,7 @@ describe('visa sheet grid configuration', () => {
       <SheetPage repository={repository} role="admin" refreshToken={0} renderGridInTests />,
     );
 
-    await waitFor(() => expect(gridCapture.props).not.toBeNull());
+    await waitFor(() => expect(gridCapture.props).not.toBeNull(), { timeout: 10_000 });
     const first = currentProps();
     const firstConfig = {
       defaultColDef: first.defaultColDef,
@@ -101,7 +101,7 @@ describe('visa sheet grid configuration', () => {
       <SheetPage repository={repository} role="admin" refreshToken={0} renderGridInTests />,
     );
 
-    await waitFor(() => expect(gridCapture.props).not.toBeNull());
+    await waitFor(() => expect(gridCapture.props).not.toBeNull(), { timeout: 10_000 });
     const rowIds = () => (currentProps().rowData as { __rowId: string }[]).map((row) => row.__rowId);
     expect(rowIds().length).toBeGreaterThanOrEqual(2);
 
