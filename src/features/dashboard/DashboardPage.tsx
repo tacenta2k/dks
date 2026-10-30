@@ -240,7 +240,7 @@ export function DashboardPage({
 
   const nonZeroStatusCount = summary.statusPie.filter((entry) => entry.value > 0).length;
   const hasStatusData = nonZeroStatusCount > 0;
-  const pieDiameter = Math.max(176, Math.min(pieChart.size.width, pieChart.size.height, 320));
+  const pieDiameter = Math.max(176, Math.min(pieChart.size.width, pieChart.size.height, 440));
   const outerRadius = Math.floor(pieDiameter * 0.43);
   const innerRadius = Math.round(outerRadius * 0.62);
 

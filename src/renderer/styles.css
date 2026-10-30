@@ -693,15 +693,15 @@ button:focus-visible {
 }
 
 .content.content--wide {
-  /* Data-heavy pages (Dashboard, Recycle Bin, Audit Log) use ~90-94% of the
-     available workspace width with symmetric responsive gutters, capped at a
-     desktop-readable 1680px. */
-  --content-wide-max: 1680px;
-  --content-wide-gutter: clamp(20px, 2.8vw, 48px);
+  /* Data-heavy pages (Dashboard, Recycle Bin, Audit Log) keep modest ~30-44px
+     side gutters across standard desktop widths (only centering past 1840px on
+     ultrawide displays) while leaving the scrollbar on the window edge. */
+  --content-wide-max: 1840px;
+  --content-wide-gutter: clamp(20px, 2.6vw, 44px);
   padding:
     clamp(14px, 1.8vh, 22px)
     max(var(--content-wide-gutter), calc((100% - var(--content-wide-max)) / 2))
-    clamp(16px, 2.2vh, 26px);
+    clamp(16px, 2.2vh, 24px);
 }
 
 .content.content--dashboard {

@@ -197,12 +197,15 @@ describe('dashboard page', () => {
       resolve(__dirname, '../src/features/dashboard/dashboard.css'),
       'utf8',
     );
-    expect(css).toMatch(/\.dashboard-cards\s*\{[^}]*grid-template-columns:\s*repeat\(20,\s*minmax\(0,\s*1fr\)\)/s);
+    expect(css).toMatch(/\.dashboard-cards\s*\{[^}]*flex:\s*0 0 auto[^}]*grid-template-columns:\s*repeat\(20,\s*minmax\(0,\s*1fr\)\)/s);
     expect(css).toMatch(/\.dashboard-card:nth-child\(-n \+ 5\)\s*\{[^}]*grid-column:\s*span 4/s);
     expect(css).toMatch(/\.dashboard-card:nth-child\(n \+ 6\)\s*\{[^}]*grid-column:\s*span 5/s);
     expect(css).toMatch(/\.dashboard-card\s*\{[^}]*min-height:\s*clamp\(82px,\s*8\.8vh,\s*98px\)/s);
-    expect(css).toMatch(/\.dashboard-status-body\s*\{[^}]*display:\s*flex/s);
-    expect(css).toMatch(/\.dashboard-chart-grid\s*\{[^}]*flex:\s*1 0 310px/s);
+    expect(css).toMatch(/\.dashboard-chart-grid\s*\{[^}]*flex:\s*1 1 auto[^}]*min-height:\s*0[^}]*grid-template-rows:\s*minmax\(280px,\s*1fr\)/s);
+    expect(css).not.toContain('max-height: 600px');
+    expect(css).toMatch(/\.dashboard-panel\s*\{[^}]*height:\s*100%/s);
+    expect(css).toMatch(/\.dashboard-status-body\s*\{[^}]*display:\s*flex[^}]*height:\s*100%/s);
+    expect(css).toMatch(/\.dashboard-chart__canvas\s*\{[^}]*height:\s*100%/s);
     expect(css).not.toMatch(/overflow:\s*hidden/);
     expect(css).toContain('@media (max-width: 1040px)');
     expect(css).toContain('@media (max-width: 960px)');
@@ -256,21 +259,21 @@ describe('dashboard page', () => {
 
       act(() => {
         callbacks.get(pieHost)?.(
-          [{ contentRect: { width: 300, height: 310 } } as ResizeObserverEntry],
+          [{ contentRect: { width: 380, height: 420 } } as ResizeObserverEntry],
           {} as ResizeObserver,
         );
         callbacks.get(barHost)?.(
-          [{ contentRect: { width: 940, height: 420 } } as ResizeObserverEntry],
+          [{ contentRect: { width: 940, height: 520 } } as ResizeObserverEntry],
           {} as ResizeObserver,
         );
       });
 
       const pieSvg = pieHost.querySelector('svg');
       const barSvg = barHost.querySelector('svg');
-      expect(pieSvg).toHaveAttribute('width', '300');
-      expect(pieSvg).toHaveAttribute('height', '300');
+      expect(pieSvg).toHaveAttribute('width', '380');
+      expect(pieSvg).toHaveAttribute('height', '380');
       expect(barSvg).toHaveAttribute('width', '940');
-      expect(barSvg).toHaveAttribute('height', '420');
+      expect(barSvg).toHaveAttribute('height', '520');
     } finally {
       globalThis.ResizeObserver = OriginalResizeObserver;
     }
@@ -287,7 +290,7 @@ describe('dashboard page', () => {
       resolve(__dirname, '../src/renderer/styles.css'),
       'utf8',
     );
-    expect(shellCss).toMatch(/\.content\.content--wide\s*\{[^}]*--content-wide-max:\s*1680px/s);
+    expect(shellCss).toMatch(/\.content\.content--wide\s*\{[^}]*--content-wide-max:\s*1840px/s);
     expect(shellCss).toMatch(/\.content\.content--dashboard\s*\{[^}]*display:\s*flex/s);
   });
 });

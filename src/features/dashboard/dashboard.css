@@ -16,6 +16,7 @@
 }
 
 .dashboard-alert {
+  flex: 0 0 auto;
   padding: 10px 14px;
   border: 1px solid color-mix(in srgb, #dc2626 32%, var(--color-border));
   border-radius: var(--radius-sm);
@@ -50,6 +51,7 @@
 }
 
 .dashboard-refresh-status {
+  flex: 0 0 auto;
   margin: -4px 0 0;
   color: var(--color-text-muted);
   font-size: 12px;
@@ -135,11 +137,17 @@
   line-height: 1.05;
 }
 
+/* Fills all remaining vertical space inside .dashboard-page on maximized
+   desktop screens, with a 280px minimum track floor so short/zoomed windows
+   scroll cleanly instead of squashing charts and a 960px ceiling only for
+   rotated/portrait 4K monitors. */
 .dashboard-chart-grid {
   display: grid;
-  flex: 1 0 310px;
-  max-height: 600px;
-  grid-template-columns: minmax(340px, 0.4fr) minmax(0, 0.6fr);
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 960px;
+  grid-template-columns: minmax(360px, 0.42fr) minmax(0, 0.58fr);
+  grid-template-rows: minmax(280px, 1fr);
   gap: clamp(14px, 1.1vw, 18px);
   align-items: stretch;
 }
@@ -147,6 +155,7 @@
 .dashboard-panel {
   display: flex;
   flex-direction: column;
+  height: 100%;
   min-width: 0;
   min-height: 0;
   padding: clamp(16px, 1.8vh, 22px) clamp(18px, 1.5vw, 24px);
@@ -188,10 +197,11 @@
 
 .dashboard-status-body {
   display: flex;
-  flex: 1 1 auto;
-  align-items: center;
+  flex: 1 1 0%;
+  align-items: stretch;
   justify-content: space-between;
   gap: clamp(16px, 1.8vw, 28px);
+  height: 100%;
   min-height: 0;
   margin-top: 12px;
 }
@@ -199,28 +209,31 @@
 .dashboard-chart {
   position: relative;
   width: 100%;
+  height: 100%;
   min-height: 210px;
 }
 
 .dashboard-chart__canvas {
   position: absolute;
   inset: 0;
+  width: 100%;
+  height: 100%;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .dashboard-chart--pie {
-  flex: 1 1 200px;
+  flex: 1.15 1 200px;
   height: 100%;
   min-width: 176px;
   min-height: 210px;
-  max-height: 340px;
 }
 
 .dashboard-chart--bar {
-  flex: 1 1 240px;
-  min-height: 240px;
+  flex: 1 1 0%;
+  height: 100%;
+  min-height: 220px;
   margin-top: 12px;
 }
 
@@ -243,8 +256,9 @@
 
 .dashboard-legend {
   display: grid;
-  flex: 1 1 210px;
-  gap: 2px;
+  flex: 0.95 1 190px;
+  align-self: center;
+  gap: clamp(2px, 0.5vh, 6px);
   margin: 0;
   padding: 0;
   list-style: none;
@@ -260,7 +274,7 @@
 .dashboard-legend li {
   justify-content: space-between;
   gap: 12px;
-  padding: 9px 4px;
+  padding: clamp(9px, 1.15vh, 13px) 4px;
   border-bottom: 1px solid var(--color-border);
   color: var(--color-text-muted);
   font-size: clamp(12.5px, 0.8vw, 14px);
@@ -294,13 +308,13 @@
   }
 
   .dashboard-chart--pie {
-    flex: 0 0 200px;
-    height: 200px;
+    flex: 1 1 200px;
     min-height: 200px;
   }
 
   .dashboard-legend {
     flex: 0 0 auto;
+    align-self: stretch;
   }
 }
 
@@ -320,11 +334,25 @@
     flex: none;
     max-height: none;
     grid-template-columns: 1fr;
+    grid-template-rows: auto;
+  }
+
+  .dashboard-panel {
+    height: auto;
+  }
+
+  .dashboard-status-body {
+    height: auto;
+  }
+
+  .dashboard-chart--pie {
+    flex: 0 0 220px;
+    height: 220px;
   }
 
   .dashboard-chart--bar {
-    flex: 0 0 260px;
-    height: 260px;
+    flex: 0 0 280px;
+    height: 280px;
   }
 }
 
