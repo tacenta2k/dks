@@ -123,6 +123,8 @@ jobs:
               Script = 'harness/summary-missing-outputs.ps1'
               Expect = 0
               Env = @{ GITHUB_STEP_SUMMARY = "$env:RUNNER_TEMP/summary.md" }
+              # The summary writes to the step summary FILE, not to stdout.
+              SummaryFile = "$env:RUNNER_TEMP/summary.md"
               MustContain = 'DRY RUN'
             }
           )
@@ -134,9 +136,17 @@ jobs:
             Remove-Item Env:RELEASE_TAG, Env:RELEASE_VERSION, Env:RELEASE_LOG, Env:TAG_ACTION, Env:PACKAGING_EXIT -ErrorAction SilentlyContinue
             foreach ($key in $case.Env.Keys) { Set-Item -Path "Env:$key" -Value $case.Env[$key] }
 
+            if ($case.ContainsKey('SummaryFile')) {
+              Remove-Item -LiteralPath $case.SummaryFile -Force -ErrorAction SilentlyContinue
+            }
             $output = & pwsh -NoProfile -NonInteractive -File $case.Script 2>&1 | Out-String
             $code = $LASTEXITCODE
-            $match = $output -match [regex]::Escape($case.MustContain)
+            $haystack = $output
+            if ($case.ContainsKey('SummaryFile') -and (Test-Path -LiteralPath $case.SummaryFile)) {
+              $haystack = (Get-Content -Raw -LiteralPath $case.SummaryFile)
+              Write-Host "step summary: $haystack"
+            }
+            $match = $haystack -match [regex]::Escape($case.MustContain)
             $ok = ($code -eq $case.Expect) -and $match
             if (-not $ok) { $failed++ }
             $results += [pscustomobject]@{
