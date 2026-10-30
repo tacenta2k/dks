@@ -42,6 +42,7 @@ const { closeSync, copyFileSync, existsSync, openSync, rmSync } = require('node:
 const path = require('node:path');
 
 const holdersModule = require(path.join(__dirname, '..', 'lib', 'file-holders.cjs'));
+const exclusiveModule = require(path.join(__dirname, '..', 'lib', 'exclusive-open.cjs'));
 
 const projectRoot = process.cwd();
 const appOutDir = path.join(projectRoot, 'release', 'win-unpacked');

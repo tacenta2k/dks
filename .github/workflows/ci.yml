@@ -123,19 +123,30 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # build.log covers packaging failures; test-output.txt covers a failing
-          # npm test. Both land as a commit comment because the job log is not
-          # always retrievable from an API-only client.
-          # Annotations are readable through the API even when the job log is
-          # not, so the failing test lines are also emitted as ::error::.
+          # The job log is not retrievable from an API-only client, so the
+          # evidence is posted as commit comments (short, always under the API
+          # limit) and as annotations (always readable through the API).
+          $repo = "${{ github.repository }}"
+          $sha = "${{ github.sha }}"
+          function Post-Comment([string]$title, [string]$text) {
+            if ([string]::IsNullOrWhiteSpace($text)) { return }
+            if ($text.Length -gt 60000) { $text = $text.Substring(0, 60000) }
+            $body = "$title``n``````n$text``````"
+            try {
+              $body | gh api "repos/$repo/commits/$sha/comments" -F body=@- 2>&1 | Out-Null
+              Write-Host "posted: $title"
+            } catch {
+              Write-Host "::warning::could not post '$title': $_"
+            }
+          }
+
           if (Test-Path "test-output.txt") {
-            # The job log is not always retrievable from an API-only client, but
-            # annotations are. Emit the FAIL line *and* the assertion under it:
-            # the name alone says which test failed, never why.
             $lines = Get-Content "test-output.txt"
+            # 1) Annotations: the FAIL line *and* the assertion under it, so the
+            #    API shows why it failed, not just which test.
             $emitted = 0
             for ($i = 0; $i -lt $lines.Count -and $emitted -lt 10; $i++) {
-              if ($lines[$i] -match '^\s*(FAIL|×)') {
+              if ($lines[$i] -match '^\s*(FAIL|×)\s') {
                 $emitted++
                 for ($j = $i; $j -lt [Math]::Min($i + 16, $lines.Count); $j++) {
                   if ($j -gt $i -and $lines[$j] -match '^\s*(FAIL|×)\s') { break }
@@ -144,14 +155,25 @@ jobs:
                 }
               }
             }
+            # A hard worker crash leaves no FAIL line: surface it explicitly.
+            $crashes = $lines | Select-String -Pattern 'Unhandled|Worker exited|Vitest caught|Cannot find module|ERR_' |
+              Select-Object -First 20 | ForEach-Object { $_.Line.Trim() }
+            foreach ($line in $crashes) { Write-Host "::error::test-crash: $line" }
+
+            # 2) A compact comment: the summary lines, the failures, and the tail.
+            $summary = $lines | Select-String -Pattern '^\s*Test Files|^\s*Tests\s|Duration' |
+              Select-Object -Last 5 | ForEach-Object { $_.Line.Trim() }
+            $failures = $lines | Select-String -Pattern '^\s*(FAIL|×|Unhandled|Worker exited)' |
+              Select-Object -First 40 | ForEach-Object { $_.Line.Trim() }
+            $tail = $lines | Select-Object -Last 120
+            Post-Comment "test summary ($sha)" (@($summary) + "" + @($failures) + "" + $tail | Out-String)
           }
-          $sources = @("$env:RUNNER_TEMP/build.log", "test-output.txt")
-          foreach ($source in $sources) {
+
+          foreach ($source in @("$env:RUNNER_TEMP/build.log")) {
             if (-not (Test-Path $source)) { continue }
             $content = Get-Content -Raw $source -ErrorAction SilentlyContinue
             if (-not $content) { continue }
-            $body = "Log (\($source), first 50000 chars) for $env:GITHUB_SHA`n``````n" + $content.Substring(0, [Math]::Min(50000, $content.Length)) + "`n``````"
-            try { gh api repos/${{ github.repository }}/commits/${{ github.sha }}/comments -f body="$body" 2>&1 | Out-Null; Write-Host "Posted $source comment" } catch { Write-Host "Comment failed: $_" }
+            Post-Comment "build log ($source)" $content
           }
 
       - name: Verify packaged app-update.yml has no publisherName (unsigned v0.1.5)
