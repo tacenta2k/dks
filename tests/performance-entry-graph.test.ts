@@ -67,17 +67,11 @@ async function entryGraph(): Promise<Graph> {
   });
 
   const inputs = result.metafile?.inputs ?? {};
-  // esbuild reports module ids with the host separator; every match below is
-  // done on '/'-joined ids so the graph test behaves the same on Windows.
-  const entry = Object.keys(inputs).find((id) => normalise(id).endsWith(ENTRY));
+  const entry = Object.keys(inputs).find((id) => id.endsWith(ENTRY));
   if (!entry) {
     throw new Error(`esbuild did not report the renderer entry ${ENTRY}`);
   }
   return { inputs, entry };
-}
-
-function normalise(moduleId: string): string {
-  return moduleId.replace(/\\/g, '/');
 }
 
 function reachable(graph: Graph, kinds: string[]): Set<string> {
@@ -100,11 +94,11 @@ function reachable(graph: Graph, kinds: string[]): Set<string> {
 
 function packageOf(moduleId: string): string | null {
   const marker = 'node_modules/';
-  const index = normalise(moduleId).indexOf(marker);
+  const index = moduleId.indexOf(marker);
   if (index === -1) {
     return null;
   }
-  const rest = normalise(moduleId).slice(index + marker.length);
+  const rest = moduleId.slice(index + marker.length);
   return rest.startsWith('@') ? rest.split('/').slice(0, 2).join('/') : rest.split('/')[0];
 }
 
@@ -117,12 +111,12 @@ describe('renderer startup module graph (H1)', () => {
       .filter((name) => DEFERRED_LIBRARIES.includes(name as string));
     expect(staticHeavy).toEqual([]);
 
-    const staticScreens = DEFERRED_SCREENS.filter((screen) => staticModules.some((id) => normalise(id).endsWith(screen)));
+    const staticScreens = DEFERRED_SCREENS.filter((screen) => staticModules.some((id) => id.endsWith(screen)));
     expect(staticScreens).toEqual([]);
 
     // The admin barrel re-exports the whole AdminTools module; importing it
     // anywhere on the startup path would drag XLSX/PDF wiring back in.
-    expect(staticModules.some((id) => normalise(id).endsWith('src/features/admin/index.ts'))).toBe(false);
+    expect(staticModules.some((id) => id.endsWith('src/features/admin/index.ts'))).toBe(false);
   }, 60_000);
 
   it('still reaches those screens and libraries through dynamic imports', async () => {
@@ -134,7 +128,7 @@ describe('renderer startup module graph (H1)', () => {
       expect(reachableHeavy.has(library), `${library} should still be reachable as a chunk`).toBe(true);
     }
     for (const screen of DEFERRED_SCREENS) {
-      expect(allModules.some((id) => normalise(id).endsWith(screen)), `${screen} should be a chunk`).toBe(true);
+      expect(allModules.some((id) => id.endsWith(screen)), `${screen} should be a chunk`).toBe(true);
     }
   }, 60_000);
 });
