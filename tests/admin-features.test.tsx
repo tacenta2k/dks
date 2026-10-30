@@ -84,11 +84,13 @@ describe('admin renderer integration', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Export CSV' }));
 
     // R7: the toolbar waits for its own snapshot before exporting, so the save
-    // happens asynchronously. Wait for it (and for the Tools button to be
-    // re-enabled) before opening the menu a second time.
+    // happens asynchronously. The button also disables itself while the export
+    // runs (Excel now loads its chunk first), and a click on a busy button is
+    // dropped — so wait for the save AND for it to re-enable before reopening.
     await waitFor(() => expect(saved).toHaveLength(1));
-    fireEvent.click(screen.getByRole('button', { name: 'Tools' }));
-    fireEvent.click(screen.getByRole('menuitem', { name: 'Export Excel' }));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Tools/ })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: /^Tools/ }));
+    fireEvent.click(await screen.findByRole('menuitem', { name: 'Export Excel' }));
 
     await waitFor(() => expect(saved).toHaveLength(2));
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
