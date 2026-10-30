@@ -92,6 +92,32 @@ jobs:
           }
           "ELECTRON_BUILDER_EXIT=$code" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
 
+      # Was the release failure deterministic at this commit? A second, complete
+      # packaging round in a fresh output tree answers that for this runner.
+      - name: Repack (second full packaging round)
+        shell: pwsh
+        env:
+          DEBUG: electron-builder*
+        run: |
+          $log = Join-Path $env:GITHUB_WORKSPACE "packaging-2.log"
+          npx electron-builder --win --publish never --config electron-builder.yml 2>&1 | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          Write-Host "second electron-builder exit code: $code"
+          "SECOND_PACKAGING_EXIT=$code" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Process inventory (stray DKS/electron processes)
+        if: always()
+        shell: pwsh
+        run: |
+          $stray = Get-Process -ErrorAction SilentlyContinue |
+            Where-Object { $_.ProcessName -match 'DKS|electron|node' }
+          if (-not $stray) { Write-Host "[inv] no DKS/electron/node processes running" }
+          foreach ($process in $stray) {
+            $path = ''
+            try { $path = $process.Path } catch { $path = '<unavailable>' }
+            Write-Host "[inv] pid $($process.Id) $($process.ProcessName) $path"
+          }
+
       - name: Lock-semantics and hand-off experiments
         if: always()
         shell: pwsh
@@ -139,6 +165,14 @@ jobs:
             $parts += ($lines | ForEach-Object { $_.Line })
             $parts += "``````"
           }
+          if (Test-Path "$env:GITHUB_WORKSPACE\packaging-2.log") {
+            $lines = Get-Content "$env:GITHUB_WORKSPACE\packaging-2.log" |
+              Select-String -Pattern "rcedit|Unable to commit|afterPack|dks\]|⨯" |
+              Select-Object -Last 40
+            $parts += "## second packaging round (filtered)`n``````"
+            $parts += ($lines | ForEach-Object { $_.Line })
+            $parts += "``````"
+          }
           if ($parts.Count -eq 0) { Write-Host "nothing to post"; exit 0 }
           $body = ($parts -join "`n")
           if ($body.Length -gt 60000) { $body = $body.Substring(0, 60000) }
@@ -151,5 +185,6 @@ jobs:
           name: packaging-lock-diagnostics
           path: |
             packaging.log
+            packaging-2.log
             lock-probe.log
           if-no-files-found: warn

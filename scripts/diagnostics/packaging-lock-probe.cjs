@@ -296,6 +296,37 @@ async function experimentRealHandoff(rounds = 3) {
   }
 }
 
+/**
+ * F: repeatability of the exact hand-off the release performs.
+ *
+ * The release failure happened ONCE, on the same runner image and the same
+ * commit that packaged fine 12 minutes earlier. If rcedit succeeds on every
+ * one of these attempts right after the real afterPack hook, the failure is
+ * not reproducible on demand here — which is itself the evidence to report,
+ * and it means any fix has to tolerate a holder it did not create.
+ */
+async function experimentRceditRepeat(rounds = 12) {
+  let failures = 0;
+  const started = Date.now();
+  for (let attempt = 1; attempt <= rounds; attempt += 1) {
+    const result = await runRcedit(packagedExe);
+    if (!result.ok) {
+      failures += 1;
+      record(`F${attempt}`, 'sequential rcedit on the packaged exe', describeRcedit(result));
+    }
+  }
+  record('F', `${rounds} sequential rcedit calls right after packaging`,
+    `${rounds - failures} ok, ${failures} failed (${Date.now() - started}ms total)`);
+
+  // Does the holder lookup itself work on this runner? The guard only calls it
+  // when the file is locked, so without this the production path could fail
+  // silently the first time it is needed.
+  const holders = await holdersModule.findFileHolders(packagedExe, { log: (line) => console.log(line) });
+  record('F0', 'Restart Manager lookup works on this runner', holders.supported
+    ? `yes — ${holders.holders.length} holder(s) right now`
+    : `NO — ${holders.reason}`);
+}
+
 async function main() {
   console.log(`[probe] platform=${process.platform} appOutDir=${appOutDir}`);
   if (process.platform !== 'win32') {
@@ -311,6 +342,7 @@ async function main() {
   await experimentRunningImage();
   await experimentThirdPartyHandles();
   await experimentRealHandoff();
+  await experimentRceditRepeat();
 
   rmSync(probeCopy, { force: true });
   console.log('\n[probe] summary');
