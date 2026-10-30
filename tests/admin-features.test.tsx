@@ -118,15 +118,42 @@ describe('admin renderer integration', () => {
 
     // R7: the toolbar waits for its own snapshot before exporting, so the save
     // happens asynchronously. The button also disables itself while the export
-    // runs (Excel now loads its chunk first), and a click on a busy button is
+    // runs (Excel loads its chunk first), and a click on a busy button is
     // dropped — so wait for the save AND for it to re-enable before reopening.
     await waitFor(() => expect(saved).toHaveLength(1));
-    await clickMenuItem('Export Excel');
+    expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
+  }, 30_000);
 
+  // The second export used to run in the same test as the first, sharing one
+  // 15 s budget. On the Windows runner the two lazy chunk loads together
+  // sometimes exceeded it, and the failure said only "Test timed out" — with
+  // no way to tell which export stalled. Each export now has its own budget
+  // and its own assertion, so a flake names the export that stalled.
+  it('exports the current rows as Excel after a CSV export', async () => {
+    const repository = await seededRepository();
+    const saved: ExportArtifact[] = [];
+    render(
+      <AppShell
+        activeView="sheet"
+        profile={adminProfile()}
+        sheetRepository={repository}
+        onSaveExport={(artifact) => saved.push(artifact)}
+      />,
+    );
+
+    await screen.findByText('Ada Lovelace');
+    await screen.findByRole('button', { name: /^Tools/ });
+
+    await clickMenuItem('Export CSV');
+    await waitFor(() => expect(saved).toHaveLength(1));
+
+    // The toolbar disables itself while exporting; the helper waits for it.
+    await clickMenuItem('Export Excel');
     await waitFor(() => expect(saved).toHaveLength(2));
+
     expect(saved[0]).toEqual(expect.objectContaining({ fileName: 'dks-export.csv', rowCount: 1 }));
     expect(saved[1]).toEqual(expect.objectContaining({ fileName: 'dks-export.xlsx', rowCount: 1 }));
-  }, 15_000);
+  }, 30_000);
 
   it('waits for the toolbar snapshot before exporting (R7 regression)', async () => {
     const repository = await seededRepository();
