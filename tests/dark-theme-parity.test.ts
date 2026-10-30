@@ -84,6 +84,57 @@ describe('dark theme parity (R3 batch E)', () => {
     }
     expect(darkBlock).not.toContain('--color-surface: #ffffff');
   });
+
+  it('uses an AMOLED pure-black neutral hierarchy in dark mode while leaving light mode unchanged', () => {
+    const shell = readFileSync(join(SRC, 'renderer/styles.css'), 'utf8');
+    const sheet = readFileSync(join(SRC, 'features/sheet/sheet.css'), 'utf8');
+    const lightBlock = shell.slice(shell.indexOf(':root {'), shell.indexOf(":root[data-theme='dark']"));
+    const darkBlock = shell.slice(shell.indexOf(":root[data-theme='dark']"), shell.indexOf('* {'));
+
+    // Light mode tokens stay completely untouched.
+    expect(lightBlock).toContain('--color-background: #f5f7fb;');
+    expect(lightBlock).toContain('--color-surface: #ffffff;');
+    expect(lightBlock).toContain('--color-text: #162033;');
+    expect(lightBlock).toContain('--color-primary: #4c5ee8;');
+
+    // Dark mode uses pure black ground + neutral near-black tone steps (zero navy/indigo surfaces).
+    expect(darkBlock).toContain('--color-background: #000000;');
+    expect(darkBlock).toContain('--color-surface: #0a0a0a;');
+    expect(darkBlock).toContain('--color-surface-muted: #141414;');
+    expect(darkBlock).toContain('--color-surface-raised: #171717;');
+    expect(darkBlock).toContain('--color-border: #222222;');
+    expect(darkBlock).toContain('--color-border-strong: #3d3d3d;');
+
+    for (const legacyBlueDarkHex of ['#111623', '#171e2f', '#1d2639', '#222c40', '#2b3850', '#3b4a66', '#272e58']) {
+      expect(darkBlock.toLowerCase()).not.toContain(legacyBlueDarkHex);
+    }
+
+    // Verify WCAG AA (>= 4.5:1) luminance contrast across all dark text/surface pairs.
+    const channel = (hex: string, offset: number) => {
+      const srgb = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+      return srgb <= 0.03928 ? srgb / 12.92 : ((srgb + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = (hex: string) =>
+      0.2126 * channel(hex, 1) + 0.7152 * channel(hex, 3) + 0.0722 * channel(hex, 5);
+    const contrast = (fg: string, bg: string) => {
+      const l1 = luminance(fg);
+      const l2 = luminance(bg);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    };
+
+    for (const surface of ['#000000', '#0a0a0a', '#141414', '#171717']) {
+      for (const fg of ['#f5f5f5', '#b5b5b5', '#949494']) {
+        expect(contrast(fg, surface)).toBeGreaterThanOrEqual(4.5);
+      }
+    }
+    expect(contrast('#0a0a0a', '#ededed')).toBeGreaterThanOrEqual(4.5);
+
+    // Decorative radial gradients and button glows are stripped in dark mode,
+    // and AG Grid Quartz dark popups/menus override Quartz's #182230 slate default.
+    expect(shell).toContain(":root[data-theme='dark'] .login-page");
+    expect(shell).toContain(":root[data-theme='dark'] .button--primary");
+    expect(sheet).toMatch(/\.sheet-grid\.ag-theme-quartz-dark\s*\{[^}]*--ag-menu-background-color:\s*var\(--color-surface-raised\)/s);
+  });
 });
 
 /**

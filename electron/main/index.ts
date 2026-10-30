@@ -321,9 +321,13 @@ function loadRenderer(window: BrowserWindow, options: CreateMainWindowOptions): 
   try {
     if (rendererUrl) {
       log.info(`[dks] loading renderer from dev URL ${rendererUrl}`);
-      void window.loadURL(rendererUrl).catch((error) => {
-        log.error('[dks] renderer dev URL failed to load', error);
-      });
+      const clearHttpCache = window.webContents?.session?.clearCache?.() ?? Promise.resolve();
+      void Promise.resolve(clearHttpCache)
+        .catch(() => undefined)
+        .then(() => window.loadURL(rendererUrl))
+        .catch((error) => {
+          log.error('[dks] renderer dev URL failed to load', error);
+        });
       return;
     }
 
@@ -677,6 +681,17 @@ export function acquireSingleInstanceLock(): boolean {
 
     app.on('second-instance', () => {
       showMainWindow();
+      const devUrl = process.env.ELECTRON_RENDERER_URL ?? process.env.VITE_DEV_SERVER_URL;
+      if (!app.isPackaged && devUrl && isUsableWindow(mainWindow)) {
+        log.info(`[dks] second-instance in dev mode; reloading renderer from ${devUrl}`);
+        const clearHttpCache = mainWindow.webContents?.session?.clearCache?.() ?? Promise.resolve();
+        void Promise.resolve(clearHttpCache)
+          .catch(() => undefined)
+          .then(() => (isUsableWindow(mainWindow) ? mainWindow.loadURL(devUrl) : undefined))
+          .catch((error) => {
+            log.error('[dks] renderer dev URL reload failed', error);
+          });
+      }
     });
     return true;
   } catch {

@@ -129,10 +129,19 @@ describe('AdminStatusPanel & AppShell role visibility', () => {
     expect(within(dialog).getByText(/1 failed · 1 blocked/i)).toBeTruthy();
 
     // Before clicking "Run connectivity checks", Auth & DB MUST be "Not checked",
-    // Background workers MUST be "Unknown (not probed from desktop)", and fetch MUST NOT have run!
+    // Server-side reporting workers MUST show neutral "Not checked from this PC"
+    // (never faking healthy/ok or error), and fetch MUST NOT have run!
     expect(fetchMock).not.toHaveBeenCalled();
     expect(within(dialog).getAllByText(/^Not checked$/i)).toHaveLength(2);
-    expect(within(dialog).getByText(/Unknown \(not probed from desktop\)/i)).toBeTruthy();
+    expect(within(dialog).getByText('Server-side reporting workers')).toBeTruthy();
+    const workersBadge = within(dialog).getByText('Not checked from this PC');
+    expect(workersBadge).toBeTruthy();
+    expect(workersBadge.className).toBe('admin-status-badge');
+    expect(within(dialog).queryByText(/Unknown \(not probed from desktop\)/i)).toBeNull();
+    expect(within(dialog).queryByText(/Background workers \(Email/i)).toBeNull();
+    expect(
+      within(dialog).getByText(/normal, not an error/i),
+    ).toBeTruthy();
     expect(
       within(dialog).getByText(/A passing check does not prove full backend health/i),
     ).toBeTruthy();
@@ -180,10 +189,10 @@ describe('AdminStatusPanel & AppShell role visibility', () => {
       connectivity: createInitialConnectivityReport(true),
     });
     expect(summary).toContain('supabase_auth_reachability: not_checked');
-    expect(summary).toContain('backend_workers_health: unknown (not probed from desktop)');
+    expect(summary).toContain('backend_workers_health: not_checked_from_pc (server-side — not probed from desktop)');
   });
 
-  it('exposes the Automatic error reporting disclosure and Admin-only toggle in Settings -> About & updates', () => {
+  it('exposes concise Automatic error reporting copy, expandable privacy details, and Admin-only toggle in Settings -> About & updates', () => {
     const onSettingsChange = vi.fn();
     const { rerender } = render(
       <SettingsPage
@@ -196,7 +205,16 @@ describe('AdminStatusPanel & AppShell role visibility', () => {
     );
 
     fireEvent.click(screen.getByRole('button', { name: /About & updates/i }));
-    expect(screen.getByText(/Automated error reporting/i)).toBeTruthy();
+    expect(screen.getByRole('heading', { name: 'Automatic error reporting' })).toBeTruthy();
+    expect(
+      screen.getByText('Sends safe technical diagnostics to DKS issue tracking. No customer data is included.'),
+    ).toBeTruthy();
+
+    const details = screen.getByText('Privacy details').closest('details');
+    expect(details).not.toBeNull();
+    expect(details?.hasAttribute('open')).toBe(false);
+    expect(details?.textContent).toMatch(/Customer names, Passport numbers, Civil IDs/i);
+    expect(details?.textContent).toMatch(/GitHub Issues/i);
 
     const toggle = screen.getByRole('checkbox', {
       name: /Automatic error reporting/i,

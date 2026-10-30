@@ -154,6 +154,9 @@ describe('settings page', () => {
     );
     expect(css).toMatch(/\.settings-email\s*\{[^}]*display:\s*grid/s);
     expect(css).toMatch(/\.settings-email__field\s*\{[^}]*display:\s*grid/s);
+    expect(css).not.toMatch(/\.settings-email__toggle\s*\{[^}]*max-width:/s);
+    expect(css).not.toMatch(/\.settings-email__field\s*\{[^}]*max-width:/s);
+    expect(css).not.toMatch(/\.settings-help\s*\{[^}]*max-width:/s);
     expect(css).toContain('.settings-email__field textarea');
     expect(css).toMatch(
       /@media \(max-width: 900px\)[\s\S]*\.settings-alert-options\s*\{[^}]*grid-template-columns:\s*1fr/,

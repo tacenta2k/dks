@@ -343,7 +343,7 @@ export function formatSanitizedDiagnosticsText(input: {
     `supabase_configured: ${String(Boolean(connectivity.configured))}`,
     `supabase_auth_reachability: ${authStatus}`,
     `supabase_db_rls_reachability: ${dbStatus}`,
-    'backend_workers_health: unknown (not probed from desktop)',
+    'backend_workers_health: not_checked_from_pc (server-side — not probed from desktop)',
     `error_reporting_enabled: ${String(Boolean(local.errorReporting.enabled))}`,
     `error_queue_pending: ${safeNonNegInt(local.errorReporting.pendingCount)}`,
     `error_queue_failed: ${safeNonNegInt(local.errorReporting.failedCount)}`,

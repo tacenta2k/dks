@@ -300,7 +300,21 @@ function ThemeIcon({ dark }: { dark: boolean }) {
   );
 }
 
+export function contentClassNameForView(view: ShellView): string {
+  if (view === 'sheet') {
+    return 'content content--sheet';
+  }
+  if (view === 'dashboard') {
+    return 'content content--wide content--dashboard';
+  }
+  if (view === 'recycle-bin' || view === 'audit-log') {
+    return 'content content--wide';
+  }
+  return 'content';
+}
+
 export function AppShell({
+
   activeView = 'dashboard',
   onNavigate = () => undefined,
   themePreference = 'system',
@@ -727,7 +741,7 @@ export function AppShell({
         </ConfirmDialog>
 
         <main
-          className={`content${effectiveView === 'sheet' ? ' content--sheet' : ''}`}
+          className={contentClassNameForView(effectiveView)}
           aria-label={copy.title}
         >
           {localStoreFailureMessage ? (

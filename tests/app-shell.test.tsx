@@ -116,4 +116,31 @@ describe('DKS renderer shell', () => {
     expect(document.documentElement).toHaveAttribute('data-theme', 'dark');
     expect(window.localStorage.getItem('dks.theme-preference')).toBe('dark');
   });
+
+  it('applies content content--wide content--dashboard to the rendered <main> landmark on Dashboard and scopes other views cleanly', async () => {
+    const service = new AuthService(makeClient({ id: 'user-1', role: 'admin' }, session));
+    render(<App authService={service} />);
+
+    await screen.findByRole('banner', { name: 'DKS top bar' });
+
+    const main = document.querySelector('main');
+    expect(main).not.toBeNull();
+    expect(main).toBe(screen.getByRole('main'));
+    expect(main?.className).toBe('content content--wide content--dashboard');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Visa Sheet' }));
+    expect(document.querySelector('main')?.className).toBe('content content--sheet');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Recycle Bin' }));
+    expect(document.querySelector('main')?.className).toBe('content content--wide');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Audit Log' }));
+    expect(document.querySelector('main')?.className).toBe('content content--wide');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Settings' }));
+    expect(document.querySelector('main')?.className).toBe('content');
+
+    fireEvent.click(screen.getByRole('button', { name: 'Dashboard' }));
+    expect(document.querySelector('main')?.className).toBe('content content--wide content--dashboard');
+  });
 });

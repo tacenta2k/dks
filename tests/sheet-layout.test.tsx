@@ -34,6 +34,8 @@ describe('Visa Sheet layout (R3 batch E)', () => {
     expect(body).toContain('width: 100%');
     expect(body).toContain('max-width: none');
     expect(body).toMatch(/margin:\s*0?;/);
+    expect(body).toContain('clamp(14px, 1.8vh, 22px)');
+    expect(body).toContain('clamp(20px, 2.6vw, 44px)');
 
     // The generic page rule must still center ordinary pages; only the sheet
     // opts out, and it does so with a selector that outranks it.

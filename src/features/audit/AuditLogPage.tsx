@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useState, type ReactNode } from 'react';
 
 import type { ColumnDefinition } from '../../lib/columns';
 import { formatDisplayDate, formatLocalDateTime } from '../../lib/date';
@@ -644,6 +644,8 @@ export interface AuditLogPageProps {
   /** Current columns/rows used only to label fields and linked records. */
   columns?: readonly ColumnDefinition[];
   rows?: readonly SheetRow[];
+  /** Optional right-aligned header control (e.g. Admin "Clear audit log"). */
+  headerActions?: ReactNode;
 }
 
 interface LabelledEntry {
@@ -659,6 +661,7 @@ export function AuditLogPage({
   profiles = [],
   columns = [],
   rows = [],
+  headerActions,
 }: AuditLogPageProps) {
   const [actionFilter, setActionFilter] = useState('');
   const [actorFilter, setActorFilter] = useState('');
@@ -733,10 +736,21 @@ export function AuditLogPage({
 
   return (
     <section className="audit-log-page" aria-label="Audit log">
-      {/* FIXES_UI §8: the page title lives in the top bar; the "Admin tools"
-          eyebrow and duplicate h1 are removed. A compact count is kept. */}
-      {orderedEntries.length > 0 ? (
-        <p className="audit-log-page__count">{orderedEntries.length} recorded {orderedEntries.length === 1 ? 'action' : 'actions'}</p>
+      {/* FIXES_UI §8: one header row with count on the left and Admin actions
+          on the right, followed immediately by filters and the table. */}
+      {orderedEntries.length > 0 || headerActions ? (
+        <div className="audit-log-header">
+          {orderedEntries.length > 0 ? (
+            <p className="audit-log-page__count">
+              {orderedEntries.length} recorded {orderedEntries.length === 1 ? 'action' : 'actions'}
+            </p>
+          ) : (
+            <span />
+          )}
+          {headerActions ? (
+            <div className="audit-log-header__actions">{headerActions}</div>
+          ) : null}
+        </div>
       ) : null}
       <div className="audit-log-filters" role="group" aria-label="Filter audit log">
         <label>

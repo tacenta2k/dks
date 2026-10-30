@@ -634,9 +634,9 @@ export function AdminStatusPanel(props: AdminStatusPanelProps) {
                     </dd>
                   </div>
                   <div className="admin-status-row">
-                    <dt>Background workers (Email / GitHub reporting)</dt>
+                    <dt>Server-side reporting workers</dt>
                     <dd>
-                      <span className="admin-status-badge">Unknown (not probed from desktop)</span>
+                      <span className="admin-status-badge">Not checked from this PC</span>
                     </dd>
                   </div>
                   {connectivity.authEndpoint.checkedAt ? (
@@ -647,7 +647,7 @@ export function AdminStatusPanel(props: AdminStatusPanelProps) {
                   ) : null}
                 </dl>
                 <p className="admin-status-note">
-                  Reachability checks only confirm whether this device reached the queried endpoint just now. A passing check does not prove full backend health, write availability, or third-party worker delivery.
+                  Reachability checks only confirm whether this PC reached the queried endpoint just now. Email and GitHub delivery run server-side and are not probed from the desktop app — &ldquo;Not checked from this PC&rdquo; is normal, not an error. A passing check does not prove full backend health, write availability, or third-party worker delivery.
                 </p>
               </section>
 

@@ -667,14 +667,18 @@
   display: flex;
   width: 100%;
   max-width: none;
-  /* Fills the shell body below the top bar; the grid scrolls internally, so
+  /* Fills the shell body below the top bar with the same outer inset as
+     Dashboard, Recycle Bin, and Audit Log; the grid scrolls internally, so
      the sheet page itself never scrolls. */
   height: auto;
   flex: 1 1 auto;
   min-height: 0;
   flex-direction: column;
   margin: 0;
-  padding: 10px 12px 12px;
+  padding:
+    clamp(14px, 1.8vh, 22px)
+    clamp(20px, 2.6vw, 44px)
+    clamp(16px, 2.2vh, 24px);
   overflow: hidden;
 }
 
@@ -760,6 +764,21 @@
   --ag-input-focus-box-shadow: 0 0 0 2px var(--color-primary);
   --ag-range-selection-border-color: var(--color-primary);
   border-radius: 8px;
+}
+
+.sheet-grid.ag-theme-quartz-dark {
+  --ag-active-color: var(--color-primary);
+  --ag-secondary-border-color: var(--color-border);
+  --ag-tooltip-background-color: var(--color-surface-raised);
+  --ag-control-panel-background-color: var(--color-surface-muted);
+  --ag-panel-background-color: var(--color-surface-raised);
+  --ag-panel-border-color: var(--color-border-strong);
+  --ag-menu-background-color: var(--color-surface-raised);
+  --ag-menu-border-color: var(--color-border-strong);
+  --ag-input-border-color: var(--color-border-strong);
+  --ag-row-hover-color: rgba(255, 255, 255, 0.045);
+  --ag-selected-row-background-color: rgba(255, 255, 255, 0.085);
+  --ag-column-hover-color: rgba(255, 255, 255, 0.03);
 }
 
 /* R2-09 — compact, icon-only row actions that fit inside the row. */
@@ -1069,5 +1088,59 @@
   .content.content--sheet {
     height: calc(100vh - 50px);
     flex: none;
+    padding: 24px 18px;
   }
 }
+
+/* AMOLED dark chrome for Visa Sheet surfaces, popovers, modals, and status rows. */
+:root[data-theme='dark'] .sheet-empty-state {
+  background: var(--color-surface);
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .sheet-workbench {
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .sheet-filter-chip--active {
+  border-color: var(--color-border-strong);
+  background: var(--color-primary-soft);
+  color: var(--color-text);
+}
+
+:root[data-theme='dark'] .sheet-alert--error,
+:root[data-theme='dark'] .sheet-form__error {
+  color: #fca5a5;
+}
+
+:root[data-theme='dark'] .sheet-modal-backdrop {
+  background: rgba(0, 0, 0, 0.76);
+}
+
+:root[data-theme='dark'] .sheet-modal,
+:root[data-theme='dark'] .sheet-tools__menu,
+:root[data-theme='dark'] .sheet-column-menu,
+:root[data-theme='dark'] .sheet-more-filters__menu {
+  border-color: var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .sheet-row--expired .ag-cell {
+  background: color-mix(in srgb, #ef4444 13%, transparent);
+}
+
+:root[data-theme='dark'] .sheet-row--today .ag-cell {
+  background: color-mix(in srgb, #f87171 16%, transparent);
+}
+
+:root[data-theme='dark'] .sheet-row--urgent .ag-cell {
+  background: color-mix(in srgb, #fb923c 11%, transparent);
+}
+
+:root[data-theme='dark'] .sheet-row--expiring .ag-cell {
+  background: color-mix(in srgb, #facc15 9%, transparent);
+}
+
+:root[data-theme='dark'] .sheet-row--valid .ag-cell {
+  background: color-mix(in srgb, #4ade80 6%, transparent);
+}
+

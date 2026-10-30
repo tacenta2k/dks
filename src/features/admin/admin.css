@@ -14,6 +14,11 @@
   min-width: 0;
 }
 
+.admin-panel {
+  display: grid;
+  gap: 12px;
+}
+
 .admin-sheet-actions {
   display: grid;
   gap: 14px;
@@ -146,6 +151,22 @@
 
 .admin-dialog tbody tr:last-child td {
   border-bottom: 0;
+}
+
+:root[data-theme='dark'] .admin-sheet-actions {
+  box-shadow: none;
+}
+
+:root[data-theme='dark'] .admin-dialog-backdrop {
+  background: rgba(0, 0, 0, 0.76);
+}
+
+:root[data-theme='dark'] .admin-dialog {
+  border-color: var(--color-border-strong);
+}
+
+:root[data-theme='dark'] .admin-inline-message--error {
+  color: #fca5a5;
 }
 
 @media (max-width: 620px) {

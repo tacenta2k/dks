@@ -1,5 +1,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import '@testing-library/jest-dom/vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
 
 import { RecycleBinPage } from '../src/features/recycle-bin/RecycleBinPage';
@@ -35,11 +37,22 @@ describe('recycle bin page', () => {
     // panel no longer renders its own heading — assert on the deleted rows.
     expect(screen.getAllByText('Deleted record').length).toBeGreaterThan(0);
     expect(screen.queryByText('Active record')).not.toBeInTheDocument();
-    // Buttons say only Restore / Delete — no record name or ID appended.
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Delete' }));
+    // Buttons say only Restore / Delete — no record name or ID appended, with
+    // distinct semantic positive/destructive styling.
+    const restoreButton = screen.getByRole('button', { name: 'Restore' });
+    const deleteButton = screen.getByRole('button', { name: 'Delete' });
+    expect(restoreButton).toHaveClass('recycle-bin-action', 'recycle-bin-action--restore');
+    expect(deleteButton).toHaveClass('recycle-bin-action', 'recycle-bin-action--delete');
+    fireEvent.click(restoreButton);
+    fireEvent.click(deleteButton);
     expect(onRestore).toHaveBeenCalledWith(rows[0]);
     expect(onPermanentDelete).toHaveBeenCalledWith(rows[0]);
+
+    const shellCss = readFileSync(resolve(__dirname, '../src/renderer/styles.css'), 'utf8');
+    expect(shellCss).toContain('.recycle-bin-action--restore');
+    expect(shellCss).toContain('.recycle-bin-action--delete');
+    expect(shellCss).toContain(":root[data-theme='dark'] .recycle-bin-action--restore");
+    expect(shellCss).toContain(":root[data-theme='dark'] .recycle-bin-action--delete");
   });
 
   it('shows an administrator gate to office users', () => {
