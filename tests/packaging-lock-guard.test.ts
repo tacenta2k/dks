@@ -665,3 +665,17 @@ describe('Restart Manager holder reporting', () => {
     expect(success.holders).toHaveLength(1);
   });
 });
+
+  it('the generated PowerShell compiles: FILETIME is not imported ambiguously', () => {
+    const script = holdersModule.holdersScript();
+    // Add-Type fails with CS0104 when both namespaces are imported and the
+    // struct says plain `FILETIME` — the first CI run of this lookup did
+    // exactly that, so the failure mode is pinned here.
+    expect(script).not.toContain('using System.Runtime.InteropServices.ComTypes;');
+    expect(script).toContain('System.Runtime.InteropServices.ComTypes.FILETIME');
+    expect(script).toContain('RmStartSession');
+    expect(script).toContain('RmRegisterResources');
+    expect(script).toContain('RmGetList');
+    expect(script).toContain('RmEndSession');
+  });
+});

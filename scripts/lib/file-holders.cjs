@@ -38,15 +38,18 @@ param([Parameter(Mandatory=$true)][string]$Path)
 $source = @'
 using System;
 using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.ComTypes;
 
 public static class DksRestartManager
 {
+    // Fully qualified: importing System.Runtime.InteropServices and
+    // System.Runtime.InteropServices.ComTypes together makes plain FILETIME
+    // ambiguous (CS0104) and Add-Type fails on the runner — which is exactly
+    // what the first CI run of this lookup reported.
     [StructLayout(LayoutKind.Sequential)]
     public struct RM_UNIQUE_PROCESS
     {
         public int dwProcessId;
-        public FILETIME ProcessStartTime;
+        public System.Runtime.InteropServices.ComTypes.FILETIME ProcessStartTime;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
