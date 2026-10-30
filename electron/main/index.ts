@@ -48,6 +48,11 @@ import {
   LOCAL_STORE_LOG_FALLBACK,
   type LocalStoreFailure,
 } from './local-store-diagnostics';
+import {
+  classifyMainErrorCode,
+  MainErrorReporter,
+} from './error-reporter';
+import { registerDiagnosticsIpcHandlers } from './diagnostics-ipc';
 
 /**
  * R2-05: Windows resolves the toast/notification author from the application
@@ -177,10 +182,66 @@ let localPurgeTimer: ReturnType<typeof setInterval> | undefined;
 /** R7: why the local store is unavailable, shared with the failure stubs. */
 let localStoreFailure: LocalStoreFailure | null = null;
 let unregisterLocalStoreFailureIpc: (() => void) | undefined;
+let mainErrorReporter: MainErrorReporter | undefined;
+let unregisterDiagnosticsIpc: (() => void) | undefined;
+let processErrorMonitorsInstalled = false;
 
 /** Diagnostics for the local store, for logging and tests. */
 export function getLocalStoreFailure(): LocalStoreFailure | null {
   return localStoreFailure;
+}
+
+function getOrCreateMainErrorReporter(): MainErrorReporter {
+  if (!mainErrorReporter) {
+    mainErrorReporter = new MainErrorReporter({
+      appVersion: getAppVersion(),
+      packaged: Boolean(app?.isPackaged),
+      platform: process.platform,
+      arch: process.arch,
+      electronVersion: process.versions?.electron ?? null,
+    });
+  }
+  return mainErrorReporter;
+}
+
+/**
+ * Observe uncaught exceptions and unhandled rejections in the main process
+ * without suppressing Node/Electron's default crash handling or pretending a
+ * corrupted main process is safe to keep running.
+ */
+function installProcessErrorMonitors(reporter: MainErrorReporter): void {
+  if (processErrorMonitorsInstalled) {
+    return;
+  }
+  processErrorMonitorsInstalled = true;
+
+  process.on('uncaughtExceptionMonitor', (error) => {
+    try {
+      reporter.capture({
+        category: 'main',
+        severity: 'error',
+        code: classifyMainErrorCode(error, 'MAIN_UNCAUGHT_EXCEPTION'),
+        component: 'electron/main/process',
+        process: 'main',
+      }, 'main');
+    } catch {
+      // Never interfere with default crash behavior.
+    }
+  });
+
+  process.on('unhandledRejection', (reason) => {
+    try {
+      reporter.capture({
+        category: 'main',
+        severity: 'error',
+        code: classifyMainErrorCode(reason, 'MAIN_UNHANDLED_REJECTION'),
+        component: 'electron/main/process',
+        process: 'main',
+      }, 'main');
+    } catch {
+      // Never interfere with default rejection logging.
+    }
+  });
 }
 
 function safeInvoke(action: () => void): void {
@@ -448,6 +509,7 @@ function closeLocalStore(): void {
     unregisterLocalIpc = undefined;
   }
   unregisterLocalStoreFailureIpc = undefined;
+  safeInvoke(() => mainErrorReporter?.detachStore());
 
   if (!localStore) {
     return;
@@ -508,6 +570,7 @@ function openLocalStore(): void {
     opened = createSqliteStore({ userDataPath });
     localStore = opened;
     localStoreFailure = null;
+    getOrCreateMainErrorReporter().attachStore(localStore);
     unregisterLocalStoreFailureIpc?.();
     unregisterLocalStoreFailureIpc = undefined;
     // Office sign-in approval: the renderer pushes 'office-pending' until the
@@ -522,6 +585,15 @@ function openLocalStore(): void {
       store: localStore,
       sessionClearance: localSessionClearance.get,
       sessionRole: localSessionClearance.getRole,
+      onUnexpectedError: ({ error }) => {
+        getOrCreateMainErrorReporter().capture({
+          category: 'ipc',
+          severity: 'error',
+          code: classifyMainErrorCode(error, 'IPC_HANDLER_FAILED'),
+          component: 'electron/main/local-ipc',
+          process: 'main',
+        }, 'main');
+      },
     });
     // Office 3-day window: the visibility purge runs "at launch and when the
     // Muscat date changes" for the Office session scope reported through the
@@ -559,9 +631,21 @@ function openLocalStore(): void {
     safeInvoke(() => opened?.close());
     localStore = undefined;
     unregisterLocalIpc = undefined;
+    getOrCreateMainErrorReporter().capture({
+      category: 'sqlite',
+      severity: 'error',
+      code: failure.abiMismatch ? 'SQLITE_OPEN_ABI_MISMATCH' : 'SQLITE_OPEN_FAILED',
+      component: 'electron/main/sqlite',
+      process: 'main',
+    }, 'main');
 
     const ipc = ipcMain as unknown as LocalIpcMain;
     try {
+      unregisterLocalClearance?.();
+      unregisterLocalClearance = registerLocalSessionClearanceChannel(
+        ipc,
+        localSessionClearance,
+      );
       unregisterLocalStoreFailureIpc?.();
       unregisterLocalStoreFailureIpc = registerLocalStoreFailureIpcHandlers({
         ipcMain: ipc,
@@ -637,6 +721,22 @@ function registerIpcHandlers(): void {
       log.warn('[dks] openExternal failed', error);
       return false;
     }
+  });
+
+  unregisterDiagnosticsIpc?.();
+  unregisterDiagnosticsIpc = registerDiagnosticsIpcHandlers({
+    ipcMain: ipcMain as unknown as LocalIpcMain,
+    reporter: getOrCreateMainErrorReporter(),
+    getStore: () => localStore,
+    getStoreFailure: () => localStoreFailure,
+    getUpdaterState: () => updaterService?.getState() ?? { status: app.isPackaged ? 'idle' : 'disabled' },
+    sessionClearance: localSessionClearance.get,
+    sessionRole: localSessionClearance.getRole,
+    appVersion: getAppVersion(),
+    packaged: Boolean(app.isPackaged),
+    platform: process.platform,
+    arch: process.arch,
+    electronVersion: process.versions?.electron ?? null,
   });
 }
 
@@ -773,6 +873,7 @@ export async function startMainProcess(): Promise<boolean> {
   configureAutoLaunch(true);
   log.info(`[dks] starting main process (version=${getAppVersion()}, hidden=${String(startHidden)}, packaged=${String(app.isPackaged)})`);
 
+  installProcessErrorMonitors(getOrCreateMainErrorReporter());
   openLocalStore();
 
   // Bug 1 — Auto-login after uninstall/reinstall: compare the install nonce
@@ -822,6 +923,15 @@ export async function startMainProcess(): Promise<boolean> {
     beforeQuitAndInstall: flushSessionStorageBeforeInstall,
   });
   updaterService.onStatus((state) => {
+    if (state.status === 'error') {
+      getOrCreateMainErrorReporter().capture({
+        category: 'updater',
+        severity: 'warning',
+        code: state.errorKind === 'download' ? 'UPDATER_DOWNLOAD_FAILED' : 'UPDATER_CHECK_FAILED',
+        component: 'electron/main/updater',
+        process: 'main',
+      }, 'main');
+    }
     sendToRenderer(UPDATER_STATUS_CHANNEL, state);
   });
   registerIpcHandlers();

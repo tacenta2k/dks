@@ -1,0 +1,297 @@
+:root {
+  --status-ok-bg: #e7f6ee;
+  --status-ok-fg: #14532d;
+  --status-ok-border: #86efac;
+  --status-warn-bg: #fef3c7;
+  --status-warn-fg: #78350f;
+  --status-warn-border: #fcd34d;
+  --status-err-bg: #fee2e2;
+  --status-err-fg: #7f1d1d;
+  --status-err-border: #fca5a5;
+  --status-neutral-bg: var(--color-surface-muted);
+  --status-neutral-fg: var(--color-text-muted);
+  --status-neutral-border: var(--color-border-strong);
+}
+
+:root[data-theme='dark'] {
+  --status-ok-bg: #0f2f21;
+  --status-ok-fg: #a7f3d0;
+  --status-ok-border: #1e6042;
+  --status-warn-bg: #36250b;
+  --status-warn-fg: #fde68a;
+  --status-warn-border: #785016;
+  --status-err-bg: #3b1319;
+  --status-err-fg: #fecaca;
+  --status-err-border: #7f2631;
+}
+
+.admin-status-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 31px;
+  padding: 0 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    border-color 140ms ease,
+    background 140ms ease;
+}
+
+.admin-status-trigger:hover,
+.admin-status-trigger[aria-expanded='true'] {
+  border-color: var(--color-border-strong);
+  background: var(--color-surface);
+}
+
+.admin-status-trigger:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.admin-status-trigger__dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2f9e72;
+}
+
+.admin-status-trigger__dot--warn {
+  background: #d97706;
+}
+
+.admin-status-trigger__dot--error {
+  background: #dc2626;
+}
+
+.admin-status-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: color-mix(in srgb, #0d1424 54%, transparent);
+}
+
+.admin-status-dialog {
+  display: flex;
+  flex-direction: column;
+  width: min(100%, 680px);
+  max-height: min(86vh, 720px);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+  box-shadow: 0 24px 68px var(--color-shadow-strong);
+  overflow: hidden;
+}
+
+.admin-status-dialog__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.admin-status-dialog__title {
+  margin: 2px 0 0;
+  color: var(--color-text);
+  font-size: 18px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.admin-status-dialog__subtitle {
+  margin: 4px 0 0;
+  color: var(--color-text-muted);
+  font-size: 12.5px;
+  line-height: 1.45;
+}
+
+.admin-status-dialog__close {
+  flex: none;
+  padding: 6px 11px;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-muted);
+  color: var(--color-text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.admin-status-dialog__close:hover {
+  border-color: var(--color-border-strong);
+}
+
+.admin-status-dialog__close:focus-visible {
+  outline: 2px solid var(--color-primary);
+  outline-offset: 2px;
+}
+
+.admin-status-dialog__body {
+  display: grid;
+  gap: 14px;
+  padding: 18px 22px;
+  overflow-y: auto;
+}
+
+.admin-status-section {
+  display: grid;
+  gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  background: var(--color-surface);
+}
+
+.admin-status-section__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.admin-status-section__title {
+  margin: 0;
+  color: var(--color-text);
+  font-size: 13.5px;
+  font-weight: 750;
+}
+
+.admin-status-rows {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.admin-status-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  padding-top: 7px;
+  border-top: 1px solid var(--color-border);
+  font-size: 12.5px;
+}
+
+.admin-status-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.admin-status-row dt {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-weight: 650;
+}
+
+.admin-status-row dd {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  color: var(--color-text);
+  font-weight: 600;
+  text-align: right;
+}
+
+.admin-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border: 1px solid var(--status-neutral-border);
+  border-radius: 999px;
+  background: var(--status-neutral-bg);
+  color: var(--status-neutral-fg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.35;
+}
+
+.admin-status-badge--ok {
+  border-color: var(--status-ok-border);
+  background: var(--status-ok-bg);
+  color: var(--status-ok-fg);
+}
+
+.admin-status-badge--warn {
+  border-color: var(--status-warn-border);
+  background: var(--status-warn-bg);
+  color: var(--status-warn-fg);
+}
+
+.admin-status-badge--error {
+  border-color: var(--status-err-border);
+  background: var(--status-err-bg);
+  color: var(--status-err-fg);
+}
+
+.admin-status-note {
+  margin: 2px 0 0;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  background: var(--color-surface-muted);
+  color: var(--color-text-muted);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+
+.admin-status-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 13px 22px;
+  border-top: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.admin-status-dialog__feedback {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.admin-status-dialog__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-left: auto;
+}
+
+@media (max-width: 600px) {
+  .admin-status-backdrop {
+    padding: 12px;
+  }
+
+  .admin-status-dialog__header,
+  .admin-status-dialog__body,
+  .admin-status-dialog__footer {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+}
+
+@media print {
+  .admin-status-trigger,
+  .admin-status-backdrop {
+    display: none !important;
+  }
+}

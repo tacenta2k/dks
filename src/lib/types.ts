@@ -288,6 +288,121 @@ export interface DksUpdaterApi {
   onStatus: (listener: (state: DksUpdateState) => void) => () => void;
 }
 
+export type DksErrorReportCategory =
+  | 'auth'
+  | 'sync'
+  | 'sqlite'
+  | 'ipc'
+  | 'updater'
+  | 'renderer'
+  | 'main'
+  | 'settings'
+  | 'network';
+
+export type DksErrorReportSeverity = 'error' | 'warning';
+
+export interface DksStructuredErrorReportInput {
+  category: DksErrorReportCategory;
+  severity: DksErrorReportSeverity;
+  code: string;
+  component: string;
+  process?: 'main' | 'renderer';
+  httpStatus?: number | null;
+  postgresCode?: string | null;
+  occurredAt?: string;
+}
+
+export interface DksSanitizedErrorReportEvent {
+  fingerprint: string;
+  category: DksErrorReportCategory;
+  severity: DksErrorReportSeverity;
+  code: string;
+  component: string;
+  process: 'main' | 'renderer';
+  appVersion: string;
+  platform: 'win32' | 'darwin' | 'linux' | 'unknown';
+  arch: 'x64' | 'arm64' | 'ia32' | 'unknown';
+  osRelease: string;
+  electronVersion: string | null;
+  packaged: boolean;
+  sqliteSchemaVersion: number | null;
+  httpStatus: number | null;
+  postgresCode: string | null;
+  occurrences: number;
+  firstOccurredAt: string;
+  lastOccurredAt: string;
+}
+
+export interface DksErrorReportingStatusSummary {
+  enabled: boolean;
+  pendingCount: number;
+  failedCount: number;
+  suppressedCount: number;
+  lastDeliveryOutcome:
+    | 'never'
+    | 'delivered'
+    | 'suppressed_remote'
+    | 'deferred_backoff'
+    | 'rate_limited'
+    | 'disabled'
+    | 'failed';
+  lastDeliveryAt: string | null;
+}
+
+export interface DksAdminLocalStatus {
+  appVersion: string;
+  packaged: boolean;
+  platform: 'win32' | 'darwin' | 'linux' | 'unknown';
+  arch: 'x64' | 'arm64' | 'ia32' | 'unknown';
+  osRelease: string;
+  electronVersion: string | null;
+  localStore: {
+    available: boolean;
+    schemaVersion: number | null;
+    failureCode: 'ABI_MISMATCH' | 'OPEN_FAILED' | null;
+  };
+  sync: {
+    status: DksLocalSyncStatus | 'unknown';
+    lastSyncAt: string | null;
+    pendingOutboxCount: number;
+    failedOutboxCount: number;
+    terminalOutboxCount: number;
+  };
+  updater: {
+    status: DksUpdateStatus;
+    version: string | null;
+    errorKind: DksUpdateErrorKind | null;
+    errorCode: string | null;
+  };
+  errorReporting: DksErrorReportingStatusSummary;
+}
+
+export interface DksDiagnosticsApi {
+  getAdminStatus: (input: { role: string }) => Promise<DksAdminLocalStatus>;
+  captureError: (
+    input: DksStructuredErrorReportInput,
+  ) => Promise<{ accepted: boolean; reason?: string }>;
+  claimErrorReports: (input: {
+    role: string;
+    limit?: number;
+  }) => Promise<DksSanitizedErrorReportEvent[]>;
+  completeErrorReport: (input: {
+    role: string;
+    fingerprint: string;
+    outcome: 'delivered' | 'suppressed_remote' | 'disabled' | 'retry' | 'terminal';
+    errorCode?: string | null;
+    retryAfterSeconds?: number | null;
+  }) => Promise<{ ok: boolean }>;
+  setErrorReportingEnabled: (input: {
+    role: string;
+    enabled: boolean;
+  }) => Promise<DksErrorReportingStatusSummary>;
+  syncWorkspaceErrorReporting: (input: {
+    role: string;
+    enabled: boolean;
+  }) => Promise<{ ok: boolean; enabled: boolean }>;
+}
+
 export interface DksWindowApi {
   platform: string;
   appVersion: string;
@@ -295,6 +410,7 @@ export interface DksWindowApi {
   minimizeToTray: () => void;
   quit: () => void;
   local?: DksLocalApi;
+  diagnostics?: DksDiagnosticsApi;
   updater?: DksUpdaterApi;
 }
 

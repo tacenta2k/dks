@@ -238,6 +238,86 @@ export interface CloseSyncResult {
   flushed: boolean;
 }
 
+export interface OutboxSummary {
+  pendingCount: number;
+  failedCount: number;
+  terminalCount: number;
+}
+
+export interface QueuedErrorReportRecord {
+  id: number;
+  fingerprint: string;
+  category: string;
+  severity: 'error' | 'warning';
+  code: string;
+  component: string;
+  process: 'main' | 'renderer';
+  appVersion: string;
+  platform: string;
+  arch: string;
+  osRelease: string;
+  electronVersion: string | null;
+  packaged: boolean;
+  sqliteSchemaVersion: number | null;
+  httpStatus: number | null;
+  postgresCode: string | null;
+  occurrences: number;
+  firstOccurredAt: string;
+  lastOccurredAt: string;
+  status: 'pending' | 'failed';
+  attempts: number;
+  nextAttemptAt: string;
+  lastErrorCode: string | null;
+}
+
+export interface EnqueueErrorReportInput {
+  fingerprint: string;
+  category: string;
+  severity: 'error' | 'warning';
+  code: string;
+  component: string;
+  process: 'main' | 'renderer';
+  appVersion: string;
+  platform: string;
+  arch: string;
+  osRelease: string;
+  electronVersion?: string | null;
+  packaged: boolean;
+  sqliteSchemaVersion?: number | null;
+  httpStatus?: number | null;
+  postgresCode?: string | null;
+  occurredAt: string;
+  recordedAt?: string;
+}
+
+export interface EnqueueErrorReportOutcome {
+  accepted: boolean;
+  reason?: 'deduped_cooldown' | 'merged_pending';
+  occurrences: number;
+}
+
+export interface CompleteErrorReportInput {
+  fingerprint: string;
+  outcome: 'delivered' | 'suppressed_remote' | 'disabled' | 'retry' | 'terminal';
+  errorCode?: string | null;
+  retryAfterSeconds?: number | null;
+  now?: string;
+}
+
+export interface ErrorReportQueueSummary {
+  pendingCount: number;
+  failedCount: number;
+  suppressedCount: number;
+  sqliteSchemaVersion: number;
+}
+
+export const MAX_ERROR_REPORT_QUEUE = 50;
+export const MAX_ERROR_REPORT_DEDUPE = 200;
+export const MAX_ERROR_REPORT_ATTEMPTS = 6;
+export const ERROR_REPORT_DEDUPE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
+const ERROR_REPORT_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
+const MAX_ERROR_REPORT_OCCURRENCES = 10_000;
+
 const MIGRATIONS: readonly string[] = [
   `
     CREATE TABLE IF NOT EXISTS columns (
@@ -331,6 +411,46 @@ const MIGRATIONS: readonly string[] = [
       updated_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS local_settings_updated_at_idx ON local_settings(updated_at DESC);
+  `,
+  `
+    CREATE TABLE IF NOT EXISTS error_report_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      fingerprint TEXT NOT NULL UNIQUE,
+      category TEXT NOT NULL,
+      severity TEXT NOT NULL,
+      code TEXT NOT NULL,
+      component TEXT NOT NULL,
+      process TEXT NOT NULL,
+      app_version TEXT NOT NULL,
+      platform TEXT NOT NULL,
+      arch TEXT NOT NULL,
+      os_release TEXT NOT NULL,
+      electron_version TEXT,
+      packaged INTEGER NOT NULL DEFAULT 0,
+      sqlite_schema_version INTEGER,
+      http_status INTEGER,
+      postgres_code TEXT,
+      occurrences INTEGER NOT NULL DEFAULT 1,
+      first_occurred_at TEXT NOT NULL,
+      last_occurred_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      attempts INTEGER NOT NULL DEFAULT 0,
+      next_attempt_at TEXT NOT NULL,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS error_report_dedupe (
+      fingerprint TEXT PRIMARY KEY NOT NULL,
+      last_reported_at TEXT NOT NULL,
+      suppressed_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE INDEX IF NOT EXISTS error_report_queue_ready_idx
+      ON error_report_queue(status, next_attempt_at, id);
+    CREATE INDEX IF NOT EXISTS error_report_dedupe_reported_idx
+      ON error_report_dedupe(last_reported_at DESC);
   `,
 ];
 
@@ -1898,6 +2018,304 @@ export class SqliteStore {
       execute();
     }
     return doomed.length;
+  }
+
+  public getOutboxSummary(): OutboxSummary {
+    this.ensureOpen();
+    const rows = this.database.prepare(
+      "SELECT status, COUNT(*) AS count FROM outbox WHERE status <> 'synced' GROUP BY status",
+    ).all() as Array<{ status?: unknown; count?: unknown }>;
+    let pendingCount = 0;
+    let failedCount = 0;
+    let terminalCount = 0;
+    for (const row of rows) {
+      const count = Number(row.count ?? 0);
+      if (!Number.isFinite(count) || count <= 0) continue;
+      pendingCount += count;
+      if (row.status === 'failed') failedCount += count;
+      if (row.status === 'terminal') terminalCount += count;
+    }
+    return { pendingCount, failedCount, terminalCount };
+  }
+
+  public getErrorReportingEnabledMeta(): boolean | null {
+    this.ensureOpen();
+    const row = this.database.prepare('SELECT value FROM sync_meta WHERE key = ?')
+      .get('errorReportingEnabled') as { value?: string | null } | undefined;
+    if (row?.value === 'true') return true;
+    if (row?.value === 'false') return false;
+    const settingsRow = this.database.prepare('SELECT value FROM local_settings WHERE key = ?')
+      .get('error_reporting_enabled') as { value?: string | null } | undefined;
+    if (typeof settingsRow?.value === 'string') {
+      const parsed = decode<unknown>(settingsRow.value, null);
+      if (typeof parsed === 'boolean') return parsed;
+    }
+    return null;
+  }
+
+  public setErrorReportingEnabledMeta(enabled: boolean): void {
+    this.ensureOpen();
+    this.database.prepare(
+      'INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    ).run('errorReportingEnabled', enabled ? 'true' : 'false');
+    if (!enabled) {
+      this.clearErrorReportQueue();
+    }
+  }
+
+  private errorReportFromRow(row: Record<string, unknown>): QueuedErrorReportRecord {
+    return {
+      id: Number(row.id),
+      fingerprint: String(row.fingerprint),
+      category: String(row.category),
+      severity: row.severity === 'warning' ? 'warning' : 'error',
+      code: String(row.code),
+      component: String(row.component),
+      process: row.process === 'renderer' ? 'renderer' : 'main',
+      appVersion: String(row.app_version),
+      platform: String(row.platform),
+      arch: String(row.arch),
+      osRelease: String(row.os_release),
+      electronVersion: typeof row.electron_version === 'string' ? row.electron_version : null,
+      packaged: bool(row.packaged),
+      sqliteSchemaVersion: typeof row.sqlite_schema_version === 'number' ? row.sqlite_schema_version : null,
+      httpStatus: typeof row.http_status === 'number' ? row.http_status : null,
+      postgresCode: typeof row.postgres_code === 'string' ? row.postgres_code : null,
+      occurrences: Number(row.occurrences ?? 1),
+      firstOccurredAt: String(row.first_occurred_at),
+      lastOccurredAt: String(row.last_occurred_at),
+      status: row.status === 'failed' ? 'failed' : 'pending',
+      attempts: Number(row.attempts ?? 0),
+      nextAttemptAt: String(row.next_attempt_at),
+      lastErrorCode: typeof row.last_error_code === 'string' ? row.last_error_code : null,
+    };
+  }
+
+  public enqueueErrorReport(input: EnqueueErrorReportInput): EnqueueErrorReportOutcome {
+    this.ensureOpen();
+    const recordedAt = input.recordedAt ?? this.now();
+    const recordedMs = Date.parse(recordedAt);
+    const baseMs = Number.isFinite(recordedMs) ? recordedMs : Date.now();
+    const retentionCutoff = new Date(baseMs - ERROR_REPORT_DEDUPE_RETENTION_MS).toISOString();
+
+    const execute = this.database.transaction((): EnqueueErrorReportOutcome => {
+      // Bound dedupe table age and row count.
+      this.database.prepare('DELETE FROM error_report_dedupe WHERE last_reported_at < ?').run(retentionCutoff);
+      const dedupeCountRow = this.database.prepare('SELECT COUNT(*) AS count FROM error_report_dedupe')
+        .get() as { count?: number } | undefined;
+      if (Number(dedupeCountRow?.count ?? 0) > MAX_ERROR_REPORT_DEDUPE) {
+        const overflow = Number(dedupeCountRow?.count ?? 0) - MAX_ERROR_REPORT_DEDUPE;
+        this.database.prepare(`
+          DELETE FROM error_report_dedupe
+          WHERE fingerprint IN (
+            SELECT fingerprint FROM error_report_dedupe
+            ORDER BY last_reported_at ASC
+            LIMIT ?
+          )
+        `).run(overflow);
+      }
+
+      // Suppress if already delivered within the cooldown window.
+      const deduped = this.database.prepare(
+        'SELECT last_reported_at, suppressed_count FROM error_report_dedupe WHERE fingerprint = ?',
+      ).get(input.fingerprint) as { last_reported_at?: string; suppressed_count?: number } | undefined;
+      if (deduped?.last_reported_at) {
+        const lastReportedMs = Date.parse(deduped.last_reported_at);
+        if (Number.isFinite(lastReportedMs) && baseMs - lastReportedMs < ERROR_REPORT_DEDUPE_COOLDOWN_MS) {
+          const nextSuppressed = Math.min(MAX_ERROR_REPORT_OCCURRENCES, Number(deduped.suppressed_count ?? 0) + 1);
+          this.database.prepare(
+            'UPDATE error_report_dedupe SET suppressed_count = ? WHERE fingerprint = ?',
+          ).run(nextSuppressed, input.fingerprint);
+          return { accepted: false, reason: 'deduped_cooldown', occurrences: nextSuppressed };
+        }
+      }
+
+      // Merge into an existing queued row with the same fingerprint.
+      const existing = this.database.prepare(
+        'SELECT id, occurrences, status FROM error_report_queue WHERE fingerprint = ?',
+      ).get(input.fingerprint) as { id?: number; occurrences?: number; status?: string } | undefined;
+      if (existing?.id !== undefined) {
+        const nextOccurrences = Math.min(MAX_ERROR_REPORT_OCCURRENCES, Number(existing.occurrences ?? 1) + 1);
+        this.database.prepare(`
+          UPDATE error_report_queue
+             SET occurrences = ?,
+                 last_occurred_at = ?,
+                 app_version = ?,
+                 updated_at = ?
+           WHERE id = ?
+        `).run(nextOccurrences, input.occurredAt, input.appVersion, recordedAt, existing.id);
+        return { accepted: true, reason: 'merged_pending', occurrences: nextOccurrences };
+      }
+
+      // Enforce hard queue cap before inserting a new row: evict terminal/failed
+      // first, then warnings, then oldest pending.
+      const countRow = this.database.prepare('SELECT COUNT(*) AS count FROM error_report_queue')
+        .get() as { count?: number } | undefined;
+      const currentCount = Number(countRow?.count ?? 0);
+      if (currentCount >= MAX_ERROR_REPORT_QUEUE) {
+        const excess = currentCount - MAX_ERROR_REPORT_QUEUE + 1;
+        this.database.prepare(`
+          DELETE FROM error_report_queue
+          WHERE id IN (
+            SELECT id FROM error_report_queue
+            ORDER BY
+              CASE WHEN status = 'failed' THEN 0 ELSE 1 END ASC,
+              CASE WHEN severity = 'warning' THEN 0 ELSE 1 END ASC,
+              created_at ASC,
+              id ASC
+            LIMIT ?
+          )
+        `).run(excess);
+      }
+
+      this.database.prepare(`
+        INSERT INTO error_report_queue (
+          fingerprint, category, severity, code, component, process,
+          app_version, platform, arch, os_release, electron_version,
+          packaged, sqlite_schema_version, http_status, postgres_code,
+          occurrences, first_occurred_at, last_occurred_at,
+          status, attempts, next_attempt_at, last_error_code,
+          created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'pending', 0, ?, NULL, ?, ?)
+      `).run(
+        input.fingerprint,
+        input.category,
+        input.severity,
+        input.code,
+        input.component,
+        input.process,
+        input.appVersion,
+        input.platform,
+        input.arch,
+        input.osRelease,
+        input.electronVersion ?? null,
+        input.packaged ? 1 : 0,
+        input.sqliteSchemaVersion ?? null,
+        input.httpStatus ?? null,
+        input.postgresCode ?? null,
+        input.occurredAt,
+        input.occurredAt,
+        recordedAt,
+        recordedAt,
+        recordedAt,
+      );
+
+      return { accepted: true, occurrences: 1 };
+    });
+
+    return execute();
+  }
+
+  public claimErrorReports(input?: { limit?: number; now?: string }): QueuedErrorReportRecord[] {
+    this.ensureOpen();
+    const limit = Math.max(1, Math.min(5, Math.trunc(input?.limit ?? 3)));
+    const nowIso = input?.now ?? this.now();
+    const rows = this.database.prepare(`
+      SELECT * FROM error_report_queue
+       WHERE status = 'pending'
+         AND next_attempt_at <= ?
+       ORDER BY
+         CASE WHEN severity = 'error' THEN 0 ELSE 1 END ASC,
+         created_at ASC,
+         id ASC
+       LIMIT ?
+    `).all(nowIso, limit) as Record<string, unknown>[];
+    return rows.map((row) => this.errorReportFromRow(row));
+  }
+
+  public completeErrorReport(input: CompleteErrorReportInput): void {
+    this.ensureOpen();
+    const nowIso = input.now ?? this.now();
+    const nowMs = Date.parse(nowIso);
+    const baseMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+
+    const execute = this.database.transaction(() => {
+      if (input.outcome === 'disabled') {
+        this.database.prepare('DELETE FROM error_report_queue').run();
+        return;
+      }
+
+      if (input.outcome === 'delivered' || input.outcome === 'suppressed_remote') {
+        this.database.prepare('DELETE FROM error_report_queue WHERE fingerprint = ?').run(input.fingerprint);
+        this.database.prepare(`
+          INSERT INTO error_report_dedupe (fingerprint, last_reported_at, suppressed_count)
+          VALUES (?, ?, 0)
+          ON CONFLICT(fingerprint) DO UPDATE SET
+            last_reported_at = excluded.last_reported_at,
+            suppressed_count = 0
+        `).run(input.fingerprint, nowIso);
+        return;
+      }
+
+      const row = this.database.prepare(
+        'SELECT id, attempts FROM error_report_queue WHERE fingerprint = ?',
+      ).get(input.fingerprint) as { id?: number; attempts?: number } | undefined;
+      if (row?.id === undefined) return;
+
+      const nextAttempts = Number(row.attempts ?? 0) + 1;
+      const safeCode = typeof input.errorCode === 'string' && /^[A-Z0-9_.:-]{2,64}$/.test(input.errorCode)
+        ? input.errorCode
+        : 'DELIVERY_FAILED';
+
+      if (input.outcome === 'terminal' || nextAttempts >= MAX_ERROR_REPORT_ATTEMPTS) {
+        this.database.prepare(`
+          UPDATE error_report_queue
+             SET status = 'failed',
+                 attempts = ?,
+                 last_error_code = ?,
+                 updated_at = ?
+           WHERE id = ?
+        `).run(nextAttempts, safeCode, nowIso, row.id);
+        return;
+      }
+
+      const computedBackoffSec = Math.min(3600, 30 * (2 ** Math.min(nextAttempts, 7)));
+      const requestedSec = typeof input.retryAfterSeconds === 'number' && Number.isFinite(input.retryAfterSeconds)
+        ? Math.max(30, Math.min(86_400, Math.trunc(input.retryAfterSeconds)))
+        : 0;
+      const delaySec = Math.max(computedBackoffSec, requestedSec);
+      const nextAttemptAt = new Date(baseMs + delaySec * 1000).toISOString();
+
+      this.database.prepare(`
+        UPDATE error_report_queue
+           SET status = 'pending',
+               attempts = ?,
+               next_attempt_at = ?,
+               last_error_code = ?,
+               updated_at = ?
+         WHERE id = ?
+      `).run(nextAttempts, nextAttemptAt, safeCode, nowIso, row.id);
+    });
+
+    execute();
+  }
+
+  public getErrorReportQueueSummary(): ErrorReportQueueSummary {
+    this.ensureOpen();
+    const rows = this.database.prepare(
+      'SELECT status, COUNT(*) AS count FROM error_report_queue GROUP BY status',
+    ).all() as Array<{ status?: unknown; count?: unknown }>;
+    let pendingCount = 0;
+    let failedCount = 0;
+    for (const row of rows) {
+      const count = Number(row.count ?? 0);
+      if (row.status === 'pending') pendingCount += count;
+      if (row.status === 'failed') failedCount += count;
+    }
+    const dedupeRow = this.database.prepare(
+      'SELECT COALESCE(SUM(suppressed_count), 0) AS total FROM error_report_dedupe',
+    ).get() as { total?: number } | undefined;
+    return {
+      pendingCount,
+      failedCount,
+      suppressedCount: Number(dedupeRow?.total ?? 0),
+      sqliteSchemaVersion: this.getMigrationVersion(),
+    };
+  }
+
+  public clearErrorReportQueue(): void {
+    this.ensureOpen();
+    this.database.prepare('DELETE FROM error_report_queue').run();
   }
 
   public async flush(): Promise<void> {
