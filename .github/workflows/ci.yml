@@ -129,9 +129,21 @@ jobs:
           # Annotations are readable through the API even when the job log is
           # not, so the failing test lines are also emitted as ::error::.
           if (Test-Path "test-output.txt") {
-            Select-String -Path "test-output.txt" -Pattern '^\s*(FAIL|×|×\s)' |
-              Select-Object -First 10 |
-              ForEach-Object { Write-Host "::error::test: $($_.Line.Trim())" }
+            # The job log is not always retrievable from an API-only client, but
+            # annotations are. Emit the FAIL line *and* the assertion under it:
+            # the name alone says which test failed, never why.
+            $lines = Get-Content "test-output.txt"
+            $emitted = 0
+            for ($i = 0; $i -lt $lines.Count -and $emitted -lt 10; $i++) {
+              if ($lines[$i] -match '^\s*(FAIL|×)') {
+                $emitted++
+                for ($j = $i; $j -lt [Math]::Min($i + 16, $lines.Count); $j++) {
+                  if ($j -gt $i -and $lines[$j] -match '^\s*(FAIL|×)\s') { break }
+                  $text = $lines[$j].Trim()
+                  if ($text) { Write-Host "::error::test: $text" }
+                }
+              }
+            }
           }
           $sources = @("$env:RUNNER_TEMP/build.log", "test-output.txt")
           foreach ($source in $sources) {
