@@ -70,7 +70,7 @@ describe('one-click Release DKS workflow', () => {
 
     const dispatch = asMap(on.workflow_dispatch, 'workflow_dispatch trigger');
     const inputs = asMap(dispatch.inputs, 'workflow_dispatch inputs');
-    expect(Object.keys(inputs)).toEqual(['bump']);
+    expect(Object.keys(inputs)).toEqual(['bump', 'dry_run']);
 
     const bump = asMap(inputs.bump, 'bump input');
     expect(bump.type).toBe('choice');
@@ -438,5 +438,77 @@ describe('release failure diagnostics', () => {
     expect(failureBranch.indexOf('holder-lookup.cjs')).toBeLessThan(
       failureBranch.indexOf('last 120 lines'),
     );
+  });
+});
+
+/**
+ * Dry run (Option B before publishing v0.1.11).
+ *
+ * A dry run must exercise the release sequence — build, verify:native, then
+ * electron-builder — while changing nothing: `--publish never`, no tag push,
+ * no release verification or publication. Anything that could publish has to
+ * be conditionally skipped, not merely "usually fast".
+ */
+describe('dry run', () => {
+  const inputs = asMap(workflowOn(workflow).workflow_dispatch, 'workflow_dispatch inputs');
+  const inputMap = asMap(inputs.inputs, 'workflow inputs');
+
+  it('is an explicit boolean input, off by default', () => {
+    const dryRun = asMap(inputMap.dry_run, 'dry_run input');
+    expect(dryRun.type).toBe('boolean');
+    expect(dryRun.default).toBe(false);
+    expect(dryRun.required).toBe(false);
+  });
+
+  it('packages with --publish never instead of npm run release', () => {
+    const releaseIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
+    const run = steps[releaseIndex].run ?? '';
+    expect(run).toContain('if ("${{ inputs.dry_run }}" -eq "true")');
+    expect(run).toContain('npx electron-builder --config electron-builder.yml --publish never');
+    expect(run).toContain('npm run verify:native');
+    expect(run).toContain('npm run build 1>%RELEASE_LOG% 2>&1');
+    // The publish path is the else branch, unchanged.
+    const elseBranch = run.slice(run.indexOf('} else {'));
+    expect(elseBranch).toContain('npm run release 1>%RELEASE_LOG% 2>&1');
+    expect(elseBranch).not.toContain('--publish never');
+  });
+
+  it('never pushes a tag, verifies assets or publishes in a dry run', () => {
+    for (const name of ['Push version commit and tag', 'Verify draft release assets', 'Publish verified release']) {
+      const index = stepIndex((step) => step.name === name, name);
+      expect(String(steps[index].if ?? '')).toContain('inputs.dry_run != true');
+    }
+    // The upload steps are evidence, not publication: they still run.
+    const uploadLog = stepIndex((step) => step.name === 'Upload release build log', 'log upload');
+    expect(String(steps[uploadLog].if ?? '')).toBe('always()');
+  });
+
+  it('does not create a local tag in a dry run, and says what a real run would do', () => {
+    const versionIndex = stepIndex((step) => step.name === 'Resolve version and tag', 'version resolution');
+    const run = steps[versionIndex].run ?? '';
+    const dryBranchStart = run.indexOf('} elseif ($dryRun) {');
+    expect(dryBranchStart).toBeGreaterThan(-1);
+    const dryBranch = run.slice(dryBranchStart, run.indexOf('} else {', dryBranchStart));
+    expect(dryBranch).toContain('DRY RUN: tag $tag does not exist');
+    expect(dryBranch).toContain('TAG_ACTION=dry-run-would-create');
+    expect(dryBranch).not.toContain('git tag -a');
+  });
+
+  it('posts the packaging evidence where an API-only reader can see it', () => {
+    const index = stepIndex((step) => step.name === 'Post release build evidence', 'evidence comment');
+    expect(String(steps[index].if ?? '')).toBe('always()');
+    const run = steps[index].run ?? '';
+    expect(run).toContain('commits/${{ github.sha }}/comments');
+    // The log path comes from the step env (RELEASE_LOG), not a literal.
+    expect(run).toContain('$log = $env:RELEASE_LOG');
+    expect(run).toContain('PACKAGING_EXIT');
+    expect(run).toContain('TAG_ACTION');
+  });
+
+  it('the job summary never claims a publication happened in a dry run', () => {
+    const index = stepIndex((step) => step.name === 'Write job summary', 'job summary');
+    const run = steps[index].run ?? '';
+    expect(run).toContain('DRY RUN — nothing was published');
+    expect(run.indexOf('DRY RUN')).toBeLessThan(run.indexOf('# DKS release published'));
   });
 });

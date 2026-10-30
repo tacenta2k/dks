@@ -41,7 +41,12 @@ interface Guard {
   openForWrite(filePath: string): void;
   parseProcessPathList(output: string): Array<{ pid: number; executablePath: string | null }>;
   parseTasklistCsv(output: string): Array<{ imageName: string; pid: number }>;
-  releaseExecutableLock(options: Record<string, unknown>): Promise<{ attempts: number; waitedMs: number }>;
+  releaseExecutableLock(options: Record<string, unknown>): Promise<{
+    attempts: number;
+    waitedMs: number;
+    exclusive?: { supported: boolean; exclusive: boolean | null; reason: string | null } | null;
+    exclusiveUnavailable?: boolean;
+  }>;
   runCapturedProcess(options: Record<string, unknown>): Promise<{
     status: number | null;
     signal: string | null;

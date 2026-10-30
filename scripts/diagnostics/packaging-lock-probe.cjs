@@ -279,6 +279,30 @@ async function experimentThirdPartyHandles() {
   await stopRunner(reader.child);
 }
 
+/**
+ * G: the decisive case for "exclusive access, not writability".
+ *
+ * A read-only handle that grants read+write sharing passes every writability
+ * check, yet rcedit opens the image with no sharing and must fail. If it does,
+ * the exclusive-open check is the right precondition and the old check was not.
+ */
+async function experimentReadOnlyFullShare() {
+  const holder = await holdHandle(probeCopy, 'Read', 'ReadWrite', 20);
+  if (!holder.ready) {
+    record('G1', 'hold read-only handle with full sharing', `FAILED: ${holder.stdout}`);
+    return;
+  }
+  const open = tryOpenForWrite(probeCopy);
+  record('G1', 'write-open while a read-only handle grants read+write sharing', describeOpen(open));
+  const exclusive = await exclusiveModule.checkExclusiveAccess(probeCopy, { log: (line) => console.log(line) });
+  record('G2', 'exclusive open while that read-only handle is open', exclusive.supported
+    ? (exclusive.exclusive ? 'EXCLUSIVE OK' : `BLOCKED — ${exclusive.reason}`)
+    : `unsupported (${exclusive.reason})`);
+  const rcedit = await runRcedit(probeCopy);
+  record('G3', 'rcedit while that read-only handle is open', describeRcedit(rcedit));
+  await stopRunner(holder.child);
+}
+
 async function experimentRealHandoff(rounds = 3) {
   const afterPack = require(path.join(projectRoot, 'scripts', 'after-pack.cjs'));
   for (let round = 1; round <= rounds; round += 1) {
@@ -349,6 +373,7 @@ async function main() {
 
   await experimentRunningImage();
   await experimentThirdPartyHandles();
+  await experimentReadOnlyFullShare();
   await experimentRealHandoff();
   await experimentRceditRepeat();
 

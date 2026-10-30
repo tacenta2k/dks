@@ -13,6 +13,11 @@ on:
           - minor
           - major
           - none
+      dry_run:
+        description: Dry run — same sequence as a release, but package with --publish never (no tag push, no release, no publish)
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: release-dks
@@ -165,6 +170,7 @@ jobs:
               exit 1
             }
             $tag = "v$version"
+            $dryRun = "${{ inputs.dry_run }}" -eq "true"
             $existing = git tag -l $tag
             if ($existing) {
               # v0.1.6 and v0.1.11 were tagged but produced no GitHub release
@@ -185,10 +191,16 @@ jobs:
               }
               Write-Host "Tag $tag already exists at $tagCommit and main is at the same commit — reusing it as-is (not recreated, not moved)."
               Write-Host "RELEASE_COMMIT=$tagCommit" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+              "TAG_ACTION=reuse" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+            } elseif ($dryRun) {
+              # A dry run changes nothing: report what a real dispatch would do.
+              Write-Host "DRY RUN: tag $tag does not exist; a real dispatch would create it at $head."
+              "TAG_ACTION=dry-run-would-create" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             } else {
               git tag -a $tag -m "chore(release): $tag"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
               Write-Host "Created tag $tag for the existing version $version."
+              "TAG_ACTION=create" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
             }
             Write-Host "Publishing existing version $version with bump=none (tag $tag)."
           } else {
@@ -228,7 +240,7 @@ jobs:
             }
             Write-Host "Draft release $env:RELEASE_TAG already exists (id $($release.id), assets: $($release.assets.Count)) — this run will complete it."
           } elseif ($output -match 'HTTP 404') {
-            Write-Host "No release exists for $env:RELEASE_TAG — this run will create the draft release."
+            Write-Host "No release exists for $env:RELEASE_TAG — this run will create the draft release (a dry run publishes nothing)."
           } else {
             Write-Error "Could not confirm the release state for $env:RELEASE_TAG (gh exit $code): $($output.Trim()). Refusing to continue without knowing whether a release already exists."
             exit 1
@@ -264,6 +276,7 @@ jobs:
           )
 
       - name: Push version commit and tag
+        if: ${{ inputs.dry_run != true }}
         shell: pwsh
         run: |
           # bump=none reuses an existing tag: nothing new to push, and an
@@ -276,12 +289,31 @@ jobs:
         env:
           RELEASE_LOG: ${{ github.workspace }}\release-build.log
         run: |
-          # Tee the electron-builder output to a file so a failure is
-          # diagnosable: the job log is not always retrievable, and the
-          # rcedit/packaging error used to be visible only there. Publishing
-          # behaviour is unchanged (npm run release still decides it).
-          cmd.exe /d /c "npm run release 1>%RELEASE_LOG% 2>&1"
-          $code = $LASTEXITCODE
+          # Tee the output to a file so a failure is diagnosable: the job log
+          # is not always retrievable, and the rcedit/packaging error used to
+          # be visible only there.
+          #
+          # A dry run performs the SAME sequence as `npm run release`
+          # (build -> verify:native -> electron-builder) with only the publish
+          # flag changed to `never`, so it exercises the release path without
+          # creating a draft release or uploading anything.
+          if ("${{ inputs.dry_run }}" -eq "true") {
+            Write-Host "DRY RUN: npm run build; npm run verify:native; electron-builder --publish never"
+            cmd.exe /d /c "npm run build 1>%RELEASE_LOG% 2>&1"
+            $code = $LASTEXITCODE
+            if ($code -eq 0) {
+              cmd.exe /d /c "npm run verify:native 1>>%RELEASE_LOG% 2>&1"
+              $code = $LASTEXITCODE
+            }
+            if ($code -eq 0) {
+              cmd.exe /d /c "npx electron-builder --config electron-builder.yml --publish never 1>>%RELEASE_LOG% 2>&1"
+              $code = $LASTEXITCODE
+            }
+          } else {
+            cmd.exe /d /c "npm run release 1>%RELEASE_LOG% 2>&1"
+            $code = $LASTEXITCODE
+          }
+          "PACKAGING_EXIT=$code" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
           if ($code -ne 0) {
             # Name the holder while the packaging output is still on disk: the
             # rcedit message ("Unable to commit changes") never says who held it.
@@ -311,8 +343,58 @@ jobs:
           path: ${{ github.workspace }}/release-build.log
           if-no-files-found: warn
 
+      # The job log and artifact downloads are not reliably retrievable from an
+      # API-only client, so the parts that answer "did rcedit pass?" are posted
+      # as a commit comment and as annotations (annotations are always readable).
+      - name: Post release build evidence
+        if: always()
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          $mode = if ("${{ inputs.dry_run }}" -eq "true") { "dry run (--publish never)" } else { "publish" }
+          $body = @(
+            "## release build evidence"
+            ""
+            "- mode: $mode"
+            "- tag: $env:RELEASE_TAG (action: $env:TAG_ACTION)"
+            "- version: $env:RELEASE_VERSION"
+            "- packaging exit code: $env:PACKAGING_EXIT"
+          )
+          $log = $env:RELEASE_LOG
+          if (Test-Path $log) {
+            $lines = Select-String -Path $log -Pattern "rcedit|Unable to commit|Unable to load|afterPack|\[dks\]|⨯" |
+              Select-Object -Last 120 |
+              ForEach-Object { $_.Line.Trim() }
+            $body += ""
+            $body += '```'
+            $body += $lines
+            $body += '```'
+            foreach ($line in $lines) {
+              if ($line -match "Unable to commit|Unable to load|⨯|exclusive access is blocked") {
+                Write-Host "::error::release packaging: $line"
+              } elseif ($line -match "rcedit's precondition|exclusive|writable") {
+                Write-Host "::notice::release packaging: $line"
+              }
+            }
+          } else {
+            $body += ""
+            $body += "no $log was captured"
+            Write-Host "::error::no release build log was captured at $log"
+          }
+          $text = ($body -join "`n")
+          if ($text.Length -gt 60000) { $text = $text.Substring(0, 60000) }
+          try {
+            gh api "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -f body="$text" 2>&1 | Out-Null
+            Write-Host "posted release build evidence comment"
+          } catch {
+            Write-Host "::warning::could not post the release build evidence comment: $_"
+          }
+
       - name: Verify draft release assets
         id: verify
+        if: ${{ inputs.dry_run != true }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
@@ -391,6 +473,7 @@ jobs:
           Write-Host "Verified draft release $env:RELEASE_TAG and its updater assets (size $installerSize, sha512 matches, yml identical to local build)."
 
       - name: Publish verified release
+        if: ${{ inputs.dry_run != true }}
         shell: pwsh
         env:
           RELEASE_TAG: ${{ steps.version.outputs.tag }}
@@ -412,6 +495,17 @@ jobs:
           RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ steps.version.outputs.tag }}
           INSTALLER_NAME: ${{ steps.version.outputs.installer }}
         run: |
+          if ("${{ inputs.dry_run }}" -eq "true") {
+            @(
+              "# DKS release DRY RUN — nothing was published"
+              ""
+              "- **Version (unchanged):** $env:RELEASE_VERSION"
+              "- **Tag action:** $env:TAG_ACTION"
+              "- **Packaging exit code:** $env:PACKAGING_EXIT"
+              "- No tag was pushed and no GitHub release was created or published."
+            ) | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+            exit 0
+          }
           @(
             "# DKS release published"
             ""
