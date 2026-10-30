@@ -167,20 +167,24 @@ jobs:
             $tag = "v$version"
             $existing = git tag -l $tag
             if ($existing) {
-              # v0.1.6 was tagged but produced no GitHub release (the packaging
-              # step failed before upload). Re-running this workflow for that
-              # version must build and publish the SAME version: the tag is an
-              # existing published ref and is never recreated or moved. It only
-              # has to be an ancestor of main so the release is built from the
-              # released history.
+              # v0.1.6 and v0.1.11 were tagged but produced no GitHub release
+              # (packaging failed before upload). Re-running this workflow for
+              # such a version must build and publish the SAME version: the tag
+              # is an existing published ref and is never recreated or moved.
+              #
+              # The build must contain the TAGGED commit, not merely descend
+              # from it: `bump=none` republishes an already-versioned release,
+              # so building a later main would ship code that the tag does not
+              # describe while latest.yml still says $version. Being an
+              # ancestor is therefore not enough — HEAD must BE the tag commit.
               $tagCommit = (git rev-list -n 1 $tag).Trim()
               $head = (git rev-parse HEAD).Trim()
-              git merge-base --is-ancestor $tag $head
-              if ($LASTEXITCODE -ne 0) {
-                Write-Error "Tag $tag ($tagCommit) is not an ancestor of main ($head). Refusing to publish a version whose tag does not belong to this history."
+              if ($tagCommit -ne $head) {
+                Write-Error "bump=none reuses tag $tag, which points at $tagCommit, but this run checked out $head. A release must build the tagged commit; packaging a newer commit under the old version would publish code the tag does not describe. Either dispatch this workflow from the tag commit (or restore main to it), or bump the version for a new release."
                 exit 1
               }
-              Write-Host "Tag $tag already exists at $tagCommit (main is at $head) — reusing it as-is (not recreated, not moved)."
+              Write-Host "Tag $tag already exists at $tagCommit and main is at the same commit — reusing it as-is (not recreated, not moved)."
+              Write-Host "RELEASE_COMMIT=$tagCommit" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
             } else {
               git tag -a $tag -m "chore(release): $tag"
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -203,6 +207,32 @@ jobs:
           "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "installer=$installer" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           Write-Host "Resolved version $version and tag $tag."
+
+      - name: Confirm release state for the tag
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          # Publishing must never overwrite an already-published release, and a
+          # transient API problem must never be mistaken for "no release yet".
+          # 404 is the only answer that means "nothing exists"; everything else
+          # is reported and the release stops.
+          $output = gh api "repos/${{ github.repository }}/releases/tags/$env:RELEASE_TAG" 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          if ($code -eq 0) {
+            $release = $output | ConvertFrom-Json
+            if (-not $release.draft) {
+              $assets = ($release.assets | ForEach-Object { $_.name }) -join ', '
+              Write-Error "Release $env:RELEASE_TAG already exists and is PUBLISHED (assets: $assets). Publishing again would replace that release's installer. Nothing was built or published."
+              exit 1
+            }
+            Write-Host "Draft release $env:RELEASE_TAG already exists (id $($release.id), assets: $($release.assets.Count)) — this run will complete it."
+          } elseif ($output -match 'HTTP 404') {
+            Write-Host "No release exists for $env:RELEASE_TAG — this run will create the draft release."
+          } else {
+            Write-Error "Could not confirm the release state for $env:RELEASE_TAG (gh exit $code): $($output.Trim()). Refusing to continue without knowing whether a release already exists."
+            exit 1
+          }
 
       - name: Write Vite build environment
         shell: pwsh

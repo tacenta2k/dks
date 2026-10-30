@@ -56,6 +56,19 @@ interface Guard {
 }
 
 const guard = require2(join(ROOT, 'scripts', 'lib', 'packaged-process-guard.cjs')) as Guard;
+const holdersModule = require2(join(ROOT, 'scripts', 'lib', 'file-holders.cjs')) as {
+  formatHolders(filePath: string, holders: unknown[]): string;
+  parseHoldersOutput(stdout: string): Array<{ pid: number; appName: string | null; applicationType: string; service: string | null }>;
+  holdersScript(): string;
+  findFileHolders(filePath: string, options?: Record<string, unknown>): Promise<{
+    supported: boolean;
+    holders: unknown[];
+    reason: string | null;
+  }>;
+};
+
+/** Holder lookups are stubbed everywhere: the real one spawns PowerShell. */
+const noHolders = async () => ({ supported: true, holders: [] as unknown[], output: '', reason: null });
 
 function readNormalised(file: string): string {
   return readFileSync(resolve(ROOT, file), 'utf8').replace(/\r\n?/g, '\n');
@@ -226,6 +239,8 @@ describe('packaged-process guard — release before rcedit', () => {
       sleep: tick,
       openFile,
       tasklist,
+      findHolders: noHolders,
+      writeHolders: () => null,
       processSweepTimeoutMs: 5_000,
       unlockTimeoutMs: 5_000,
       pollIntervalMs: 0,
@@ -268,6 +283,8 @@ describe('packaged-process guard — release before rcedit', () => {
       now: () => clock,
       openFile: vi.fn(),
       tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: noHolders,
+      writeHolders: () => null,
       processSweepTimeoutMs: 1_000,
       unlockTimeoutMs: 1_000,
       pollIntervalMs: 250,
@@ -461,5 +478,178 @@ describe('after-pack hook wiring (R9)', () => {
     );
     expect(guardSyntax.status, guardSyntax.stderr).toBe(0);
     expect(hook).not.toContain('\r');
+  });
+});
+
+/**
+ * Naming the holder.
+ *
+ * The v0.1.11 release failed with rcedit's "Fatal error: Unable to commit
+ * changes." and the log could only say "the file was in use". The guard now
+ * asks the Restart Manager API which process holds the file, and reports that
+ * process — including when the wait ultimately fails.
+ *
+ * A lookup failure must never change what the build does, so every path is
+ * covered here: unsupported platform, thrown error, non-zero exit, and a
+ * holding process.
+ */
+describe('Restart Manager holder reporting', () => {
+  const exePath = 'C:\\build\\release\\win-unpacked\\DKS.exe';
+
+  it('parses holder lines into process identities', () => {
+    const holders = holdersModule.parseHoldersOutput([
+      'HOLDER|6260|1003|MsMpEng.exe||not-restartable',
+      'HOLDER|7184|1001|DKS.exe||restartable',
+      'HOLDER|9001|1005||DksUpdateSvc|not-restartable',
+      'noise that must be ignored',
+      'HOLDER|notapid|1001|x||restartable',
+    ].join('\n'));
+
+    expect(holders).toEqual([
+      { pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false },
+      { pid: 7184, applicationType: 'main-window', appName: 'DKS.exe', service: null, restartable: true },
+      { pid: 9001, applicationType: 'console', appName: null, service: 'DksUpdateSvc', restartable: false },
+    ]);
+  });
+
+  it('formats an empty and a non-empty holder list for the build log', () => {
+    expect(holdersModule.formatHolders(exePath, [])).toContain('no process holds');
+    const formatted = holdersModule.formatHolders(exePath, [
+      { pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false },
+    ]);
+    expect(formatted).toContain('1 process(es) hold');
+    expect(formatted).toContain('pid 6260 MsMpEng.exe (service)');
+  });
+
+  it('reports the holder while the file stays locked', async () => {
+    const log = vi.fn();
+    let ticks = 0;
+    const findHolders = vi.fn(async () => ({
+      supported: true,
+      holders: [{ pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+      output: '',
+      reason: null,
+    }));
+    const openFile = vi.fn()
+      .mockImplementationOnce(() => {
+        throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+      });
+
+    const result = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        ticks += 1;
+      },
+      now: () => ticks * 250,
+      openFile,
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders,
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    expect(findHolders).toHaveBeenCalledWith(exePath, expect.objectContaining({ platform: 'win32' }));
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('pid 6260 MsMpEng.exe');
+  });
+
+  it('names the holder in the error when the wait gives up', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    const error = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        clock += 500;
+      },
+      now: () => clock,
+      openFile: () => {
+        throw Object.assign(new Error('EBUSY'), { code: 'EBUSY' });
+      },
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: async () => ({
+        supported: true,
+        holders: [{ pid: 6260, applicationType: 'service', appName: 'MsMpEng.exe', service: null, restartable: false }],
+        output: '',
+        reason: null,
+      }),
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      unlockTimeoutMs: 1_000,
+      pollIntervalMs: 500,
+    }).then(() => null, (caught: Error) => caught);
+
+    expect(error).toBeInstanceOf(Error);
+    expect(error?.message).toContain('still in use');
+    expect(error?.message).toContain('pid 6260 MsMpEng.exe');
+  });
+
+  it('a failing holder lookup never breaks the wait or hides the timeout', async () => {
+    const log = vi.fn();
+    let clock = 0;
+    const result = await guard.releaseExecutableLock({
+      exePath,
+      imageName: 'DKS.exe',
+      platform: 'win32',
+      run: vi.fn(async () => ({ status: 0, stdout: '', stderr: '', error: null })),
+      log,
+      sleep: async () => {
+        clock += 250;
+      },
+      now: () => clock,
+      openFile: vi.fn()
+        .mockImplementationOnce(() => {
+          throw Object.assign(new Error('EPERM'), { code: 'EPERM' });
+        }),
+      tasklist: vi.fn(() => ({ status: 0, stdout: '', stderr: '', error: null })),
+      findHolders: async () => {
+        throw new Error('rstrtmgr.dll unavailable');
+      },
+      writeHolders: () => 'C:\\temp\\holders.ps1',
+      unlockTimeoutMs: 5_000,
+      pollIntervalMs: 250,
+    });
+
+    expect(result.attempts).toBe(2);
+    const logged = log.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(logged).toContain('Restart Manager lookup threw');
+    expect(logged).toContain('is writable');
+  });
+
+  it('findFileHolders reports unsupported instead of throwing when the lookup cannot run', async () => {
+    const log = vi.fn();
+    const linux = await holdersModule.findFileHolders(exePath, { platform: 'linux', log });
+    expect(linux).toMatchObject({ supported: false, holders: [] });
+
+    const noWriter = await holdersModule.findFileHolders(exePath, { platform: 'win32', log });
+    expect(noWriter.supported).toBe(false);
+    expect(noWriter.reason).toContain('no script writer');
+
+    const failing = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      writeScript: () => 'C:\\temp\\holders.ps1',
+      run: () => ({ status: 1, stdout: '', stderr: 'Add-Type failed: access denied', error: null }),
+    });
+    expect(failing.supported).toBe(false);
+    expect(failing.reason).toContain('Add-Type failed');
+    expect(log.mock.calls.join('\n')).toContain('Restart Manager lookup failed');
+
+    const success = await holdersModule.findFileHolders(exePath, {
+      platform: 'win32',
+      log,
+      writeScript: () => 'C:\\temp\\holders.ps1',
+      run: () => ({ status: 0, stdout: 'HOLDER|6260|1003|MsMpEng.exe||not-restartable', stderr: '', error: null }),
+    });
+    expect(success.supported).toBe(true);
+    expect(success.holders).toHaveLength(1);
   });
 });

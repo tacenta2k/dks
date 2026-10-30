@@ -41,6 +41,8 @@ const { spawn } = require('node:child_process');
 const { closeSync, copyFileSync, existsSync, openSync, rmSync } = require('node:fs');
 const path = require('node:path');
 
+const holdersModule = require(path.join(__dirname, '..', 'lib', 'file-holders.cjs'));
+
 const projectRoot = process.cwd();
 const appOutDir = path.join(projectRoot, 'release', 'win-unpacked');
 const packagedExe = path.join(appOutDir, 'DKS.exe');
@@ -145,28 +147,57 @@ function stopRunner(child) {
   });
 }
 
-/** PowerShell child that holds a handle with a chosen share mode, then sleeps. */
+/**
+ * PowerShell child that holds a handle with a chosen share mode, then sleeps.
+ *
+ * The values are written into a temporary .ps1 and passed with `-File`/`-Path`:
+ * with `-Command`, arguments after the script are not `$args`, which is exactly
+ * why the first version of this experiment reported "FAILED to open the handle".
+ */
 function holdHandle(filePath, access, share, seconds) {
-  const script = [
-    '$path = $args[0]; $access = $args[1]; $share = $args[2]; $seconds = [int]$args[3]',
-    `$fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::$access, [System.IO.FileShare]::$share)`,
+  const { mkdtempSync, rmSync, writeFileSync } = require('node:fs');
+  const { tmpdir } = require('node:os');
+  const dir = mkdtempSync(path.join(tmpdir(), 'dks-hold-'));
+  const scriptPath = path.join(dir, 'hold.ps1');
+  writeFileSync(scriptPath, [
+    'param(',
+    '  [Parameter(Mandatory=$true)][string]$Path,',
+    '  [Parameter(Mandatory=$true)][ValidateSet("Read","ReadWrite")][string]$Access,',
+    '  [Parameter(Mandatory=$true)][ValidateSet("Read","ReadWrite","Delete","None")][string]$Share,',
+    '  [Parameter(Mandatory=$true)][int]$Seconds',
+    ')',
+    'try {',
+    '  $fs = [System.IO.File]::Open($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::$Access, [System.IO.FileShare]::$Share)',
+    '} catch {',
+    '  Write-Output "FAILED: $($_.Exception.GetType().Name) $($_.Exception.Message)"',
+    '  exit 2',
+    '}',
     'Write-Output "HELD"',
-    'Start-Sleep -Seconds $seconds',
+    'Start-Sleep -Seconds $Seconds',
     '$fs.Close()',
-  ].join('; ');
+    'exit 0',
+  ].join('\n'), 'utf8');
+
   const child = spawn('powershell.exe', [
     '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass',
-    '-Command', script,
-    filePath, access, share, String(seconds),
+    '-File', scriptPath,
+    '-Path', filePath,
+    '-Access', access,
+    '-Share', share,
+    '-Seconds', String(seconds),
   ], { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
   let stdout = '';
+  let stderr = '';
   child.stdout.on('data', (chunk) => { stdout += chunk; });
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
   return new Promise((resolve) => {
     const started = Date.now();
     const timer = setInterval(() => {
-      if (stdout.includes('HELD') || Date.now() - started > 15_000) {
+      const settled = stdout.includes('HELD') || stdout.includes('FAILED') || Date.now() - started > 15_000;
+      if (settled) {
         clearInterval(timer);
-        resolve({ child, ready: stdout.includes('HELD'), stdout });
+        try { rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
+        resolve({ child, ready: stdout.includes('HELD'), stdout: `${stdout}${stderr}`.trim() });
       }
     }, 100);
   });
@@ -214,10 +245,14 @@ async function experimentThirdPartyHandles() {
   if (writable.ready) {
     const open = tryOpenForWrite(probeCopy);
     record('C1', 'write-open while another handle has FileShare.ReadWrite', describeOpen(open));
+    const holders = await holdersModule.findFileHolders(probeCopy, { log: (line) => console.log(line) });
+    record('C2', 'Restart Manager holders while that handle is open', holders.supported
+      ? `${holders.holders.length} holder(s): ${holders.holders.map((h) => `pid ${h.pid} ${h.appName ?? h.service ?? '?'}`).join(', ') || 'none'}`
+      : `unsupported (${holders.reason})`);
     const rcedit = await runRcedit(probeCopy);
-    record('C2', 'rcedit while another handle has FileShare.ReadWrite', describeRcedit(rcedit));
+    record('C3', 'rcedit while another handle has FileShare.ReadWrite', describeRcedit(rcedit));
   } else {
-    record('C1', 'hold FileShare.ReadWrite handle', 'FAILED to open the handle');
+    record('C1', 'hold FileShare.ReadWrite handle', `FAILED: ${writable.stdout}`);
   }
   await stopRunner(writable.child);
 
@@ -226,8 +261,12 @@ async function experimentThirdPartyHandles() {
   if (reader.ready) {
     const open = tryOpenForWrite(probeCopy);
     record('D1', 'write-open while another handle has FileShare.Read', describeOpen(open));
+    const holders = await holdersModule.findFileHolders(probeCopy, { log: (line) => console.log(line) });
+    record('D2', 'Restart Manager holders while that handle is open', holders.supported
+      ? `${holders.holders.length} holder(s): ${holders.holders.map((h) => `pid ${h.pid} ${h.appName ?? h.service ?? '?'}`).join(', ') || 'none'}`
+      : `unsupported (${holders.reason})`);
   } else {
-    record('D1', 'hold FileShare.Read handle', 'FAILED to open the handle');
+    record('D1', 'hold FileShare.Read handle', `FAILED: ${reader.stdout}`);
   }
   await stopRunner(reader.child);
 }

@@ -36,7 +36,9 @@
  *
  * Every step logs `tasklist` diagnostics, and every wait is bounded: the hook
  * fails with a message that names the problem instead of letting rcedit fail
- * with "Unable to commit changes" 20 seconds later.
+ * with "Unable to commit changes" 20 seconds later. While the file is still
+ * locked after the first attempt, the Restart Manager API is asked WHO holds
+ * it open (see file-holders.cjs) — a process name, not just "in use".
  *
  * Nothing here imports Electron or electron-builder; commands are injected so
  * the Windows code paths are unit-testable on Linux.
@@ -45,6 +47,8 @@
 const { spawn, spawnSync } = require('node:child_process');
 const { closeSync, openSync } = require('node:fs');
 const path = require('node:path');
+
+const { findFileHolders, formatHolders, writeHoldersScript } = require('./file-holders.cjs');
 
 /** How long to keep sweeping processes created from the packaged exe. */
 const DEFAULT_PROCESS_SWEEP_TIMEOUT_MS = 20_000;
@@ -264,6 +268,11 @@ async function releaseExecutableLock(options) {
     unlockTimeoutMs = DEFAULT_UNLOCK_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     now = Date.now,
+    // Restart Manager holder lookup: injected so the Windows path is testable
+    // and so a lookup failure can never break the wait it is only describing.
+    findHolders = findFileHolders,
+    writeHolders = writeHoldersScript,
+    holderReportEvery = 8,
   } = options;
 
   const tasklistSnapshot = async (label) => {
@@ -312,6 +321,29 @@ async function releaseExecutableLock(options) {
     await tasklistSnapshot('before rcedit');
   }
 
+  let lastHolderReport = null;
+  // Diagnostics only: a failed lookup is logged and must never change whether
+  // the build continues, nor mask the timeout error it is meant to explain.
+  const reportHolders = async () => {
+    let report;
+    try {
+      report = await findHolders(exePath, {
+        platform,
+        writeScript: writeHolders,
+        log,
+      });
+    } catch (error) {
+      log(`[dks] Restart Manager lookup threw (${error && error.message ? error.message : error}) — continuing`);
+      return { supported: false, holders: [] };
+    }
+    if (!report || !report.supported) {
+      return { supported: false, holders: [] };
+    }
+    lastHolderReport = report;
+    log(formatHolders(exePath, report.holders));
+    return report;
+  };
+
   const unlocked = await waitForExecutableUnlocked({
     exePath,
     timeoutMs: unlockTimeoutMs,
@@ -326,14 +358,26 @@ async function releaseExecutableLock(options) {
       );
       if (platform === 'win32' && (attempt === 1 || attempt % 8 === 0)) {
         await tasklistSnapshot(`while locked, attempt ${attempt}`);
+        // Name the holder while it is still holding: the message rcedit prints
+        // ("Unable to commit changes") never says which process stood in the way.
+        await reportHolders();
       }
     },
+  }).catch(async (error) => {
+    // The wait gave up: say who was holding the file, while it is still open.
+    // A lookup failure must not mask the original timeout error.
+    const report = await reportHolders();
+    const detail = report && report.supported && report.holders.length > 0
+      ? `\n${formatHolders(exePath, report.holders)}`
+      : '';
+    error.message = `${error.message}${detail}`;
+    throw error;
   });
   log(
     `[dks] ${path.basename(exePath)} is writable (checked ${unlocked.attempts}×, `
     + `${unlocked.waitedMs}ms) — safe for rcedit`,
   );
-  return unlocked;
+  return { ...unlocked, holderReport: lastHolderReport };
 }
 
 /** Async spawn that captures output (used for taskkill / process listing). */
