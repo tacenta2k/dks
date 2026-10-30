@@ -71,7 +71,10 @@ jobs:
             body = body.replace(/\$\{\{\s*github\.repository\s*\}\}/g, 'tacenta2k/dks');
             body = body.replace(/\$\{\{\s*github\.sha\s*\}\}/g, sha);
             body = body.replace(/\$\{\{\s*inputs\.dry_run\s*\}\}/g, 'true');
-            if (body.includes('${{')) { throw new Error(`unsubstituted expression in ${file}`); }
+            // '$' + '{{' rather than a literal: GitHub's workflow parser treats
+            // a stray opener as an expression and rejects the whole file.
+            const opener = '$' + '{{';
+            if (body.includes(opener)) { throw new Error(`unsubstituted expression in ${file}`); }
             fs.writeFileSync(`${outDir}/${file}`, `${wrapper}${body}\n${wrapper.split('\n')[2]}\n`);
           }
           console.log('extracted', Object.keys(wanted).join(', '));

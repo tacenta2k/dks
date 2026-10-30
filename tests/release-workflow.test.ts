@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { resolve } from 'node:path';
 
@@ -636,5 +636,30 @@ describe('dry-run workflow regressions', () => {
     const packageIndex = stepIndex((step) => runIncludes(step, 'npm run release'), 'release packaging');
     expect(steps[packageIndex].id).toBe('package');
     expect(steps[packageIndex].run).toContain('"exit=$code" | Out-File -FilePath $env:GITHUB_OUTPUT');
+  });
+});
+
+/**
+ * GitHub parses `${{ … }}` anywhere in a workflow value, including inside a
+ * `run:` block. A stray, unclosed opener makes GitHub reject the whole file
+ * ("workflow file issue") even though the YAML itself is valid — which is
+ * exactly how the release step harness failed to start the first time.
+ */
+describe('no stray workflow expressions', () => {
+  const workflowDir = resolve(root, '.github/workflows');
+  const files = readdirSync(workflowDir).filter((name) => name.endsWith('.yml'));
+
+  it.each(files)('%s has no unclosed ${{', (file) => {
+    const text = readFileSync(resolve(workflowDir, file), 'utf8');
+    const offenders = text
+      .split('\n')
+      .map((line, index) => ({ line, index: index + 1 }))
+      .filter(({ line }) => {
+        const openers = [...line.matchAll(/\$\{\{/g)];
+        if (openers.length === 0) return false;
+        // Every opener needs a closing brace pair after it on the same line.
+        return openers.some((match) => !line.slice(match.index + 3).includes('}}'));
+      });
+    expect(offenders.map(({ line, index }) => `${file}:${index}: ${line.trim()}`)).toEqual([]);
   });
 });
