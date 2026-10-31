@@ -53,6 +53,9 @@ import {
   MainErrorReporter,
 } from './error-reporter';
 import { registerDiagnosticsIpcHandlers } from './diagnostics-ipc';
+import { BackupService } from './backup-service';
+import { registerBackupIpcHandlers } from './backup-ipc';
+import { QUIT_BACKUP_BUDGET_MS } from './backup-scheduler';
 
 /**
  * R2-05: Windows resolves the toast/notification author from the application
@@ -185,6 +188,17 @@ let unregisterLocalStoreFailureIpc: (() => void) | undefined;
 let mainErrorReporter: MainErrorReporter | undefined;
 let unregisterDiagnosticsIpc: (() => void) | undefined;
 let processErrorMonitorsInstalled = false;
+/**
+ * Cloud backup (PR1). Created together with the local store — the snapshot is
+ * taken from the same open SQLite connection, never from a file copy.
+ */
+let backupService: BackupService | undefined;
+let unregisterBackupIpc: (() => void) | undefined;
+/** True while an auto-update is installing: the quit backup must not delay it. */
+/** Set by the updater's pre-install hook so before-quit backs off (see below). */
+let updateInstallInProgress = false;
+/** `before-quit` re-enters after the bounded backup attempt; run it only once. */
+let quitBackupAttempted = false;
 
 /** Diagnostics for the local store, for logging and tests. */
 export function getLocalStoreFailure(): LocalStoreFailure | null {
@@ -508,6 +522,12 @@ function closeLocalStore(): void {
     clearInterval(localPurgeTimer);
     localPurgeTimer = undefined;
   }
+  if (unregisterBackupIpc) {
+    safeInvoke(() => unregisterBackupIpc?.());
+    unregisterBackupIpc = undefined;
+  }
+  safeInvoke(() => backupService?.stopHourlyTimer());
+  backupService = undefined;
   if (unregisterLocalIpc) {
     safeInvoke(() => unregisterLocalIpc?.());
     unregisterLocalIpc = undefined;
@@ -599,6 +619,39 @@ function openLocalStore(): void {
         }, 'main');
       },
     });
+    // Cloud backup (PR1): point-in-time snapshot → AES-256-GCM envelope →
+    // Cloudflare Worker → R2. Registered alongside the other main-process IPC
+    // surfaces; every admin channel is enforced inside backup-ipc.ts.
+    try {
+      backupService = new BackupService({
+        store: localStore,
+        userDataPath,
+        appVersion: getAppVersion(),
+      });
+      unregisterBackupIpc?.();
+      unregisterBackupIpc = registerBackupIpcHandlers({
+        ipcMain: ipcMain as unknown as LocalIpcMain,
+        service: backupService,
+        sessionClearance: localSessionClearance.get,
+        sessionRole: localSessionClearance.getRole,
+      });
+      // T3 — hourly change check while DKS runs. T1 (launch) fires from
+      // BackupService.setSession, because the Supabase JWT exists only once
+      // the renderer has restored a session; T2 runs in the before-quit hook.
+      backupService.startHourlyTimer();
+    } catch (error) {
+      // Backup is a safety net: a failure to start it must never stop DKS.
+      backupService = undefined;
+      unregisterBackupIpc = undefined;
+      log.error('[dks-backup] cloud backup could not start', error);
+      getOrCreateMainErrorReporter().capture({
+        category: 'main',
+        severity: 'warning',
+        code: 'BACKUP_START_FAILED',
+        component: 'electron/main/backup-service',
+        process: 'main',
+      }, 'main');
+    }
     // Office 3-day window: the visibility purge runs "at launch and when the
     // Muscat date changes" for the Office session scope reported through the
     // existing clearance mechanism (Admin/unknown never purge). Office reads
@@ -809,6 +862,12 @@ export function forwardRendererDiagnostics(window: Pick<BrowserWindow, 'webConte
  */
 export async function flushSessionStorageBeforeInstall(): Promise<void> {
   quitting = true;
+  // The NSIS installer force-kills a DKS.exe that has not exited, so an update
+  // install is not the moment to hold the process open for a snapshot. Setting
+  // this here — the updater's last hook before quitAndInstall() — is what makes
+  // the before-quit backup guard in installLifecycleListeners real. Anything
+  // that changed since the last run uploads at the next launch instead.
+  updateInstallInProgress = true;
   const ses = session?.defaultSession;
   if (!ses) return;
   const started = Date.now();
@@ -825,21 +884,54 @@ export async function flushSessionStorageBeforeInstall(): Promise<void> {
   log.info(`[dks] session storage flushed before update install (${Date.now() - started} ms)`);
 }
 
+/**
+ * True only when a before-quit backup can actually do something. Never throws:
+ * a closed store or an unconfigured service must not change quit behaviour.
+ */
+function shouldAttemptQuitBackup(): boolean {
+  try {
+    return backupService?.isEnabled() === true;
+  } catch {
+    return false;
+  }
+}
+
+/** The synchronous tail of every quit path. Unchanged from v0.1.8 behaviour. */
+function finishQuit(): void {
+  quitting = true;
+  updaterScheduler?.stop();
+  // v0.1.8: commit DOMStorage (Supabase session) synchronously on every quit
+  // path — tray Exit, OS shutdown and the updater's own app.quit().
+  safeInvoke(() => session?.defaultSession?.flushStorageData());
+  closeLocalStore();
+  // Remove running.lock so uninstall can proceed after Exit. If crash leaves
+  // stale lock, uninstaller's tasklist check will delete it; startup also
+  // cleans stale locks (see startMainProcess).
+  try {
+    const p = path.join(app.getPath('userData'), 'running.lock');
+    if (fs.existsSync(p)) fs.unlinkSync(p);
+  } catch {}
+}
+
 function installLifecycleListeners(): void {
-  app.on('before-quit', () => {
-    quitting = true;
-    updaterScheduler?.stop();
-    // v0.1.8: commit DOMStorage (Supabase session) synchronously on every quit
-    // path — tray Exit, OS shutdown and the updater's own app.quit().
-    safeInvoke(() => session?.defaultSession?.flushStorageData());
-    closeLocalStore();
-    // Remove running.lock so uninstall can proceed after Exit. If crash leaves
-    // stale lock, uninstaller's tasklist check will delete it; startup also
-    // cleans stale locks (see startMainProcess).
-    try {
-      const p = path.join(app.getPath('userData'), 'running.lock');
-      if (fs.existsSync(p)) fs.unlinkSync(p);
-    } catch {}
+  app.on('before-quit', (event) => {
+    // T2 — before-quit backup. Bounded by QUIT_BACKUP_BUDGET_MS: if it cannot
+    // finish, the encrypted snapshot stays in the pending folder and uploads at
+    // the next launch. Exit is never blocked indefinitely, and the attempt is
+    // skipped entirely while an auto-update is installing.
+    if (!quitBackupAttempted && !updateInstallInProgress && shouldAttemptQuitBackup()) {
+      quitBackupAttempted = true;
+      event.preventDefault();
+      const service = backupService;
+      void (service
+        ? service.runBeforeQuit(QUIT_BACKUP_BUDGET_MS).catch(() => undefined)
+        : Promise.resolve())
+        .finally(() => {
+          safeInvoke(() => app.quit());
+        });
+      return;
+    }
+    finishQuit();
   });
 
   app.on('window-all-closed', () => {

@@ -18,8 +18,20 @@ export interface SupabaseQueryResult {
   count?: number | null;
 }
 
+/**
+ * A `select()` builder that can be walked page by page.
+ *
+ * PostgREST truncates a single response at `db-max-rows` (1000 by default), so
+ * an unpaginated `select('*')` silently caps the local cache. Everything that
+ * reads a whole table goes through `selectTable`, which walks these pages.
+ */
+export interface SupabaseSelectQuery extends PromiseLike<SupabaseQueryResult> {
+  order: (column: string, options?: { ascending?: boolean }) => SupabaseSelectQuery;
+  range: (from: number, to: number) => SupabaseSelectQuery;
+}
+
 export interface SupabaseTableQuery {
-  select: (columns: string) => Promise<SupabaseQueryResult>;
+  select: (columns: string) => Promise<SupabaseQueryResult> | SupabaseSelectQuery;
   /**
    * Idempotent write used ONLY for key/value tables (settings) where no
    * INSERT/UPDATE policy distinguishes the two operations. Entries and columns
@@ -521,14 +533,62 @@ function toLocalColumn(remote: Record<string, unknown>, localId?: string): Recor
   };
 }
 
-async function selectTable(client: SupabaseDataClient, table: string): Promise<Record<string, unknown>[]> {
-  const result = await client.from(table).select('*');
-  if (result.error) {
-    throw new Error(result.error.message || `Unable to read ${table}`);
-  }
-  return (result.data ?? [])
+/** Rows requested per page — deliberately below the PostgREST default cap. */
+export const PULL_PAGE_SIZE = 500;
+/** Hard stop, so a broken cursor can never walk forever. */
+export const MAX_PULL_ROWS = 100_000;
+
+function asRowList(data: unknown): Record<string, unknown>[] {
+  return (data as unknown[] | null | undefined ?? [])
     .map(asRecord)
     .filter((value): value is Record<string, unknown> => value !== null);
+}
+
+function isChainableSelect(value: unknown): value is SupabaseSelectQuery {
+  const candidate = value as { order?: unknown; range?: unknown } | null;
+  return typeof candidate?.order === 'function' && typeof candidate?.range === 'function';
+}
+
+async function readPage(
+  client: SupabaseDataClient,
+  table: string,
+  from: number,
+  size: number,
+): Promise<{ rows: Record<string, unknown>[]; paginated: boolean }> {
+  const query: unknown = client.from(table).select('*');
+  if (!isChainableSelect(query)) {
+    // A client with no range support cannot be walked. Take what it returns and
+    // report that it was not paginated rather than implying completeness.
+    const result = await (query as PromiseLike<SupabaseQueryResult>);
+    if (result.error) throw new Error(result.error.message || `Unable to read ${table}`);
+    return { rows: asRowList(result.data), paginated: false };
+  }
+  // `id` is unique and stable, so pages do not reshuffle under the cursor. A
+  // row written while the walk is running can still shift a page boundary; the
+  // reconcile step is an idempotent upsert, so a repeat row is harmless and the
+  // next pull picks up anything missed.
+  const result = await query.order('id', { ascending: true }).range(from, from + size - 1);
+  if (result.error) throw new Error(result.error.message || `Unable to read ${table}`);
+  return { rows: asRowList(result.data), paginated: true };
+}
+
+/**
+ * Read a whole table, walking pages until a short page arrives.
+ *
+ * This is the line that decides whether the local cache — and therefore every
+ * cloud backup snapshot taken from it — can claim to hold the table at all.
+ */
+export async function selectTable(client: SupabaseDataClient, table: string): Promise<Record<string, unknown>[]> {
+  const rows: Record<string, unknown>[] = [];
+  for (let from = 0; from < MAX_PULL_ROWS; from += PULL_PAGE_SIZE) {
+    const page = await readPage(client, table, from, PULL_PAGE_SIZE);
+    rows.push(...page.rows);
+    if (!page.paginated || page.rows.length < PULL_PAGE_SIZE) break;
+  }
+  if (rows.length >= MAX_PULL_ROWS) {
+    throw new Error(`Stopped reading ${table} after ${String(MAX_PULL_ROWS)} rows`);
+  }
+  return rows;
 }
 
 async function upsertRow(

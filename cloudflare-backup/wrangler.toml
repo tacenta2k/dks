@@ -1,0 +1,38 @@
+# DKS cloud backup Worker (PR1)
+#
+#   wrangler login
+#   wrangler r2 bucket create dks-backups     # once, per account
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_ANON_KEY
+#   wrangler deploy
+#
+# The bucket is PRIVATE. Never enable public access on it, and never attach a
+# development subdomain or a custom public domain.
+
+name = "dks-backup"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+
+# Private R2 bucket. The binding name is what the code reads; the bucket name
+# is what the owner creates.
+[[r2_buckets]]
+binding = "DKS_BACKUPS"
+bucket_name = "dks-backups"
+
+# Retention runs daily at 02:17 UTC.
+#
+# PR1 ships it as a DRY-RUN: it scans, counts and logs the objects older than
+# RETENTION_DAYS (always protecting the newest object) and deletes nothing.
+# Deleting requires an explicit `wrangler secret put RETENTION_MODE` with the
+# value `enforce`, and that is a PR2 decision.
+[triggers]
+crons = ["17 2 * * *"]
+
+[vars]
+RETENTION_MODE = "dry-run"
+RETENTION_DAYS = "90"
+
+# SUPABASE_URL and SUPABASE_ANON_KEY are secrets, not vars:
+#   wrangler secret put SUPABASE_URL
+#   wrangler secret put SUPABASE_ANON_KEY
+# There is deliberately no SERVICE_ROLE key anywhere in this Worker.

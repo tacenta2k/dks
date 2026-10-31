@@ -14,6 +14,7 @@ import { can } from '../../lib/permissions';
 import { resolveAppVersion } from '../../lib/app-info';
 import { ConfirmDialog } from '../ui/ConfirmDialog';
 import type { OfficeSessionSignOutSummary } from '../auth/office-approval-service';
+import { BackupRecoverySection, type BackupBridge } from './BackupRecoverySection';
 import { EmailNotificationsSection } from './EmailNotificationsSection';
 import { prefetchEmailNotificationPrefs, type EmailPrefsClient } from './email-preferences';
 import type { DksUpdateState, DksUpdaterApi, ThemePreference } from '../../lib/types';
@@ -95,6 +96,12 @@ export interface SettingsPageProps {
   onUpdateStateChange?: (state: DksUpdateState) => void;
   /** Admin-only server action supplied by the app shell. */
   onSignOutAllOfficeSessions?: () => Promise<OfficeSessionSignOutSummary>;
+  /**
+   * Cloud-backup bridge (Admin only). Defaults to `window.dks.backup`; injected
+   * in tests. `null` renders the "open the installed app" copy instead of
+   * pretending a status it cannot read.
+   */
+  backup?: BackupBridge | null;
   settingsError?: string | null;
   onClose?: () => void;
 }
@@ -190,13 +197,19 @@ const STATUS_COLOR_FIELDS: ReadonlyArray<{
   { key: 'Expired', label: 'Expired status color' },
 ];
 
-/** FIXES_UI §9.1: approved inner navigation (one section at a time). */
-export type SettingsSectionId = 'expiry' | 'notifications' | 'workspace' | 'about';
+/**
+ * FIXES_UI §9.1 approved the inner navigation (one section at a time). "Backup
+ * & recovery" is a fifth entry added by the cloud-backup feature (PR1); the
+ * layout rules of §9.1 — nav always visible, inputs capped, responsive
+ * stacking, no duplicate headings — are unchanged for it.
+ */
+export type SettingsSectionId = 'expiry' | 'notifications' | 'workspace' | 'backup' | 'about';
 
 export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSectionId; label: string }> = [
   { id: 'expiry', label: 'Expiry rules' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'workspace', label: 'Workspace' },
+  { id: 'backup', label: 'Backup & recovery' },
   { id: 'about', label: 'About & updates' },
 ];
 
@@ -310,6 +323,7 @@ export function SettingsPage({
   updateState: providedUpdateState,
   onUpdateStateChange,
   onSignOutAllOfficeSessions,
+  backup,
   settingsError = null,
   onClose,
 }: SettingsPageProps) {
@@ -870,6 +884,10 @@ export function SettingsPage({
                 </p>
               </ConfirmDialog>
             </section>
+          ) : null}
+
+          {activeSection === 'backup' ? (
+            <BackupRecoverySection role={role} backup={backup} />
           ) : null}
 
           {activeSection === 'about' ? (

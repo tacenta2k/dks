@@ -259,15 +259,50 @@ Days Left:
 
 ## Privacy and file handling
 
-No backups of any kind:
+**Superseded in part on 2026-10-31 (cloud backup Phase 1).** The owner asked for
+an encrypted cloud backup of the local SQLite cache. The rule below is no longer
+absolute; what changed, and what still holds, is stated inline.
 
-- No automatic local CSV/Excel/JSON backup files.
-- No scheduled exports.
-- No Supabase Storage backup bucket.
-- No `dks-backups` bucket.
-- No “Backup Now” control.
+No backups of any kind ~~(superseded — see the exception below)~~:
+
+- No automatic local CSV/Excel/JSON backup files. **Still true.** Nothing writes
+  CSV/XLSX/JSON snapshots, and no snapshot ever leaves the app folder unencrypted.
+- No scheduled exports. **Still true.** The only scheduled work is the encrypted
+  SQLite snapshot described below; it is not an export and produces no
+  human-readable file.
+- No Supabase Storage backup bucket. **Still true.** Backups go to Cloudflare R2
+  through a Cloudflare Worker, never to Supabase Storage, and `supabase/schema.sql`
+  still contains no `storage.buckets` policy.
+- No `dks-backups` bucket. **Superseded.** A private Cloudflare R2 bucket named
+  `dks-backups` now exists. It is private (no R2.dev, no public ACL), reachable
+  only through the Worker, which verifies a Supabase JWT and looks the role up in
+  Postgres. No R2 credential ships in the `.exe`.
+- No “Backup Now” control. **Superseded.** Settings → Backup & Recovery (Admin
+  only) has a “Back up now” button plus a “Test restore” drill. There is still no
+  restore and no delete in the UI — both appear disabled with “Coming in a later
+  update”.
 - SQLite is permitted only for the live offline cache and sync queue; it is
-  not an additional export/backup feature.
+  not an additional export/backup feature. **Still true.**
+
+The one exception, and its limits:
+
+- Content: a point-in-time copy of the local SQLite cache, taken in the Electron
+  **main** process with `better-sqlite3` `backup()` (falling back to `VACUUM INTO`).
+  The live file is never copied directly.
+- Encryption: AES-256-GCM (`node:crypto`) with a 32-byte key generated on the PC
+  and wrapped by `safeStorage` (DPAPI on Windows). The plaintext key is never
+  stored; only its SHA-256 is kept so the recovery key can be checked.
+- Envelope: `DKSBK1` magic, version, 96-bit IV, GCM tag, ciphertext, with the
+  plaintext SHA-256 bound into the authenticated metadata.
+- Excluded from every snapshot: `outbox`, `sync_meta`, `error_report_queue`,
+  `error_report_dedupe`. Auth/session data never enters the snapshot at all — it
+  lives in Electron session storage, not SQLite.
+- Triggers: first launch of the Muscat day, hourly while DKS runs, and once
+  before quit inside a bounded window. **Backups only happen while DKS runs.**
+- Retention: a Worker cron keeps 90 days and is **dry-run** — it logs what it
+  would delete and deletes nothing until `RETENTION_MODE=enforce` is set.
+- Never overwritten: an upload is only marked successful after the Worker
+  re-reads the stored object and returns a matching SHA-256.
 
 Keep explicit, user-initiated CSV/XLSX import/export and Print/PDF for Admin
 only. These are data exchange/report features, not automatic backups.
@@ -275,7 +310,10 @@ only. These are data exchange/report features, not automatic backups.
 A code search may find tests or documentation whose purpose is to assert that
 backup functionality is absent. Do not delete such tests or documentation
 blindly; remove actual backup implementation, storage policies, schedules, and
-UI.
+UI. The suite that used to assert absence was `tests/backup-removal.test.ts`;
+it has been replaced by `tests/cloud-backup-security.test.ts`, which asserts the
+*boundaries* instead (no service-role key, no R2 secret in the app, no renderer
+Node/crypto access, no delete/restore route, private bucket, admin-only IPC).
 
 ## Current verified state and observed issues
 
@@ -426,7 +464,10 @@ For releases:
   then STOP and wait for the user.
 - Never ask for passwords, service-role keys, database passwords, connection
   strings, GitHub tokens, or Resend keys.
-- Do not add backup features or claim Docker/Makefile is required for the app.
+- Do not add backup features beyond the approved cloud-backup Phase 1 scope
+  (encrypt / upload / list / download / test-restore drill), and do not claim
+  Docker/Makefile is required for the app. Restore and delete stay out until
+  their own phases are approved.
 - Do not weaken authentication or authorization to make tests pass.
 - Ask the user when a requirement is ambiguous or conflicts with the approved
   documents.

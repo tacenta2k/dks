@@ -61,10 +61,15 @@ describe('settings page', () => {
     expect(screen.getByLabelText('Daily summary')).toBeChecked();
     expect(screen.getByLabelText('Notification day 1')).toHaveValue(90);
 
+    // Cloud backup (PR1) added a fifth inner-navigation entry, so the old
+    // document-wide "no backup text" assertion is scoped to the About section
+    // it was written for: About & updates still carries no backup UI.
+    expect(screen.getByRole('button', { name: 'Backup & recovery' })).toBeInTheDocument();
     nav('About & updates');
-    expect(screen.getByText('Version 1.2.3')).toBeInTheDocument();
-    expect(screen.queryByText(/Resend/i)).not.toBeInTheDocument();
-    expect(screen.queryByText(/backup/i)).not.toBeInTheDocument();
+    const aboutSection = screen.getByRole('region', { name: 'Application updates' });
+    expect(within(aboutSection).getByText('Version 1.2.3')).toBeInTheDocument();
+    expect(within(aboutSection).queryByText(/Resend/i)).not.toBeInTheDocument();
+    expect(within(aboutSection).queryByText(/backup/i)).not.toBeInTheDocument();
 
     // Local-first changes across sections, plus the update action.
     nav('Expiry rules');

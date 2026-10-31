@@ -403,6 +403,121 @@ export interface DksDiagnosticsApi {
   }) => Promise<{ ok: boolean; enabled: boolean }>;
 }
 
+/**
+ * Cloud-backup bridge (PR1). Mirrors the frozen preload API: the renderer gets
+ * structured values only, never a file handle, a key or the Worker itself.
+ */
+export interface DksBackupApi {
+  getState: (input: { role: string }) => Promise<DksBackupState>;
+  runNow: (input: { role: string; trigger?: string }) => Promise<DksBackupRunResult>;
+  list: (input: {
+    role: string;
+    year: number;
+    month: number;
+    cursor?: string | null;
+  }) => Promise<DksBackupListResult>;
+  download: (input: { role: string; objectKey: string }) => Promise<{
+    filePath: string;
+    sizeBytes: number;
+    sha256: string;
+  }>;
+  testDrill: (input: { role: string; recoveryKey?: string }) => Promise<DksBackupDrillResult>;
+  setupKey: (input: {
+    role: string;
+    action: 'generate' | 'confirm' | 'configure' | 'import';
+    recoveryKey?: string;
+    workerUrl?: string;
+    enabled?: boolean;
+    /** Only for 'import': the key id the pasted key must match. */
+    keyId?: string;
+  }) => Promise<DksBackupKeySetupResult>;
+  healthCheck: (input: { role: string }) => Promise<DksBackupHealthResult>;
+  /** Pushes the signed-in session so main can authorise Worker calls. */
+  setSession: (input: {
+    role: string;
+    accessToken: string;
+    workerUrl?: string;
+  } | null) => Promise<{ ok: boolean }>;
+}
+
+export type DksBackupOutcome = 'verified' | 'pending' | 'failed' | 'no_changes' | 'incomplete';
+
+export interface DksBackupState {
+  enabled: boolean;
+  keyConfigured: boolean;
+  recoveryKeyStored: boolean;
+  workerUrl: string | null;
+  connection: 'not_configured' | 'signed_out' | 'offline' | 'ok' | 'error' | 'unknown';
+  lastAttemptAt: string | null;
+  lastSuccessAt: string | null;
+  lastSuccessDate: string | null;
+  lastFingerprint: string | null;
+  lastSizeBytes: number | null;
+  lastRecordCount: number | null;
+  pendingUploads: number;
+  nextCheckAt: string | null;
+  lastOutcome: DksBackupOutcome | null;
+  lastError: string | null;
+  retentionDays: number;
+  running: boolean;
+  /** Public key identifier on this PC (SHA-256 prefix), or null. */
+  keyId: string | null;
+  /** What every backup from this build covers. Always 'local-cache' in PR1. */
+  source: 'local-cache';
+}
+
+export interface DksBackupRunResult {
+  outcome: DksBackupOutcome;
+  detail: string | null;
+  sizeBytes: number | null;
+  recordCount: number | null;
+  objectKey: string | null;
+  fingerprint: string | null;
+}
+
+export interface DksBackupHistoryEntry {
+  day: string;
+  sizeBytes: number | null;
+  outcome: DksBackupOutcome;
+  objectKey: string | null;
+  createdAt: string | null;
+  recordCount: number | null;
+  /** Which key opens this backup; null when the object predates key ids. */
+  keyId: string | null;
+  /** What the snapshot covers. Always 'local-cache' in PR1. */
+  source: string | null;
+}
+
+export interface DksBackupListResult {
+  year: number;
+  month: number;
+  entries: DksBackupHistoryEntry[];
+  nextCursor: string | null;
+}
+
+export interface DksBackupKeySetupResult {
+  ok: boolean;
+  recoveryKey?: string;
+  /** Public key identifier after a successful generate/confirm/import. */
+  keyId?: string;
+  message: string;
+}
+
+export interface DksBackupDrillResult {
+  ok: boolean;
+  stage: 'download' | 'decrypt' | 'checksum' | 'integrity' | 'cleanup';
+  sizeBytes: number | null;
+  integrityCheck: string | null;
+  message: string;
+}
+
+export interface DksBackupHealthResult {
+  ok: boolean;
+  reachable: boolean;
+  r2Bound: boolean;
+  detail: string | null;
+}
+
 export interface DksWindowApi {
   platform: string;
   appVersion: string;
@@ -412,6 +527,7 @@ export interface DksWindowApi {
   local?: DksLocalApi;
   diagnostics?: DksDiagnosticsApi;
   updater?: DksUpdaterApi;
+  backup?: DksBackupApi;
 }
 
 declare global {

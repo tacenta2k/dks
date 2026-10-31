@@ -71,6 +71,10 @@ and are committed on this branch. They are **not** treated as user-confirmed.
 - Admin/Office permission enforcement (RLS + service/IPC + renderer).
 - B6 `npm run dev` window visibility (main-process logging) — see note below.
 - F4 Backup features removed; absence-asserting tests kept.
+  *(Superseded 2026-10-31: cloud backup Phase 1 ships an encrypted, Admin-only
+  backup of the local SQLite cache to private Cloudflare R2 via a Worker. The
+  absence suite `tests/backup-removal.test.ts` was replaced by
+  `tests/cloud-backup-security.test.ts`, which asserts the boundaries instead.)*
 
 ### 2.2 Baseline consolidation
 - Commit `6b84f8e` (this session): consolidated the entire working tree (Phase One
@@ -328,8 +332,11 @@ passed**; build ✓.
    RLS fix); optional Resend secrets; office-PC install/test (PKG-04, PKG-06).
 
 ## 6. Constraints honored
-- No backups; no passport-format validation; no hard-coded business
-  columns/template; no Actions column; Excel-like sheet per FIXES_UI.
+- No backups except the approved cloud-backup Phase 1 exception (encrypted
+  SQLite snapshot → private R2 via the Worker; no Supabase Storage, no
+  CSV/JSON/Excel backup files, no restore, no delete); no passport-format
+  validation; no hard-coded business columns/template; no Actions column;
+  Excel-like sheet per FIXES_UI.
 - RLS NOT disabled; no anon grants; no service-role; no Admin/Office weakening;
   no remote SQL executed by the agent (reviewed files only, if ever needed).
 - `created_by`/`updated_by` come from the authenticated session, never null or

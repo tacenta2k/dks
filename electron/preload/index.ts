@@ -12,6 +12,14 @@ import type {
   SanitizedErrorReportEvent,
   StructuredErrorReportInput,
 } from '../main/error-reporter';
+import type {
+  BackupDrillResult,
+  BackupHealthResult,
+  BackupKeySetupResult,
+  BackupListResult,
+  BackupRunResult,
+  BackupState,
+} from '../main/backup-types';
 
 export type DksNavigationTarget = 'dashboard' | 'sheet';
 
@@ -280,11 +288,56 @@ export interface DksDiagnosticsPreloadApi {
   }) => Promise<{ ok: boolean; enabled: boolean }>;
 }
 
+/**
+ * Cloud backup bridge (PR1).
+ *
+ * Every method requires the caller's role and is re-validated in the main
+ * process; the renderer has no access to Node, `node:crypto`, the filesystem
+ * or the backup Worker. Keys never cross this bridge except the recovery key,
+ * which is returned exactly once by `setupKey({ action: 'generate' })`.
+ */
+export interface DksBackupPreloadApi {
+  readonly getState: (input: { role: string }) => Promise<BackupState>;
+  readonly runNow: (input: { role: string; trigger?: string }) => Promise<BackupRunResult>;
+  readonly list: (input: {
+    role: string;
+    year: number;
+    month: number;
+    cursor?: string | null;
+  }) => Promise<BackupListResult>;
+  readonly download: (input: { role: string; objectKey: string }) => Promise<{
+    filePath: string;
+    sizeBytes: number;
+    sha256: string;
+  }>;
+  readonly testDrill: (input: { role: string; recoveryKey?: string }) => Promise<BackupDrillResult>;
+  readonly setupKey: (input: {
+    role: string;
+    action: 'generate' | 'confirm' | 'configure' | 'import';
+    recoveryKey?: string;
+    workerUrl?: string;
+    enabled?: boolean;
+    /** Only for 'import': the key id the pasted key must match. */
+    keyId?: string;
+  }) => Promise<BackupKeySetupResult>;
+  readonly healthCheck: (input: { role: string }) => Promise<BackupHealthResult>;
+  /**
+   * Pushes the signed-in session so the main process can authorise Worker
+   * calls. Pass `null` on sign-out. The Worker re-verifies this JWT itself.
+   */
+  readonly setSession: (input: {
+    role: string;
+    accessToken: string;
+    workerUrl?: string;
+  } | null) => Promise<{ ok: boolean }>;
+}
+
 export interface DksPreloadApi {
   readonly platform: string;
   readonly appVersion: string;
   readonly local: DksLocalApi;
   readonly diagnostics: DksDiagnosticsPreloadApi;
+  readonly backup: DksBackupPreloadApi;
   readonly notifications: {
     show: (request: DksNotificationRequest) => Promise<DksNotificationResult>;
   };
@@ -320,6 +373,17 @@ const DIAGNOSTICS_CHANNELS = {
   completeErrorReport: 'dks:diagnostics:complete-error-report',
   setErrorReportingEnabled: 'dks:diagnostics:set-error-reporting-enabled',
   syncWorkspaceErrorReporting: 'dks:diagnostics:sync-workspace-error-reporting',
+} as const;
+
+const BACKUP_CHANNELS = {
+  getState: 'dks:backup:get-state',
+  runNow: 'dks:backup:run-now',
+  list: 'dks:backup:list',
+  download: 'dks:backup:download',
+  testDrill: 'dks:backup:test-drill',
+  setupKey: 'dks:backup:setup-key',
+  healthCheck: 'dks:backup:health-check',
+  setSession: 'dks:backup:set-session',
 } as const;
 
 const LOCAL_CHANNELS = {
@@ -1050,11 +1114,137 @@ const diagnosticsApi: DksDiagnosticsPreloadApi = Object.freeze({
     ),
 });
 
+async function invokeBackup<T>(
+  channel: string,
+  payload: unknown,
+  validate: (value: unknown) => void,
+): Promise<T> {
+  validate(payload);
+  try {
+    const result = await ipcRenderer.invoke(channel, payload);
+    return cloneSerializable(result) as T;
+  } catch (caught) {
+    const message = caught instanceof Error && caught.message.trim()
+      ? caught.message.trim().slice(0, 400)
+      : 'The backup operation failed';
+    throw new Error(message);
+  }
+}
+
+function validateAdminBackupInput(value: unknown): void {
+  const input = requireRecord(value, 'backup input');
+  requireRole(input.role);
+  if (input.role !== 'admin') {
+    throw new TypeError('administrator role is required');
+  }
+}
+
+function validateBackupListInput(value: unknown): void {
+  validateAdminBackupInput(value);
+  const input = value as Record<string, unknown>;
+  if (typeof input.year !== 'number' || !Number.isInteger(input.year) || input.year < 2000 || input.year > 2100) {
+    throw new TypeError('a valid year is required');
+  }
+  if (typeof input.month !== 'number' || !Number.isInteger(input.month) || input.month < 1 || input.month > 12) {
+    throw new TypeError('a valid month is required');
+  }
+  if (input.cursor !== undefined && input.cursor !== null && typeof input.cursor !== 'string') {
+    throw new TypeError('cursor must be a string');
+  }
+}
+
+function validateBackupDownloadInput(value: unknown): void {
+  validateAdminBackupInput(value);
+  requireId((value as Record<string, unknown>).objectKey, 'objectKey');
+}
+
+function validateBackupSetupInput(value: unknown): void {
+  validateAdminBackupInput(value);
+  const input = value as Record<string, unknown>;
+  if (
+    input.action !== 'generate'
+    && input.action !== 'confirm'
+    && input.action !== 'configure'
+    && input.action !== 'import'
+  ) {
+    throw new TypeError("action must be 'generate', 'confirm', 'configure' or 'import'");
+  }
+  if (input.enabled !== undefined && typeof input.enabled !== 'boolean') {
+    throw new TypeError('enabled must be a boolean');
+  }
+  if (input.recoveryKey !== undefined && typeof input.recoveryKey !== 'string') {
+    throw new TypeError('recoveryKey must be a string');
+  }
+  if (input.workerUrl !== undefined && typeof input.workerUrl !== 'string') {
+    throw new TypeError('workerUrl must be a string');
+  }
+  if (input.keyId !== undefined && !/^[0-9a-f]{24}$/i.test(String(input.keyId))) {
+    throw new TypeError('keyId must be a 24-character hex key identifier');
+  }
+}
+
+const backupApi: DksBackupPreloadApi = Object.freeze({
+  getState: (input: { role: string }) =>
+    invokeBackup<BackupState>(BACKUP_CHANNELS.getState, input, validateAdminBackupInput),
+  runNow: (input: { role: string; trigger?: string }) =>
+    invokeBackup<BackupRunResult>(BACKUP_CHANNELS.runNow, input, validateAdminBackupInput),
+  list: (input: { role: string; year: number; month: number; cursor?: string | null }) =>
+    invokeBackup<BackupListResult>(BACKUP_CHANNELS.list, input, validateBackupListInput),
+  download: (input: { role: string; objectKey: string }) =>
+    invokeBackup<{ filePath: string; sizeBytes: number; sha256: string }>(
+      BACKUP_CHANNELS.download,
+      input,
+      validateBackupDownloadInput,
+    ),
+  testDrill: (input: { role: string; recoveryKey?: string }) =>
+    invokeBackup<BackupDrillResult>(BACKUP_CHANNELS.testDrill, input, validateAdminBackupInput),
+  setupKey: (input: {
+    role: string;
+    action: 'generate' | 'confirm' | 'configure' | 'import';
+    recoveryKey?: string;
+    workerUrl?: string;
+    enabled?: boolean;
+    /** Only for 'import': the key id the pasted key must match. */
+    keyId?: string;
+  }) =>
+    invokeBackup<BackupKeySetupResult>(BACKUP_CHANNELS.setupKey, input, validateBackupSetupInput),
+  healthCheck: (input: { role: string }) =>
+    invokeBackup<BackupHealthResult>(BACKUP_CHANNELS.healthCheck, input, validateAdminBackupInput),
+  setSession: async (input: { role: string; accessToken: string; workerUrl?: string } | null) => {
+    if (input === null) {
+      try {
+        await ipcRenderer.invoke(BACKUP_CHANNELS.setSession, null);
+      } catch {
+        // The main process may already be shutting down.
+      }
+      return { ok: true };
+    }
+    try {
+      const record = requireRecord(input, 'backup session');
+      requireRole(record.role);
+      if (record.role !== 'admin' && record.role !== 'office') {
+        throw new TypeError('authenticated session role is required');
+      }
+      if (typeof record.accessToken !== 'string' || record.accessToken.trim().length === 0) {
+        throw new TypeError('accessToken is required');
+      }
+      if (record.workerUrl !== undefined && typeof record.workerUrl !== 'string') {
+        throw new TypeError('workerUrl must be a string');
+      }
+      const result = await ipcRenderer.invoke(BACKUP_CHANNELS.setSession, record);
+      return { ok: isRecord(result) && result.ok === true };
+    } catch {
+      return { ok: false };
+    }
+  },
+});
+
 const dksApi: DksPreloadApi = Object.freeze({
   platform: typeof process === 'undefined' ? 'unknown' : process.platform,
   appVersion: getAppVersion(),
   local: localApi,
   diagnostics: diagnosticsApi,
+  backup: backupApi,
   notifications: notificationApi,
   updater: updaterApi,
   openExternal: async (url: string): Promise<boolean> => {

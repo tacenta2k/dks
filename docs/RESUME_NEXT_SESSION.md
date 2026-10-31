@@ -31,6 +31,15 @@ time of testing. Re-verify on the current machine before relying on them.
 - No automatic backups: no Supabase Storage backup bucket, no backup-copy
   feature, no "Backup Now" button, no scheduled or automatic local
   CSV/JSON/Excel backup files.
+  **Partly superseded 2026-10-31 — cloud backup Phase 1.** An encrypted,
+  Admin-only cloud backup of the local SQLite cache now exists: main-process
+  `better-sqlite3` snapshot, AES-256-GCM `DKSBK1` envelope, key wrapped by
+  `safeStorage`, uploaded to a **private** Cloudflare R2 bucket (`dks-backups`)
+  through a Cloudflare Worker that verifies the Supabase JWT and looks the role
+  up in Postgres. Supabase Storage is still untouched, no CSV/XLSX/JSON backup
+  file is ever written, and restore/delete are still absent (they appear
+  disabled in the UI). See `HANDOFF.md` §"Privacy and file handling" for the
+  full exception and `cloudflare-backup/README.md` for the deployment.
 - Keep only explicit, user-initiated CSV/XLSX import/export and Print/PDF
   reports, restricted to Admin.
 - Enforce Admin/Office boundaries with RLS and server-side functions, and
@@ -187,12 +196,21 @@ For Date-type columns (`date_start`, `date_expiry`):
   date_start, date_expiry, dropdown, checkbox, notes.
 
 ### F4 — Confirm no backup features remain
-Search for `backup`, `backups`, `dks-backups`, `storage.buckets`,
-`storage.objects`, `Backup Now`, `DKS_Backups`.
+**Status 2026-10-31: superseded by cloud backup Phase 1.** Do NOT run this sweep
+as written — the encrypted cloud backup described in §2 is intended, and its
+tests assert boundaries rather than absence.
 
-Remove real backup implementations, storage policies, scheduled jobs and UI.
-Do not delete tests or documentation whose purpose is to assert that backup
-functionality is absent.
+Still worth searching for: `storage.buckets`, `storage.objects`, `DKS_Backups`,
+`service_role`, `SUPABASE_SERVICE_ROLE`, `sb_secret_`. Those must stay absent —
+backups live in Cloudflare R2 behind the Worker, and no R2 or service-role
+credential may ever ship inside the app.
+
+The absence suite `tests/backup-removal.test.ts` was replaced by
+`tests/cloud-backup-security.test.ts`. The remaining suites are
+`tests/backup-envelope.test.ts`, `tests/backup-snapshot.test.ts`,
+`tests/backup-triggers.test.ts`, `tests/backup-offline-queue.test.ts`,
+`tests/backup-ipc.test.ts`, `tests/backup-worker.test.ts` and
+`tests/backup-settings-ui.test.tsx`.
 
 ---
 

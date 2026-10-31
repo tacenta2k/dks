@@ -35,7 +35,10 @@ Round-3 user overrides (latest decisions — these win over anything older):
   `docs/FIXES_UI.md`) are never edited.**
 
 Locked decisions that resolve conflicts (later decisions win):
-- No backups of any kind.
+- No backups of any kind. *(Superseded 2026-10-31 for the encrypted cloud
+  backup only — Admin-only SQLite snapshot to private Cloudflare R2 via the
+  Worker. Still no Supabase Storage bucket, no CSV/JSON/Excel backup files, no
+  restore, no delete. See `HANDOFF.md` §"Privacy and file handling".)*
 - No passport-format validation (plain text; non-blocking duplicate warning only).
 - No hard-coded Category / Visa Type / Notes / Country columns; no "Load Visa Template".
 - No Actions column in the final UI (row ops move to right-click menus / context).
@@ -302,7 +305,10 @@ was exercised by the agent — the owner must confirm all three on Windows.
 | PKG-05 | task / gate | Every phase: `npm rebuild better-sqlite3 && npm test && npm run typecheck && npm run build` green before commit. | Verification | IMPLEMENTED_AWAITING_CONFIRMATION |
 | PKG-06 | HANDOFF | Re-test packaged exe: RLS, pending sync, installer, and user workflows; finalize README release steps (user performs releases). | Verification | NOT_STARTED (USER-ONLY — needs a Windows build and the real accounts) |
 | PKG-07 | FIXES_UI 15 | Full UI verification checklist (Global / Visa Sheet / Dashboard / Recycle Bin / Audit Log / Settings / Safety). | Verification | NOT_STARTED (USER-ONLY — visual check on a real PC) |
-| PKG-08 | RESUME F4 | No backup features remain (search backup/dks-backups/storage/Backup Now); keep absence-asserting tests/docs. | Functional | IMPLEMENTED_AWAITING_CONFIRMATION |
+| PKG-08 | RESUME F4 | No backup features remain — **superseded 2026-10-31 by cloud backup Phase 1**; the absence sweep would delete approved work. Boundary assertions now live in `tests/cloud-backup-security.test.ts`. | Functional | SUPERSEDED (see CBKP-01) |
+| CBKP-01 | owner / cloud backup Phase 1 | Deploy the Worker: Cloudflare account, private R2 bucket `dks-backups`, `wrangler login`, `wrangler deploy`, secrets `SUPABASE_URL` + `SUPABASE_ANON_KEY`, paste the Worker URL into Settings → Backup & Recovery, run the recovery-key wizard, run the test-restore drill. Retention cron stays **dry-run** until `RETENTION_MODE=enforce` is set. Steps: `cloudflare-backup/README.md`. | Cloud | NOT_STARTED (USER-ONLY — needs the owner's Cloudflare account) |
+| CBKP-02 | cloud backup PR2 | Delete: one backup per month/year, Admin-only, with the email-OTP step-up hook already reserved in `cloudflare-backup/src/routes.ts` (`STEP_UP_REQUIRED`). | Functional | NOT_STARTED (out of Phase 1) |
+| CBKP-03 | cloud backup PR3 | Restore: replace-restore into Supabase from a decrypted snapshot; never a live edit path. | Functional | NOT_STARTED (out of Phase 1) |
 
 ---
 

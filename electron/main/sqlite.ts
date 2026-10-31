@@ -244,6 +244,36 @@ export interface OutboxSummary {
   terminalCount: number;
 }
 
+/**
+ * Aggregate digest of the tables a backup covers. Two fingerprints compare
+ * equal exactly when none of these six aggregates moved. Contains no row data.
+ */
+export interface BackupFingerprint {
+  entriesCount: number;
+  entriesMaxUpdatedAt: string | null;
+  entriesMaxId: string | null;
+  /** Every update increments `version`, so this moves even within one millisecond. */
+  entriesVersionSum: number;
+  /** Soft delete and restore both move this. */
+  entriesDeletedSum: number;
+  columnsCount: number;
+  columnsMaxUpdatedAt: string | null;
+  columnsDeletedSum: number;
+  settingsCount: number;
+  settingsMaxUpdatedAt: string | null;
+}
+
+/** Row counts stored as backup metadata (and shown in the Settings history). */
+export interface BackupRecordCounts {
+  entries: number;
+  entriesActive: number;
+  entriesDeleted: number;
+  columns: number;
+  columnsDeleted: number;
+  settings: number;
+  auditLog: number;
+}
+
 export interface QueuedErrorReportRecord {
   id: number;
   fingerprint: string;
@@ -455,6 +485,41 @@ const MIGRATIONS: readonly string[] = [
 ];
 
 export const SQLITE_SCHEMA_VERSION = MIGRATIONS.length;
+
+/**
+ * The CREATE-only subset of the migrations.
+ *
+ * Migration 2 (`ALTER TABLE notifications ADD COLUMN dismissed`) is NOT in this
+ * list — an ALTER is not idempotent, so it must stay version-gated.
+ *
+ * Cloud backup (PR1) ships point-in-time snapshot copies with the operational
+ * tables removed (`outbox`, `sync_meta`, `error_report_*`). A restored copy
+ * therefore has tables missing while `schema_migrations` still reads the latest
+ * version, so the version-gated loop alone would NOT recreate them and the copy
+ * would open broken. `applyMigrations()` re-runs these statements on every open
+ * to guarantee a missing base table is always recreated.
+ */
+const BASE_SCHEMA_STATEMENTS: readonly string[] = [MIGRATIONS[0], MIGRATIONS[2], MIGRATIONS[3]];
+
+/**
+ * Tables a backup snapshot copy must never carry.
+ *
+ *  - `outbox`              unpushed local changes (sync queue)
+ *  - `sync_meta`           install/session nonce, sync status, backup bookkeeping
+ *  - `error_report_queue`  diagnostics queue
+ *  - `error_report_dedupe` diagnostics cooldown
+ *
+ * These are dropped in the SNAPSHOT COPY ONLY. The live database is never
+ * modified, and `BASE_SCHEMA_STATEMENTS` recreates them on the next open of any
+ * copy. Supabase auth sessions are not stored in SQLite at all — they live in
+ * the Chromium session storages — so there is no auth table to drop here.
+ */
+export const SNAPSHOT_EXCLUDED_TABLES: readonly string[] = [
+  'outbox',
+  'sync_meta',
+  'error_report_queue',
+  'error_report_dedupe',
+];
 
 function tryElectronUserDataPath(): string | null {
   try {
@@ -722,6 +787,21 @@ export class SqliteStore {
           .run(version, this.now());
       });
       apply();
+    }
+
+    // Runs on EVERY open, including a database already at the latest version.
+    // Cloud-backup snapshot copies legitimately lack the operational tables
+    // listed in SNAPSHOT_EXCLUDED_TABLES; this is what makes such a copy open
+    // cleanly again instead of failing on the first outbox/sync_meta read.
+    // Every statement here is `CREATE ... IF NOT EXISTS`, so this is a no-op
+    // for an intact database.
+    this.ensureBaseSchema();
+  }
+
+  /** Recreate any missing base table. Never runs the non-idempotent ALTER. */
+  private ensureBaseSchema(): void {
+    for (const statement of BASE_SCHEMA_STATEMENTS) {
+      this.database.exec(statement);
     }
   }
 
@@ -2316,6 +2396,145 @@ export class SqliteStore {
   public clearErrorReportQueue(): void {
     this.ensureOpen();
     this.database.prepare('DELETE FROM error_report_queue').run();
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cloud backup (PR1): snapshot, change fingerprint and backup bookkeeping.
+  //
+  // Everything here operates on the LIVE database read-only, except
+  // `createSnapshotCopy`, which writes only to the caller-supplied destination
+  // path. The live file is never copied with `fs.copyFile` — a plain copy of a
+  // WAL database can be torn mid-write.
+  // ---------------------------------------------------------------------------
+
+  /** Absolute path of the live database file (`:memory:` in tests). */
+  public getDatabasePath(): string {
+    return this.filename;
+  }
+
+  /**
+   * Cheap SQL digest used to decide whether a backup is worth uploading.
+   *
+   * Deliberately aggregate-only: counts, maxima and sums, never row contents,
+   * so the value is deterministic and contains no customer data.
+   *
+   * The brief specified `count + max(updated_at) + max(id)`. Three cheap sums
+   * were added because the maxima alone are not enough at the resolution DKS
+   * actually stores: two edits inside the same millisecond leave the count, the
+   * maximum timestamp and the maximum id untouched, so a real change would
+   * never be backed up. `sum(version)` (every update increments it),
+   * `sum(deleted)` (soft delete and restore) and the column/settings counts
+   * close that hole without ever reading a row.
+   */
+  public computeBackupFingerprint(): BackupFingerprint {
+    this.ensureOpen();
+    const entries = this.database.prepare(`
+      SELECT COUNT(*) AS count,
+             MAX(updated_at) AS maxUpdatedAt,
+             MAX(id) AS maxId,
+             COALESCE(SUM(version), 0) AS versionSum,
+             COALESCE(SUM(deleted), 0) AS deletedSum
+        FROM entries
+    `).get() as {
+      count?: number; maxUpdatedAt?: string | null; maxId?: string | null;
+      versionSum?: number; deletedSum?: number;
+    } | undefined;
+    const columns = this.database.prepare(`
+      SELECT COUNT(*) AS count,
+             MAX(updated_at) AS maxUpdatedAt,
+             COALESCE(SUM(deleted), 0) AS deletedSum
+        FROM columns
+    `).get() as { count?: number; maxUpdatedAt?: string | null; deletedSum?: number } | undefined;
+    const settings = this.database.prepare(`
+      SELECT COUNT(*) AS count, MAX(updated_at) AS maxUpdatedAt FROM local_settings
+    `).get() as { count?: number; maxUpdatedAt?: string | null } | undefined;
+
+    return {
+      entriesCount: Number(entries?.count ?? 0),
+      entriesMaxUpdatedAt: entries?.maxUpdatedAt ?? null,
+      entriesMaxId: entries?.maxId ?? null,
+      entriesVersionSum: Number(entries?.versionSum ?? 0),
+      entriesDeletedSum: Number(entries?.deletedSum ?? 0),
+      columnsCount: Number(columns?.count ?? 0),
+      columnsMaxUpdatedAt: columns?.maxUpdatedAt ?? null,
+      columnsDeletedSum: Number(columns?.deletedSum ?? 0),
+      settingsCount: Number(settings?.count ?? 0),
+      settingsMaxUpdatedAt: settings?.maxUpdatedAt ?? null,
+    };
+  }
+
+  /** Row counts recorded as backup metadata (aggregate only, no row data). */
+  public getBackupRecordCounts(): BackupRecordCounts {
+    this.ensureOpen();
+    const scalar = (sql: string): number => {
+      const row = this.database.prepare(sql).get() as { value?: number } | undefined;
+      return Number(row?.value ?? 0);
+    };
+    return {
+      entries: scalar('SELECT COUNT(*) AS value FROM entries'),
+      entriesActive: scalar('SELECT COUNT(*) AS value FROM entries WHERE deleted = 0'),
+      entriesDeleted: scalar('SELECT COUNT(*) AS value FROM entries WHERE deleted <> 0'),
+      columns: scalar('SELECT COUNT(*) AS value FROM columns'),
+      columnsDeleted: scalar('SELECT COUNT(*) AS value FROM columns WHERE deleted <> 0'),
+      settings: scalar('SELECT COUNT(*) AS value FROM local_settings'),
+      auditLog: scalar('SELECT COUNT(*) AS value FROM audit_log'),
+    };
+  }
+
+  /**
+   * Write a consistent point-in-time copy of this database to `destination`,
+   * then strip SNAPSHOT_EXCLUDED_TABLES from the COPY.
+   *
+   * Uses better-sqlite3's online `backup()` (which walks the pager and is safe
+   * against concurrent WAL writers) and falls back to `VACUUM INTO` when the
+   * runtime does not provide it. The live database is never modified.
+   */
+  public async createSnapshotCopy(destination: string): Promise<BackupRecordCounts> {
+    this.ensureOpen();
+    const counts = this.getBackupRecordCounts();
+
+    // Flush the WAL so the copy cannot lag behind committed writes.
+    try {
+      this.database.pragma('wal_checkpoint(PASSIVE)');
+    } catch {
+      // In-memory databases reject checkpoints; their state is still durable
+      // for the connection doing the backup.
+    }
+
+    if (typeof this.database.backup === 'function') {
+      await this.database.backup(destination);
+    } else {
+      this.database.pragma(`vacuum_into('${destination.replace(/'/g, "''")}')`);
+    }
+
+    const copy = new BetterSqlite3(destination);
+    try {
+      for (const table of SNAPSHOT_EXCLUDED_TABLES) {
+        // Names come from a module constant, never from input.
+        copy.exec(`DROP TABLE IF EXISTS ${table}`);
+      }
+      // Compact the holes left by the dropped tables so the upload is small.
+      copy.exec('VACUUM');
+    } finally {
+      copy.close();
+    }
+
+    return counts;
+  }
+
+  /** Machine-local backup bookkeeping. Lives in sync_meta, never in a snapshot. */
+  public getBackupMeta(key: string): string | null {
+    this.ensureOpen();
+    const row = this.database.prepare('SELECT value FROM sync_meta WHERE key = ?')
+      .get(key) as { value?: string | null } | undefined;
+    return typeof row?.value === 'string' && row.value.length > 0 ? row.value : null;
+  }
+
+  public setBackupMeta(key: string, value: string): void {
+    this.ensureOpen();
+    this.database.prepare(
+      'INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value',
+    ).run(key, value);
   }
 
   public async flush(): Promise<void> {

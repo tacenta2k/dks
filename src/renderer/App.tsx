@@ -1168,6 +1168,29 @@ export function App({
     workspaceSettings?.errorReportingEnabled,
   ]);
 
+  // Cloud backup: hand the main process the current signed-in session so it can
+  // authorise Worker calls. The token is refreshed by Supabase in the renderer,
+  // so this re-runs on every refresh and clears on sign-out. The main process
+  // never stores it, and the Worker verifies the signature itself.
+  useEffect(() => {
+    const backupBridge = typeof window !== 'undefined' ? window.dks?.backup : undefined;
+    if (!backupBridge) {
+      return undefined;
+    }
+    const role = profile?.role === 'admin' || profile?.role === 'office' ? profile.role : null;
+    const accessToken = authStatus === 'authenticated' && role !== null
+      ? (session?.access_token ?? null)
+      : null;
+
+    if (!role || !accessToken) {
+      void backupBridge.setSession(null);
+      return undefined;
+    }
+
+    void backupBridge.setSession({ role, accessToken });
+    return undefined;
+  }, [authStatus, profile?.role, session?.access_token]);
+
   if (!isWorkspaceVisible) {
     // A password-authenticated Office session with no approval yet gets the
     // dedicated gate — never the AuthScreen (that would let it re-sign-in in
