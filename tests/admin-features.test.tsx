@@ -281,7 +281,12 @@ describe('admin renderer integration', () => {
     await waitFor(async () => {
       expect((await repository.getRows()).find((candidate) => candidate.id === row.id)).toBeUndefined();
     });
-  }, 15_000);
+    // Two lazy chunks load here (the shell's Recycle Bin view, then the panel
+    // that renders the row actions). On a cold Windows runner that pair
+    // occasionally exceeded 15 s and the failure said only "Test timed out";
+    // the audit-log test below already uses 30 s for a single lazy view.
+    // Nothing is skipped and no assertion changed.
+  }, 30_000);
 
   it('lists repository audit history for administrators', async () => {
     const repository = await seededRepository();
