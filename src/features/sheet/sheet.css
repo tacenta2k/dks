@@ -380,10 +380,17 @@
   background: var(--color-primary-soft);
 }
 
-/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. */
+/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. The horizontal padding
+   is trimmed (same !important pattern as .sheet-actions-cell) so Quartz's
+   default 16px-per-side cell padding cannot squeeze multi-digit numbers
+   (10, 100, 1000…) down to their first digit. Tabular numerals keep every
+   digit the same width in both themes. */
 .sheet-row-number-cell {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
   color: var(--color-text-subtle);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   text-align: center;
 }
 

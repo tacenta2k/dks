@@ -267,9 +267,21 @@ export function buildGridColumns(
     sortable: false,
     filter: false,
     editable: false,
-    width: 40,
-    minWidth: 40,
-    maxWidth: 40,
+    // The valueGetter returns the FULL number (10, 100, 1000, …) — the old
+    // locked 40px width clipped it to its first digit: AG Grid Quartz pads
+    // cells with `--ag-cell-horizontal-padding` (2 × 8px grid size = 16px
+    // per side), leaving ~8px of content box in a 40px column, so rows
+    // 10–19 showed "1", 20–29 showed "2", etc. The gutter is now wide
+    // enough for 4+ digits at its 11px font, the cell's own padding is
+    // trimmed in CSS (sheet-row-number-cell), and there is deliberately NO
+    // maxWidth so nothing re-caps the column (and the user can widen it).
+    width: 56,
+    minWidth: 48,
+    valueFormatter: (params) => (
+      params.value === null || params.value === undefined || params.value === ''
+        ? ''
+        : String(params.value)
+    ),
     cellClass: 'sheet-row-number-cell',
   };
 
