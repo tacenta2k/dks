@@ -24,6 +24,13 @@ import { seedFixtureColumns } from './fixtures/sheet-columns';
  * the renderer in-flight guard was the only dedupe, and any repeated commit
  * that arrived after it settled minted a fresh UUID + outbox create in the
  * main process. These tests pin every layer of the fix with synthetic data.
+ *
+ * SCOPE LIMIT (found the hard way): the "sheet draft flow" cases below use
+ * the jsdom accessible-table surface, NOT the real AG Grid, so they cannot
+ * see grid editor/handoff behaviour. The actual owner-visible failure was
+ * a real-grid loop (focus handoff reopening an editor seeded with the
+ * just-committed name); these tests stayed green while it was live. The
+ * real-grid regression coverage is tests/enter-real-grid-duplicate.test.tsx.
  */
 describe('Enter creates exactly one row (Bug 2) — key + identity helpers', () => {
   it('treats held-key repeats and IME composition as non-commits', () => {

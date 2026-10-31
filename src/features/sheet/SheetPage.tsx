@@ -72,6 +72,7 @@ import {
   columnOrderFromMovedEvent,
   createTabToNextCell,
   draftFocusTarget,
+  isDraftSessionStartRecommit,
   isMeaningfulDraftValue,
   isRepeatOrComposingKey,
   rowIndexOfRowId,
@@ -550,6 +551,15 @@ export function SheetPage({
     () => groupable.find((column) => column.id === groupByColumnId) ?? null,
     [groupable, groupByColumnId],
   );
+  // Bug 2 redux: AG Grid MUTATES the draft row's data object when an editor
+  // commits into it (plain `field:` columns), so after a draft create the
+  // previous draft object still holds the committed name. Bumping this
+  // generation after every successful create guarantees the next render
+  // supplies a genuinely BLANK draft object — independent of whether the
+  // columns identity happened to change during the refresh — so no later
+  // editor can be seeded from the mutated object.
+  const [draftGeneration, setDraftGeneration] = useState(0);
+
   // SHEET-11 / R3 user decision: ONE blank draft row, placed immediately after
   // the last saved record (never pinned to the bottom of the viewport). The
   // first meaningful committed value turns it into a real record and a fresh
@@ -564,7 +574,7 @@ export function SheetPage({
       data[column.id] = null;
     });
     return data;
-  }, [activeColumns]);
+  }, [activeColumns, draftGeneration]);
 
   const displayRows = useMemo(() => {
     const visibleRows = builtRows.rows.filter((row) => matchingIds.has(row.__rowId));
@@ -628,11 +638,45 @@ export function SheetPage({
       rowIndex = draftIndex;
       pendingDraftFocusRef.current = { rowId, columnId, draftColumnId: target.draftColumnId };
     }
+    // Bug 2 redux — do not open the continuous-entry editor against a
+    // STALE or POLLUTED draft node. The handoff runs before the refreshed
+    // rowData necessarily reaches AG Grid: the grid can still hold the
+    // pre-refresh draft object whose fields AG mutated with the value just
+    // committed. Starting an editor there seeds it with that name; AG then
+    // swaps in the fresh blank draft, and stopping the editor re-commits
+    // the name as a "change" — the one-Enter duplicate loop. Wait (retry
+    // on the next frame / model update) until the grid's draft node IS
+    // the current blank draft object, and never open a handoff editor on
+    // a draft cell that already holds a value.
+    if (rowId === DRAFT_ROW_ID) {
+      if (renderedRowsRef.current !== latestRowsRef.current) {
+        return false; // the refresh has not been rendered yet
+      }
+      const currentDraft = displayRowsRef.current.find((row) => row.__rowId === DRAFT_ROW_ID);
+      const draftNode = api.getRowNode(DRAFT_ROW_ID) as
+        | { data?: SheetGridRendererData }
+        | null
+        | undefined;
+      if (!currentDraft || !draftNode || draftNode.data !== currentDraft) {
+        return false; // grid still holds the pre-refresh draft object
+      }
+      if (isMeaningfulDraftValue(draftNode.data?.[columnId])) {
+        // The current draft itself is polluted (a leaked committed value):
+        // force a blank draft and drop this handoff instead of opening an
+        // editor that could re-commit it.
+        setDraftGeneration((generation) => generation + 1);
+        pendingDraftFocusRef.current = null;
+        return true;
+      }
+    }
     try {
-      // Close the transient editor the Tab gesture opened on the draft row
-      // before the refreshed data arrived — one focused editor only.
+      // Close the transient editor the Tab/Enter gesture opened on the
+      // draft row before the refreshed data arrived — one focused editor
+      // only. CANCEL it: committing that transient editor is exactly how
+      // a pre-held value gets written into the fresh draft and counted as
+      // a new edit (the duplicate loop's commit leg).
       if (api.getEditingCells().length > 0) {
-        api.stopEditing();
+        api.stopEditing(true);
       }
       api.setFocusedCell(rowIndex, columnId);
       api.startEditingCell({ rowIndex, colKey: columnId });
@@ -910,6 +954,13 @@ export function SheetPage({
    */
   const draftCommitIntentRef = useRef<'tab' | 'enter' | null>(null);
   const draftCreateInFlightRef = useRef(false);
+  // Bug 2 redux: the value the CURRENT draft editing session STARTED with,
+  // captured from the row node at cellEditingStarted. A draft commit that
+  // merely re-applies this (meaningful) start value entered nothing during
+  // the session — it is the handoff/editor loop re-committing a leaked
+  // value, and handleCellValueChanged ignores it (see
+  // isDraftSessionStartRecommit). Null when no draft session is open.
+  const draftSessionStartRef = useRef<{ field: string; value: unknown } | null>(null);
   // Bug 2: one stable client identity per draft-row commit. It is reused by
   // every retry of that commit and rotates only when a NEW draft editing
   // session begins after a successful create (see DraftCreateIdentityBox).
@@ -936,6 +987,16 @@ export function SheetPage({
   ) => {
     if (event.data?.__rowId === DRAFT_ROW_ID) {
       draftCreateIdentityBox.prepareForNextDraftEdit();
+      // Bug 2 redux: remember what THIS draft session started with. If the
+      // session opened on a polluted draft (a leaked committed value), the
+      // snapshot holds that value and a later commit of the identical value
+      // is recognised as a no-input re-commit, not a new record.
+      const field = String(event.column?.getColId() ?? '');
+      draftSessionStartRef.current = field
+        ? { field, value: event.data?.[field] ?? null }
+        : null;
+    } else {
+      draftSessionStartRef.current = null;
     }
   }, [draftCreateIdentityBox]);
 
@@ -964,6 +1025,30 @@ export function SheetPage({
       const identity = draftCreateIdentityBox.ensure();
       const created = await repository.createRow({ [field]: value }, null, identity);
       draftCreateIdentityBox.markConsumed();
+      // Bug 2 redux: retire the draft object AG mutated with this value so
+      // the next render's draft is blank by construction, and CANCEL any
+      // transient editor this same Enter/Tab gesture opened on the draft
+      // row BEFORE the refreshed rowData swaps draft objects underneath
+      // it. Committing (or letting the swap stop) that transient editor
+      // would write its pre-held value into the fresh blank draft and
+      // fire a second cellValueChanged — a duplicate record from one
+      // Enter. Only the draft row's editor is cancelled; an editor the
+      // user meanwhile opened on a real record is left untouched.
+      setDraftGeneration((generation) => generation + 1);
+      const apiBeforeRefresh = gridApiRef.current;
+      if (apiBeforeRefresh) {
+        try {
+          const draftIndex = rowIndexOfRowId(apiBeforeRefresh, DRAFT_ROW_ID);
+          if (
+            draftIndex !== null
+            && apiBeforeRefresh.getEditingCells().some((cell) => cell.rowIndex === draftIndex)
+          ) {
+            apiBeforeRefresh.stopEditing(true);
+          }
+        } catch {
+          // The grid can be torn down while the create is in flight.
+        }
+      }
       await refresh({ quiet: true });
       setStatusMessage('Added a new record.');
       const api = gridApiRef.current;
@@ -986,6 +1071,7 @@ export function SheetPage({
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
     } finally {
       draftCreateInFlightRef.current = false;
+      draftSessionStartRef.current = null;
     }
   }, [repository, refresh, editableColumnIds, draftCreateIdentityBox, flushPendingDraftFocus]);
 
@@ -997,6 +1083,25 @@ export function SheetPage({
       return;
     }
     if (event.data.__rowId === DRAFT_ROW_ID) {
+      // Bug 2 redux — the commit leg of the one-Enter duplicate loop: an
+      // editor that STARTED this draft session holding a leaked value and
+      // commits that identical value back entered nothing; AG only fires
+      // here because the draft node's data was swapped to blank underneath
+      // it, making the pre-held value look "changed". Never create from
+      // such a re-commit; force a blank draft so the leaked value AG just
+      // wrote into the draft object does not linger in the cell either.
+      const sessionStart = draftSessionStartRef.current;
+      if (
+        sessionStart
+        && sessionStart.field === field
+        && isDraftSessionStartRecommit(sessionStart.value, event.newValue)
+      ) {
+        draftSessionStartRef.current = null;
+        draftCommitIntentRef.current = null;
+        pendingDraftFocusRef.current = null;
+        setDraftGeneration((generation) => generation + 1);
+        return;
+      }
       await createFromDraft(field, event.newValue);
       return;
     }

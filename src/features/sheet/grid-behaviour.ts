@@ -39,6 +39,14 @@ export const DRAFT_ROW_ID = '__draft';
  *    insert. The identity rotates only when a NEW draft editing session
  *    begins after a successful create — typing the same name again in the
  *    fresh draft row is a legitimate new record with a fresh identity.
+ *
+ *    NOTE (Bug 2 redux): identity/repeat handling alone was NOT sufficient
+ *    — the owner's duplicate storm was a handoff/editor loop that minted a
+ *    legitimately-rotated identity per cycle. The loop itself is stopped
+ *    in SheetPage (fresh-draft generation + model-freshness gate on the
+ *    handoff + cancelling transient draft editors) and by
+ *    `isDraftSessionStartRecommit` below; this box remains the retry
+ *    dedupe layer underneath, not the loop fix.
  * ------------------------------------------------------------------------ */
 
 /** Structural subset of KeyboardEvent / React.KeyboardEvent we need. */
@@ -143,6 +151,59 @@ export function isMeaningfulDraftValue(value: unknown): boolean {
     return true;
   }
   return true;
+}
+
+/* --------------------------------------------------------------------------
+ * Bug 2 redux — the Enter-duplicate LOOP (reproduced on the real grid in
+ * tests/enter-single-grid-repro.test.tsx; the 8e20826 fix did not stop it).
+ *
+ * The loop: a draft commit's focus handoff can reopen an editor on the
+ * draft row BEFORE AG Grid applies the refreshed rowData. That editor is
+ * seeded from the draft data object AG just mutated with the committed
+ * name, so it "starts" already holding the previous record's value. When
+ * AG then swaps the draft node's data for a fresh blank draft object and
+ * the editor is stopped (handoff retry, focus loss), AG compares the
+ * editor value against the node's CURRENT value (blank) — so the stop
+ * looks like a brand-new edit and fires cellValueChanged again with the
+ * same name, creating another row.
+ *
+ * The session-start snapshot breaks the commit leg of that loop by
+ * definition: a draft-row create is legitimate only when the value was
+ * ENTERED during the editing session that is committing. If the editor
+ * started with a meaningful value and commits exactly that same value,
+ * nothing was typed in this session — it is a re-commit of a pre-held
+ * (leaked) value and must never create a record. Typing the same name
+ * into a BLANK draft (session start = empty) still creates, as does
+ * editing the opened value to something different.
+ * ------------------------------------------------------------------------ */
+
+/** Scalar equality for cell values (editors surface strings; data may hold numbers). */
+export function draftValuesEqual(left: unknown, right: unknown): boolean {
+  const a = left === undefined ? null : left;
+  const b = right === undefined ? null : right;
+  if (Object.is(a, b)) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  const scalar = (value: unknown) => (
+    typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+  );
+  return scalar(a) && scalar(b) && String(a) === String(b);
+}
+
+/**
+ * True when a draft commit merely re-applies the meaningful value the
+ * editor STARTED this session with (i.e. nothing was entered — the value
+ * leaked in from the previous commit). Such a commit must not create.
+ */
+export function isDraftSessionStartRecommit(
+  sessionStartValue: unknown,
+  committedValue: unknown,
+): boolean {
+  return isMeaningfulDraftValue(sessionStartValue)
+    && draftValuesEqual(sessionStartValue, committedValue);
 }
 
 /** R2-07: the grid theme class follows the app theme (no white dark panels). */
