@@ -200,10 +200,12 @@ export function createBackupIpcHandlers(dependencies: BackupIpcDependencies): Ba
     },
 
     /**
-     * Session credential push. Not admin-gated on purpose: an approved Office
-     * session may also upload (the Worker enforces the Office approval check),
-     * and refusing here would silently disable backups on Office PCs. Passing
-     * `null` clears the credential on sign-out.
+     * Session credential push — **Admin only** in v1.
+     *
+     * Cloud backup is an Admin feature end to end: an Office session is refused
+     * here, again by the service, and again by the Worker with
+     * `OFFICE_NOT_ALLOWED`. Passing `null` clears the credential on sign-out,
+     * which is always allowed so a signed-out PC cannot keep uploading.
      */
     [BACKUP_IPC_CHANNELS.setSession]: (payload: unknown): { ok: boolean } => {
       if (payload === null || payload === undefined) {
@@ -211,9 +213,35 @@ export function createBackupIpcHandlers(dependencies: BackupIpcDependencies): Ba
         dependencies.service.setSession(null);
         return { ok: true };
       }
-      const role = requireSignedIn(payload, getClearance());
-      const accepted = dependencies.service.setSession({ ...(payload as Record<string, unknown>), role });
+      requireAdmin(payload, getClearance(), getRole());
+      const accepted = dependencies.service.setSession({
+        ...(payload as Record<string, unknown>),
+        role: 'admin',
+      });
       return { ok: accepted };
+    },
+
+    /**
+     * Push the designated backup PC as read from Supabase `public.settings`.
+     *
+     * A scheduling hint only — the Worker re-reads the authoritative row on
+     * every upload, so pushing a designation naming this PC cannot make a
+     * non-designated machine's uploads succeed.
+     */
+    [BACKUP_IPC_CHANNELS.setDesignation]: (payload: unknown): BackupState => {
+      requireAdmin(payload, getClearance(), getRole());
+      const record = (payload ?? {}) as Record<string, unknown>;
+      return dependencies.service.setDesignation(record.designation ?? null);
+    },
+
+    /** Rename this PC. The label is administrator-chosen and must carry no PII. */
+    [BACKUP_IPC_CHANNELS.setDeviceLabel]: (payload: unknown): BackupState => {
+      requireAdmin(payload, getClearance(), getRole());
+      const record = (payload ?? {}) as Record<string, unknown>;
+      if (typeof record.label !== 'string') {
+        throw new Error('a device label is required');
+      }
+      return dependencies.service.setDeviceLabel(record.label);
     },
   });
 }

@@ -14,12 +14,18 @@ export const BACKUP_IPC_CHANNELS = Object.freeze({
   testDrill: 'dks:backup:test-drill',
   setupKey: 'dks:backup:setup-key',
   healthCheck: 'dks:backup:health-check',
+  /** The designated backup PC, as read from Supabase `public.settings`. */
+  setDesignation: 'dks:backup:set-designation',
+  /** Rename this PC (safe label only, never a hostname or user name). */
+  setDeviceLabel: 'dks:backup:set-device-label',
   /**
    * Not in the original channel list, and required: the Supabase JWT lives in
    * the renderer's session storage, so main cannot authorise a Worker call
    * without it. Same trust model as `dks:local:set-session-clearance` —
    * convenience for the honest renderer only. The Worker verifies the signed
    * JWT and looks the role up itself, so a hostile renderer gains nothing.
+   * Admin only: an Office credential is refused here, in the service, and by
+   * the Worker.
    */
   setSession: 'dks:backup:set-session',
 } as const);
@@ -87,6 +93,26 @@ export interface BackupState {
    * local SQLite cache, not an authoritative Supabase read.
    */
   source: 'local-cache';
+  /**
+   * This PC's opaque random device id (16 random bytes, hex). Not derived from
+   * hostname, user name, MAC address, serial or any other identifier.
+   */
+  deviceId: string;
+  /** Safe human-readable label for this PC. */
+  deviceLabel: string;
+  /** True when this PC is the one designated to run automatic backups. */
+  designated: boolean;
+  /** The designated PC's id, or null when no PC is designated. */
+  designatedDeviceId: string | null;
+  /** The designated PC's label, for the "runs on another PC" message. */
+  designatedDeviceLabel: string | null;
+  /** When the designation was made, if Supabase recorded it. */
+  designatedAt: string | null;
+  /**
+   * True only when a full authorized pull has completed, walked every page, and
+   * no local mutation happened after it. Backup refuses to snapshot without it.
+   */
+  cacheComplete: boolean;
 }
 
 export interface BackupHistoryEntry {

@@ -324,12 +324,23 @@ export interface DksBackupPreloadApi {
   /**
    * Pushes the signed-in session so the main process can authorise Worker
    * calls. Pass `null` on sign-out. The Worker re-verifies this JWT itself.
+   * Admin only in v1 — an Office session is refused here and by the Worker.
    */
   readonly setSession: (input: {
     role: string;
     accessToken: string;
     workerUrl?: string;
   } | null) => Promise<{ ok: boolean }>;
+  /**
+   * Records which Admin PC is designated for automatic backup, as read from
+   * Supabase `public.settings`. Pass `null` when no PC is designated.
+   */
+  readonly setDesignation: (input: {
+    role: string;
+    designation: { deviceId: string; label: string; designatedAt?: string | null } | null;
+  }) => Promise<BackupState>;
+  /** Renames this PC. A safe label only — never a hostname or user name. */
+  readonly setDeviceLabel: (input: { role: string; label: string }) => Promise<BackupState>;
 }
 
 export interface DksPreloadApi {
@@ -384,6 +395,8 @@ const BACKUP_CHANNELS = {
   setupKey: 'dks:backup:setup-key',
   healthCheck: 'dks:backup:health-check',
   setSession: 'dks:backup:set-session',
+  setDesignation: 'dks:backup:set-designation',
+  setDeviceLabel: 'dks:backup:set-device-label',
 } as const;
 
 const LOCAL_CHANNELS = {
@@ -1139,6 +1152,34 @@ function validateAdminBackupInput(value: unknown): void {
   }
 }
 
+/** Opaque random device id: 16 random bytes, hex. Never a hostname or PII. */
+const DEVICE_ID_INPUT_PATTERN = /^[0-9a-f]{32}$/i;
+
+function validateBackupDesignationInput(value: unknown): void {
+  validateAdminBackupInput(value);
+  const input = value as Record<string, unknown>;
+  if (input.designation === null || input.designation === undefined) return;
+  const designation = requireRecord(input.designation, 'backup designation');
+  if (typeof designation.deviceId !== 'string' || !DEVICE_ID_INPUT_PATTERN.test(designation.deviceId)) {
+    throw new TypeError('designation.deviceId must be a 32-character hex device id');
+  }
+  if (typeof designation.label !== 'string' || designation.label.trim().length === 0) {
+    throw new TypeError('designation.label is required');
+  }
+  if (designation.designatedAt !== undefined && designation.designatedAt !== null
+    && (typeof designation.designatedAt !== 'string' || Number.isNaN(Date.parse(designation.designatedAt)))) {
+    throw new TypeError('designation.designatedAt must be an ISO timestamp');
+  }
+}
+
+function validateBackupDeviceLabelInput(value: unknown): void {
+  validateAdminBackupInput(value);
+  const input = value as Record<string, unknown>;
+  if (typeof input.label !== 'string' || input.label.trim().length === 0 || input.label.trim().length > 60) {
+    throw new TypeError('a device label of 1-60 characters is required');
+  }
+}
+
 function validateBackupListInput(value: unknown): void {
   validateAdminBackupInput(value);
   const input = value as Record<string, unknown>;
@@ -1222,8 +1263,10 @@ const backupApi: DksBackupPreloadApi = Object.freeze({
     try {
       const record = requireRecord(input, 'backup session');
       requireRole(record.role);
-      if (record.role !== 'admin' && record.role !== 'office') {
-        throw new TypeError('authenticated session role is required');
+      // Cloud backup is Admin only in v1. An Office session is refused at the
+      // preload boundary, again in main, and again by the Worker.
+      if (record.role !== 'admin') {
+        throw new TypeError('administrator role is required for cloud backup');
       }
       if (typeof record.accessToken !== 'string' || record.accessToken.trim().length === 0) {
         throw new TypeError('accessToken is required');
@@ -1237,6 +1280,13 @@ const backupApi: DksBackupPreloadApi = Object.freeze({
       return { ok: false };
     }
   },
+  setDesignation: (input: {
+    role: string;
+    designation: { deviceId: string; label: string; designatedAt?: string | null } | null;
+  }) =>
+    invokeBackup<BackupState>(BACKUP_CHANNELS.setDesignation, input, validateBackupDesignationInput),
+  setDeviceLabel: (input: { role: string; label: string }) =>
+    invokeBackup<BackupState>(BACKUP_CHANNELS.setDeviceLabel, input, validateBackupDeviceLabelInput),
 });
 
 const dksApi: DksPreloadApi = Object.freeze({

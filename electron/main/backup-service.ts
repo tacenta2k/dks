@@ -89,6 +89,7 @@ export interface BackupServiceOptions {
     | 'getBackupMeta'
     | 'setBackupMeta'
     | 'listOutbox'
+    | 'getSyncStatus'
   >;
   /** `app.getPath('userData')` — %APPDATA%\DKS on Windows. */
   userDataPath: string;
@@ -123,6 +124,17 @@ interface PersistedState {
   lastError: string | null;
   lastHealthOkAt: string | null;
   nextCheckAt: string | null;
+}
+
+/** Opaque random device id: 16 random bytes, hex. Never derived from PII. */
+const DEVICE_ID_PATTERN = /^[0-9a-f]{32}$/i;
+
+/** The designated backup PC, as recorded in Supabase `public.settings`. */
+export interface BackupDesignation {
+  deviceId: string;
+  /** Administrator-chosen label. Must carry no PII. */
+  label: string;
+  designatedAt: string | null;
 }
 
 const DEFAULT_STATE: PersistedState = {
@@ -192,6 +204,13 @@ export class BackupService {
   private lastHealthOk = false;
   private launchCheckDone = false;
   private autoLaunchCheck = true;
+  /** This PC's opaque random id, generated once and cached in memory. */
+  private deviceIdValue: string | null = null;
+  /**
+   * The designation as read from Supabase by the renderer. Decides whether THIS
+   * PC schedules backups; the Worker re-reads the authoritative row itself.
+   */
+  private designation: BackupDesignation | null = null;
 
   public constructor(options: BackupServiceOptions) {
     this.store = options.store;
@@ -252,6 +271,139 @@ export class BackupService {
     return this.readState().enabled;
   }
 
+  // ------------------------------------------------------- device identity
+
+  /**
+   * This PC's device id: 16 random bytes, hex, generated once and stored in
+   * `sync_meta`.
+   *
+   * Deliberately opaque and random — never derived from hostname, Windows user
+   * name, MAC address, hardware serial or email address. `sync_meta` is in
+   * `SNAPSHOT_EXCLUDED_TABLES`, so the id never enters a backup either.
+   */
+  public deviceId(): string {
+    if (this.deviceIdValue) return this.deviceIdValue;
+    let stored: string | null = null;
+    try {
+      stored = this.store.getBackupMeta('dks.backup.deviceId');
+    } catch {
+      stored = null;
+    }
+    if (stored && DEVICE_ID_PATTERN.test(stored)) {
+      this.deviceIdValue = stored.toLowerCase();
+      return this.deviceIdValue;
+    }
+    const generated = randomBytes(16).toString('hex');
+    try {
+      this.store.setBackupMeta('dks.backup.deviceId', generated);
+    } catch (error) {
+      this.logger.warn('[dks-backup] could not persist the device id', error);
+    }
+    this.deviceIdValue = generated;
+    return generated;
+  }
+
+  /**
+   * A safe label for this PC. Defaults to a short form of the random id; an
+   * administrator may replace it in Settings. It must never contain PII, and it
+   * is capped so it cannot become a metadata problem.
+   */
+  public deviceLabel(): string {
+    let custom: string | null = null;
+    try {
+      custom = this.store.getBackupMeta('dks.backup.deviceLabel');
+    } catch {
+      custom = null;
+    }
+    if (custom && custom.trim().length > 0) return custom.trim().slice(0, 60);
+    return `DKS-${this.deviceId().slice(0, 6).toUpperCase()}`;
+  }
+
+  public setDeviceLabel(label: string): BackupState {
+    const trimmed = typeof label === 'string' ? label.trim().slice(0, 60) : '';
+    try {
+      this.store.setBackupMeta('dks.backup.deviceLabel', trimmed);
+    } catch (error) {
+      this.logger.warn('[dks-backup] could not store the device label', error);
+    }
+    return this.getState();
+  }
+
+  // --------------------------------------------------------- designation
+
+  /**
+   * Record the designated backup PC as read from `public.settings` by the
+   * renderer (Admin-only writes there, by RLS).
+   *
+   * This local copy is a scheduling hint only. The Worker re-reads the same row
+   * on every upload with the caller's own JWT, so a second Admin PC cannot
+   * start its own backup lineage by pushing a designation of its own making —
+   * its uploads are refused with `DEVICE_NOT_DESIGNATED`.
+   */
+  public setDesignation(input: unknown): BackupState {
+    if (input === null || input === undefined) {
+      this.designation = null;
+      return this.getState();
+    }
+    if (typeof input !== 'object') return this.getState();
+    const record = input as { deviceId?: unknown; label?: unknown; designatedAt?: unknown };
+    const deviceId = typeof record.deviceId === 'string' ? record.deviceId.trim().toLowerCase() : '';
+    if (!DEVICE_ID_PATTERN.test(deviceId)) {
+      this.designation = null;
+      return this.getState();
+    }
+    this.designation = {
+      deviceId,
+      label: typeof record.label === 'string' ? record.label.trim().slice(0, 60) : '',
+      designatedAt: typeof record.designatedAt === 'string' ? record.designatedAt : null,
+    };
+    return this.getState();
+  }
+
+  public designationInfo(): BackupDesignation | null {
+    return this.designation;
+  }
+
+  /** True when this PC is the one designated to run automatic backups. */
+  public isDesignatedDevice(): boolean {
+    return this.designation !== null && this.designation.deviceId === this.deviceId();
+  }
+
+  // ------------------------------------------------- cache completeness
+
+  /**
+   * Evidence that the local cache is complete enough to be worth backing up.
+   *
+   * The main process never talks to Supabase; it reads what the renderer's sync
+   * engine reported over `dks:local:set-sync-status`. Three things must hold:
+   * a full authorized pull has completed, that pull walked every page, and no
+   * local mutation happened after it.
+   */
+  public cacheCompleteness(): { complete: boolean; reason: string } {
+    let sync: {
+      lastPullAt?: string | null;
+      lastPullComplete?: boolean;
+      lastLocalMutationAt?: string | null;
+    };
+    try {
+      sync = this.store.getSyncStatus();
+    } catch {
+      return { complete: false, reason: 'The local cache status could not be read' };
+    }
+    const lastPullAt = typeof sync.lastPullAt === 'string' ? sync.lastPullAt : null;
+    if (!lastPullAt) {
+      return { complete: false, reason: 'This PC has not completed a full sync of the local cache yet' };
+    }
+    if (sync.lastPullComplete !== true) {
+      return { complete: false, reason: 'The last sync did not read every page of the local cache' };
+    }
+    const mutatedAt = typeof sync.lastLocalMutationAt === 'string' ? sync.lastLocalMutationAt : null;
+    if (mutatedAt && mutatedAt > lastPullAt) {
+      return { complete: false, reason: 'The local cache changed after the last full sync' };
+    }
+    return { complete: true, reason: '' };
+  }
+
   public setEnabled(enabled: boolean): BackupState {
     this.patchState({ enabled });
     return this.getState();
@@ -296,6 +448,13 @@ export class BackupService {
       running: this.flight.running,
       keyId: this.currentKeyId(),
       source: BACKUP_SOURCE,
+      deviceId: this.deviceId(),
+      deviceLabel: this.deviceLabel(),
+      designated: this.isDesignatedDevice(),
+      designatedDeviceId: this.designation?.deviceId ?? null,
+      designatedDeviceLabel: this.designation?.label ?? null,
+      designatedAt: this.designation?.designatedAt ?? null,
+      cacheComplete: this.cacheCompleteness().complete,
     };
   }
 
@@ -466,6 +625,15 @@ export class BackupService {
     if (!credential) {
       return false;
     }
+    // v1 policy: cloud backup is Admin only. An Office credential is refused
+    // here as well as at the Worker, so no scheduled run can ever even be
+    // attempted under an Office session — approved or not.
+    if (credential.role !== 'admin') {
+      this.credential = null;
+      this.lastHealthOk = false;
+      this.logger.info('[dks-backup] cloud backup is Admin only; ignoring the pushed session');
+      return false;
+    }
     try {
       // A worker URL pushed with the session is admin configuration: persist it
       // so the scheduler and the Settings card read the same value.
@@ -503,6 +671,9 @@ export class BackupService {
       accessToken: this.credential.accessToken,
       ...(this.fetchImpl ? { fetchImpl: this.fetchImpl } : {}),
       appVersion: this.appVersion,
+      // Sent on every upload; the Worker checks it against the designation in
+      // `public.settings` before it will store anything.
+      deviceId: this.deviceId(),
     });
   }
 
@@ -644,6 +815,24 @@ export class BackupService {
       return { outcome: 'no_changes', detail: decision.detail, sizeBytes: null, recordCount: null, objectKey: null, fingerprint };
     }
 
+    // 0. Only the designated Admin PC backs up. A second Admin PC must never
+    //    start its own backup lineage, and in v1 it cannot force one manually
+    //    either — the Worker would refuse the upload anyway.
+    if (!this.isDesignatedDevice()) {
+      const detail = trigger === 'manual'
+        ? 'Back up now is only available on the designated backup PC'
+        : this.designation === null
+          ? 'No Admin PC is designated for cloud backup yet'
+          : 'Automatic backup runs on another designated Admin PC';
+      this.patchState({
+        lastOutcome: 'no_changes',
+        lastError: null,
+        nextCheckAt: nextCheckAt(this.now(), HOURLY_CHECK_INTERVAL_MS),
+      });
+      this.logger.info(`[dks-backup] ${detail}`);
+      return { outcome: 'no_changes', detail, sizeBytes: null, recordCount: null, objectKey: null, fingerprint };
+    }
+
     // 1. Give the renderer's sync engine a bounded window to push local edits.
     const drained = await waitForOutboxDrain(() => this.outboxCounts(), {
       now: () => this.now().getTime(),
@@ -663,6 +852,26 @@ export class BackupService {
         sizeBytes: null, recordCount: null, objectKey: null,
       });
       this.logger.warn(`[dks-backup] ${detail} (pending=${String(drained.pending)} processing=${String(drained.processing)} failed=${String(drained.failed)})`);
+      return { outcome: 'incomplete', detail, sizeBytes: null, recordCount: null, objectKey: null, fingerprint };
+    }
+
+    // 1b. The cache must be provably complete before it is worth copying:
+    //     a full authorized pull that walked every page, with no local mutation
+    //     after it. Without that, DKS would be uploading a cache that may be
+    //     missing rows and calling it a backup.
+    const completeness = this.cacheCompleteness();
+    if (!completeness.complete) {
+      const detail = `snapshot skipped: ${completeness.reason}`;
+      this.patchState({
+        lastOutcome: 'incomplete',
+        lastError: detail,
+        nextCheckAt: nextCheckAt(this.now(), 5 * 60 * 1000),
+      });
+      this.recordEvent({
+        at: startedAt.toISOString(), trigger, outcome: 'incomplete', detail,
+        sizeBytes: null, recordCount: null, objectKey: null,
+      });
+      this.logger.warn(`[dks-backup] ${detail}`);
       return { outcome: 'incomplete', detail, sizeBytes: null, recordCount: null, objectKey: null, fingerprint };
     }
 

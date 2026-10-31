@@ -11,6 +11,15 @@ export interface DksLocalSyncState {
   lastSyncAt: string | null;
   lastError: string | null;
   pendingCount: number;
+  /**
+   * Cache-completeness evidence for cloud backup. Reported by the sync engine
+   * after a fully successful authorized pull/reconcile, and compared by the
+   * main process against the newest local mutation before it will snapshot.
+   */
+  lastPullAt?: string | null;
+  lastPullComplete?: boolean;
+  lastPullRows?: number | null;
+  lastLocalMutationAt?: string | null;
 }
 
 /** Values crossing the renderer/main boundary are plain structured-clone data. */
@@ -432,15 +441,37 @@ export interface DksBackupApi {
     keyId?: string;
   }) => Promise<DksBackupKeySetupResult>;
   healthCheck: (input: { role: string }) => Promise<DksBackupHealthResult>;
-  /** Pushes the signed-in session so main can authorise Worker calls. */
+  /**
+   * Pushes the signed-in session so main can authorise Worker calls.
+   * Admin only in v1 — an Office session is refused here and by the Worker.
+   */
   setSession: (input: {
     role: string;
     accessToken: string;
     workerUrl?: string;
   } | null) => Promise<{ ok: boolean }>;
+  /**
+   * Records the designated backup PC as read from Supabase `public.settings`.
+   * A scheduling hint: the Worker re-reads the authoritative row per upload.
+   */
+  setDesignation: (input: {
+    role: string;
+    designation: DksBackupDesignation | null;
+  }) => Promise<DksBackupState>;
+  /** Renames this PC. A safe label only — never a hostname or user name. */
+  setDeviceLabel: (input: { role: string; label: string }) => Promise<DksBackupState>;
 }
 
 export type DksBackupOutcome = 'verified' | 'pending' | 'failed' | 'no_changes' | 'incomplete';
+
+/** The designated Admin backup PC, as stored in Supabase `public.settings`. */
+export interface DksBackupDesignation {
+  /** Opaque random device id (32 hex chars). Never a hostname or other PII. */
+  deviceId: string;
+  /** Administrator-chosen label. Must carry no PII. */
+  label: string;
+  designatedAt?: string | null;
+}
 
 export interface DksBackupState {
   enabled: boolean;
@@ -464,6 +495,22 @@ export interface DksBackupState {
   keyId: string | null;
   /** What every backup from this build covers. Always 'local-cache' in PR1. */
   source: 'local-cache';
+  /** This PC's opaque random device id (16 random bytes, hex). Never PII. */
+  deviceId: string;
+  /** Safe label for this PC. */
+  deviceLabel: string;
+  /** True when this PC is the designated Admin backup PC. */
+  designated: boolean;
+  /** The designated PC's id, or null when no PC is designated. */
+  designatedDeviceId: string | null;
+  /** The designated PC's label — shown when another PC holds the duty. */
+  designatedDeviceLabel: string | null;
+  designatedAt: string | null;
+  /**
+   * True only when a full authorized pull completed, walked every page, and no
+   * local mutation happened after it. Backup refuses to snapshot without it.
+   */
+  cacheComplete: boolean;
 }
 
 export interface DksBackupRunResult {

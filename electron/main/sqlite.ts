@@ -1620,6 +1620,13 @@ export class SqliteStore {
     if (!row) {
       throw new Error('Outbox item was not saved');
     }
+    // Every local mutation funnels through here, so this is the single place
+    // that can stamp "the cache changed". Cloud backup compares this against
+    // the last completed authorized pull and refuses to snapshot a cache that
+    // has not been fully re-pulled since.
+    this.database
+      .prepare('INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value')
+      .run('lastLocalMutationAt', this.now());
     return this.outboxFromRow(row);
   }
 
@@ -1744,6 +1751,12 @@ export class SqliteStore {
       last_sync_at: values.get('lastSyncAt') ?? null,
       last_error: values.get('lastError') ?? null,
       pending_count: this.getPendingOutboxCount(),
+      lastPullAt: values.get('lastPullAt') ?? null,
+      lastPullComplete: values.get('lastPullComplete') === 'true',
+      lastPullRows: Number.isFinite(Number(values.get('lastPullRows')))
+        ? Number(values.get('lastPullRows'))
+        : null,
+      lastLocalMutationAt: values.get('lastLocalMutationAt') ?? null,
     };
   }
 
@@ -1791,11 +1804,25 @@ export class SqliteStore {
       pendingCount: requested.pendingCount
         ?? requested.pending_count
         ?? this.getPendingOutboxCount(),
+      // Undefined means "unchanged", so a status-only update never erases the
+      // completeness evidence a previous pull recorded.
+      lastPullAt: requested.lastPullAt !== undefined ? requested.lastPullAt : current.lastPullAt ?? null,
+      lastPullComplete: requested.lastPullComplete !== undefined
+        ? requested.lastPullComplete
+        : current.lastPullComplete ?? false,
+      lastPullRows: requested.lastPullRows !== undefined ? requested.lastPullRows : current.lastPullRows ?? null,
+      lastLocalMutationAt: requested.lastLocalMutationAt !== undefined
+        ? requested.lastLocalMutationAt
+        : current.lastLocalMutationAt ?? null,
     };
     const set = this.database.prepare('INSERT INTO sync_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
     set.run('status', next.status);
     set.run('lastSyncAt', next.lastSyncAt);
     set.run('lastError', next.lastError);
+    set.run('lastPullAt', next.lastPullAt ?? null);
+    set.run('lastPullComplete', next.lastPullComplete ? 'true' : 'false');
+    set.run('lastPullRows', next.lastPullRows === null ? null : String(next.lastPullRows));
+    set.run('lastLocalMutationAt', next.lastLocalMutationAt ?? null);
     next.last_sync_at = next.lastSyncAt;
     next.last_error = next.lastError;
     next.pending_count = next.pendingCount;

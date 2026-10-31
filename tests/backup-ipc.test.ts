@@ -28,6 +28,8 @@ function createServiceStub() {
     setupKeyConfigure: vi.fn(async () => ({ ok: true })),
     healthCheck: vi.fn(async () => ({ ok: true, reachable: true, r2Bound: true, detail: null })),
     setSession: vi.fn(() => true),
+    setDesignation: vi.fn(() => ({ enabled: true })),
+    setDeviceLabel: vi.fn(() => ({ enabled: true })),
   };
 }
 
@@ -117,9 +119,11 @@ describe('main-process admin enforcement', () => {
     for (const channel of ADMIN_CHANNELS) {
       await expect(invoke(handlers[channel], ADMIN_PAYLOADS[channel])).rejects.toThrow();
     }
+    // setSession is admin-gated too now, so a pending Office session is refused
+    // outright rather than being accepted as an upload credential.
     await expect(
       invoke(handlers[BACKUP_IPC_CHANNELS.setSession], { role: 'admin', accessToken: 'tok' }),
-    ).rejects.toThrow(/admin approval/);
+    ).rejects.toThrow(/administrator role is required/);
   });
 
   it('lets an admin through on every admin channel', async () => {
@@ -184,16 +188,35 @@ describe('session credential push', () => {
     expect(service.setSession).toHaveBeenCalledWith(null);
   });
 
-  it('accepts an approved office credential so office PCs still back up', () => {
+  it('refuses an office credential even when the office session is approved', () => {
     const service = createServiceStub();
     const handlers = createBackupIpcHandlers({
       service: service as unknown as BackupService,
       sessionClearance: () => 'allowed' as LocalSessionClearance,
     });
-    expect(handlers[BACKUP_IPC_CHANNELS.setSession]({ role: 'office', accessToken: 'tok' })).toEqual({ ok: true });
-    expect(service.setSession).toHaveBeenCalledWith(
-      expect.objectContaining({ role: 'office', accessToken: 'tok' }),
-    );
+    // v1 policy: cloud backup is Admin only. A renderer claiming an Office role
+    // must not be able to arm the scheduler on an Office PC.
+    expect(() => handlers[BACKUP_IPC_CHANNELS.setSession]({ role: 'office', accessToken: 'tok' }))
+      .toThrow(/administrator role is required/);
+    expect(service.setSession).not.toHaveBeenCalled();
+  });
+
+  it('accepts the designation and the device label only from an admin', () => {
+    const service = createServiceStub();
+    const handlers = createBackupIpcHandlers({ service: service as unknown as BackupService });
+    const designation = { deviceId: 'ab'.repeat(16), label: 'DKS-ABABAB', designatedAt: null };
+
+    expect(handlers[BACKUP_IPC_CHANNELS.setDesignation]({ role: 'admin', designation }))
+      .toEqual({ enabled: true });
+    expect(service.setDesignation).toHaveBeenCalledWith(designation);
+    expect(() => handlers[BACKUP_IPC_CHANNELS.setDesignation]({ role: 'office', designation }))
+      .toThrow(/administrator role is required/);
+
+    expect(handlers[BACKUP_IPC_CHANNELS.setDeviceLabel]({ role: 'admin', label: 'Front desk' }))
+      .toEqual({ enabled: true });
+    expect(service.setDeviceLabel).toHaveBeenCalledWith('Front desk');
+    expect(() => handlers[BACKUP_IPC_CHANNELS.setDeviceLabel]({ role: 'admin' }))
+      .toThrow(/device label is required/);
   });
 
   it('refuses a credential with no role at all', () => {
@@ -204,7 +227,7 @@ describe('session credential push', () => {
 });
 
 describe('handler registration', () => {
-  it('registers exactly the eight backup channels and hands over only the payload', async () => {
+  it('registers exactly the ten backup channels and hands over only the payload', async () => {
     const service = createServiceStub();
     const harness = createIpcMain();
     const unregister = registerBackupIpcHandlers({
@@ -213,7 +236,7 @@ describe('handler registration', () => {
     });
 
     expect(harness.channels().sort()).toEqual([...Object.values(BACKUP_IPC_CHANNELS)].sort());
-    expect(harness.channels()).toHaveLength(8);
+    expect(harness.channels()).toHaveLength(10);
 
     await harness.send(BACKUP_IPC_CHANNELS.getState, { role: 'admin' });
     expect(service.getState).toHaveBeenCalledTimes(1);
@@ -225,8 +248,8 @@ describe('handler registration', () => {
 
     unregister();
     expect(harness.channels()).toEqual([]);
-    // 8 removed when the handlers were installed, 8 more on unregister.
-    expect(harness.removed).toHaveLength(16);
+    // 10 removed when the handlers were installed, 10 more on unregister.
+    expect(harness.removed).toHaveLength(20);
   });
 
   it('replaces a handler left behind by an earlier registration', () => {

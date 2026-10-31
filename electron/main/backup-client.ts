@@ -64,6 +64,12 @@ export interface BackupApiClientOptions {
   accessToken: string;
   fetchImpl?: typeof fetch;
   appVersion?: string;
+  /**
+   * This PC's opaque random id. Sent as `x-dks-device-id`; the Worker refuses
+   * the upload unless it matches the Admin-designated device recorded in
+   * Supabase `public.settings`.
+   */
+  deviceId?: string;
 }
 
 /** Accept only an https Worker URL; anything else is refused before any I/O. */
@@ -193,12 +199,14 @@ export class BackupApiClient {
   private readonly accessToken: string;
   private readonly fetchImpl: typeof fetch;
   private readonly appVersion: string;
+  private readonly deviceId: string;
 
   public constructor(options: BackupApiClientOptions) {
     this.baseUrl = normalizeWorkerUrl(options.workerUrl);
     this.accessToken = options.accessToken;
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.appVersion = options.appVersion ?? '0.0.0';
+    this.deviceId = typeof options.deviceId === 'string' ? options.deviceId.trim().toLowerCase() : '';
     if (!options.accessToken || !options.accessToken.trim()) {
       throw new BackupApiError('UNAUTHORIZED', 'Sign in to DKS before using cloud backup');
     }
@@ -300,6 +308,9 @@ export class BackupApiClient {
         'x-dks-ciphertext-sha256': sha256Hex(payload),
         'x-dks-key-id': metadata.keyId,
         'x-dks-source': metadata.source,
+        // The Worker checks this against the designated Admin PC before storing
+        // anything, so a second PC cannot start its own backup lineage.
+        'x-dks-device-id': this.deviceId,
       },
       body: new Uint8Array(payload),
     });

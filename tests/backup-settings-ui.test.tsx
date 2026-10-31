@@ -46,6 +46,13 @@ function createState(overrides: Partial<DksBackupState> = {}): DksBackupState {
     running: false,
     keyId: 'ab'.repeat(12),
     source: 'local-cache',
+    deviceId: '0f'.repeat(16),
+    deviceLabel: 'DKS-0F0F0F',
+    designated: true,
+    designatedDeviceId: '0f'.repeat(16),
+    designatedDeviceLabel: 'DKS-0F0F0F',
+    designatedAt: `${String(CURRENT_YEAR)}-10-01T06:00:00.000Z`,
+    cacheComplete: true,
     ...overrides,
   };
 }
@@ -80,6 +87,8 @@ function createBridge(overrides: Partial<BackupBridge> = {}): BackupBridge {
         : { ok: true, message: 'Saved' },
     ),
     healthCheck: vi.fn(async () => ({ ok: true, reachable: true, r2Bound: true, detail: null })),
+    setDesignation: vi.fn(async () => createState()),
+    setDeviceLabel: vi.fn(async () => createState()),
     ...overrides,
   };
 }
@@ -98,8 +107,14 @@ function dayEntry(overrides: Partial<DksBackupHistoryEntry> = {}): DksBackupHist
   };
 }
 
-async function renderSection(bridge: BackupBridge | null, role = 'admin') {
-  const view = render(<BackupRecoverySection role={role} backup={bridge} />);
+async function renderSection(
+  bridge: BackupBridge | null,
+  role = 'admin',
+  designation?: import('../src/features/settings/BackupRecoverySection').BackupDesignationBridge | null,
+) {
+  const view = render(
+    <BackupRecoverySection role={role} backup={bridge} designation={designation} />,
+  );
   if (bridge) {
     await waitFor(() => expect(screen.queryByText('Loading the backup status…')).not.toBeInTheDocument());
   }
@@ -428,15 +443,95 @@ describe('backup history', () => {
 });
 
 describe('opening backups made on another PC', () => {
-  it('states plainly that a backup is a copy of this PC’s local cache', async () => {
+  it('never calls the backup authoritative, and says what it really is', async () => {
     await renderSection(createBridge());
 
-    expect(screen.getByText(/encrypted copy of/i)).toBeInTheDocument();
-    expect(screen.getByText(/Supabase stays the system of record/i)).toBeInTheDocument();
-    // The paragraph label and the status grid must agree.
-    expect(screen.getAllByText(/this PC’s local cache/i).length).toBeGreaterThanOrEqual(2);
+    // The owner-approved wording, verbatim in substance.
+    expect(screen.getByText(/encrypted snapshot of the/i)).toBeInTheDocument();
+    expect(screen.getByText(/designated Admin PC’s synchronised local workspace/i)).toBeInTheDocument();
+    expect(screen.getByText(/Supabase remains the live authority/i)).toBeInTheDocument();
+    expect(screen.getByText(/disaster-recovery copy, not an authoritative/i)).toBeInTheDocument();
+
     expect(screen.getByText('What a backup holds')).toBeInTheDocument();
-    expect(screen.getByText('This PC’s local cache')).toBeInTheDocument();
+    expect(screen.getByText('Synchronised local workspace')).toBeInTheDocument();
+    expect(screen.getByText('Local cache synced')).toBeInTheDocument();
+    // Nowhere in the panel may the word appear as a claim.
+    expect(screen.queryByText(/authoritative cloud backup/i)).not.toBeInTheDocument();
+  });
+
+  it('shows the designated backup PC and offers to take the duty', async () => {
+    await renderSection(createBridge());
+
+    // The card heading and the status-grid label both read "Backup PC".
+    expect(screen.getAllByText('Backup PC').length).toBeGreaterThanOrEqual(2);
+    expect(screen.getByText('DKS-0F0F0F (this PC)')).toBeInTheDocument();
+    // This PC already holds the duty, so there is nothing to claim.
+    expect(screen.queryByRole('button', { name: /make this pc the backup pc/i })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /back up now/i })).toBeInTheDocument();
+  });
+
+  it('on another Admin PC: explains, and hides "Back up now"', async () => {
+    await renderSection(createBridge({
+      getState: vi.fn(async () => createState({
+        designated: false,
+        designatedDeviceId: 'ee'.repeat(16),
+        designatedDeviceLabel: 'Back office Admin',
+      })),
+    }));
+
+    expect(await screen.findByText(/automatic backup runs on another designated admin pc/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/Back office Admin/).length).toBeGreaterThanOrEqual(1);
+    // v1: a second Admin PC must not be able to start a parallel lineage.
+    expect(screen.queryByRole('button', { name: /back up now/i })).not.toBeInTheDocument();
+    // Recovery stays available from any Admin PC.
+    expect(screen.getByRole('button', { name: /test restore/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /open backups made on another pc/i })).toBeInTheDocument();
+  });
+
+  it('asks for confirmation before taking over the backup duty', async () => {
+    const designation = { read: vi.fn(async () => ({ deviceId: 'ee'.repeat(16), label: 'Back office Admin', designatedAt: null })), claim: vi.fn(async () => ({ deviceId: '0f'.repeat(16), label: 'Front desk', designatedAt: '2026-10-31T07:00:00.000Z' })) };
+    const bridge = createBridge({
+      getState: vi.fn(async () => createState({
+        designated: false,
+        designatedDeviceId: 'ee'.repeat(16),
+        designatedDeviceLabel: 'Back office Admin',
+      })),
+    });
+    await renderSection(bridge, 'admin', designation);
+
+    // The shared designation is read and handed to main on load.
+    await waitFor(() => expect(designation.read).toHaveBeenCalled());
+    await waitFor(() => expect(bridge.setDesignation).toHaveBeenCalledWith({
+      role: 'admin',
+      designation: { deviceId: 'ee'.repeat(16), label: 'Back office Admin', designatedAt: null },
+    }));
+
+    fireEvent.click(screen.getByRole('button', { name: /make this pc the backup pc/i }));
+    // The transfer is explained before it happens — no implicit takeover.
+    expect(await screen.findByText(/transfers automatic backup duty/i)).toBeInTheDocument();
+    expect(screen.getByText(/away from Back office Admin/i)).toBeInTheDocument();
+
+    fireEvent.change(await screen.findByLabelText(/label for this pc/i), { target: { value: 'Front desk' } });
+    fireEvent.click(screen.getByRole('button', { name: /yes, make this pc the backup pc/i }));
+
+    await waitFor(() => expect(designation.claim).toHaveBeenCalledWith({
+      deviceId: '0f'.repeat(16),
+      label: 'Front desk',
+    }));
+    await waitFor(() => expect(bridge.setDesignation).toHaveBeenLastCalledWith({
+      role: 'admin',
+      designation: { deviceId: '0f'.repeat(16), label: 'Front desk', designatedAt: '2026-10-31T07:00:00.000Z' },
+    }));
+  });
+
+  it('shows the reason when the designation cannot be read or written', async () => {
+    const designation = {
+      read: vi.fn(async () => { throw new Error('Unable to read the designated backup PC.'); }),
+      claim: vi.fn(async () => ({ deviceId: '0f'.repeat(16), label: 'x', designatedAt: null })),
+    };
+    await renderSection(createBridge(), 'admin', designation);
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/unable to read the designated backup pc/i);
   });
 
   it('imports a recovery key from another PC and re-reads the state', async () => {

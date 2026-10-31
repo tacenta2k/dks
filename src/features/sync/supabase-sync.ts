@@ -572,23 +572,47 @@ async function readPage(
   return { rows: asRowList(result.data), paginated: true };
 }
 
+export interface TablePull {
+  rows: Record<string, unknown>[];
+  /** Pages actually read. */
+  pages: number;
+  /**
+   * True only when the walk reached a short page, i.e. the end of the table was
+   * seen. A client with no `range` support returns whatever it has and reports
+   * `complete: false` rather than implying completeness it cannot prove.
+   */
+  complete: boolean;
+}
+
 /**
  * Read a whole table, walking pages until a short page arrives.
  *
  * This is the line that decides whether the local cache — and therefore every
  * cloud backup snapshot taken from it — can claim to hold the table at all.
  */
-export async function selectTable(client: SupabaseDataClient, table: string): Promise<Record<string, unknown>[]> {
+export async function pullTable(client: SupabaseDataClient, table: string): Promise<TablePull> {
   const rows: Record<string, unknown>[] = [];
+  let pages = 0;
+  let complete = false;
   for (let from = 0; from < MAX_PULL_ROWS; from += PULL_PAGE_SIZE) {
     const page = await readPage(client, table, from, PULL_PAGE_SIZE);
+    pages += 1;
     rows.push(...page.rows);
-    if (!page.paginated || page.rows.length < PULL_PAGE_SIZE) break;
+    if (!page.paginated) break;
+    if (page.rows.length < PULL_PAGE_SIZE) {
+      complete = true;
+      break;
+    }
   }
   if (rows.length >= MAX_PULL_ROWS) {
     throw new Error(`Stopped reading ${table} after ${String(MAX_PULL_ROWS)} rows`);
   }
-  return rows;
+  return { rows, pages, complete };
+}
+
+/** Back-compatible wrapper: the rows only. */
+export async function selectTable(client: SupabaseDataClient, table: string): Promise<Record<string, unknown>[]> {
+  return (await pullTable(client, table)).rows;
 }
 
 async function upsertRow(
@@ -963,11 +987,22 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       }
     }
 
-    const [remoteEntries, remoteColumns] = await Promise.all([
-      selectTable(options.client, 'entries'),
-      selectTable(options.client, 'app_columns'),
+    const [entriesPull, columnsPull] = await Promise.all([
+      pullTable(options.client, 'entries'),
+      pullTable(options.client, 'app_columns'),
     ]);
+    const remoteEntries = entriesPull.rows;
+    const remoteColumns = columnsPull.rows;
     requireClearance(options);
+    /**
+     * Completeness evidence for cloud backup: both tables walked to their end,
+     * and how many rows that produced. Reported only once the whole run is
+     * healthy, so a half-finished reconcile can never mark the cache complete.
+     */
+    const pullEvidence = {
+      lastPullComplete: entriesPull.complete && columnsPull.complete,
+      lastPullRows: remoteEntries.length + remoteColumns.length,
+    };
 
     const localEntryMap = new Map(localRows(snapshot).map((row) => [row.id, row]));
     const remoteEntryMap = new Map(remoteEntries
@@ -1355,9 +1390,19 @@ export async function runSupabaseSync(options: SupabaseSyncOptions): Promise<Sup
       requireClearance(options);
       if (acknowledged.status !== 'healthy' || acknowledged.pendingCount > 0) {
         const message = acknowledged.lastError || 'Some changes have not synchronised yet.';
+        // The run is not healthy, so no completeness claim is recorded.
         return { status: 'error', pushedEntries, pushedColumns, appliedEntries, appliedColumns,
           deletedRemotely, conflicts, errors: [message], error: message };
       }
+      // The run finished clean: this is the moment the cache can be called
+      // complete. `acknowledgeOutbox` only writes the healthy status, so the
+      // evidence is written here in both branches.
+      await options.local.setSyncStatus({
+        status: 'healthy',
+        lastPullAt: now(),
+        lastPullComplete: pullEvidence.lastPullComplete,
+        lastPullRows: pullEvidence.lastPullRows,
+      }).catch(() => undefined);
       return {
         status: 'healthy',
         pushedEntries,

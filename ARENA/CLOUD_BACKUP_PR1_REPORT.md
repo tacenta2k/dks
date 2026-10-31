@@ -407,3 +407,101 @@ round:
   against a real multipart upload.
 - `setupKeyImport` has only been exercised against an in-memory `safeStorage`
   stand-in. Windows DPAPI wrapping of an imported key is untested.
+
+## 8. v1 policy corrections (round 3 — owner-approved policy)
+
+Six corrections, all implemented in the working tree and covered by tests.
+Full-suite result after them: **115 files, 1207 passed, 3 skipped, 0 failed**.
+
+### 8.1 Backup is Admin-only
+
+| Operation | Electron IPC | Cloudflare Worker |
+| --- | --- | --- |
+| Upload (`POST /v1/backups`) | Admin only (`setSession` refuses any non-admin credential, so the scheduler has nothing to run with) | `requireBackupAdmin` → **Admin only**; an Office session gets `403 OFFICE_NOT_ALLOWED` whether or not its sign-in approval is valid |
+| List / download / drill / key setup / key import / configure / state | `requireAdmin` on all 8 admin channels (payload role, reported session role, and `office-pending` clearance all checked) | `requireAdmin` → `requireBackupAdmin` (Admin only) |
+| Session push | Admin only; `null` (sign-out) always allowed | n/a |
+| Settings tab | `visibleSettingsSections(role)` removes "Backup & recovery" for any non-admin role | n/a |
+
+`requireAdminOrApprovedOffice` was **deleted**, not left as dead code. Trust
+order is unchanged: RS256 signature over the exact received bytes → exp/nbf/sub
+→ **iss/aud** → PostgREST `profiles.role` lookup with the caller's own token
+under RLS. `app_metadata` and any body/header role are never read; a request
+carrying `role: admin` / `x-dks-role: admin` from a non-admin subject is refused
+(tested).
+
+### 8.2 One designated Admin backup PC, enforced server-side
+
+- **Device identity:** `BackupService.deviceId()` generates 16 random bytes
+  (`randomBytes(16).toString('hex')`) once and stores it in `sync_meta`
+  (`dks.backup.deviceId`). Never hostname, user name, MAC, serial or email.
+  `sync_meta` is in `SNAPSHOT_EXCLUDED_TABLES`, so the id never enters a backup.
+  The label defaults to `DKS-<first 6 hex>` and is administrator-editable.
+- **Shared designation:** `public.settings` row
+  `dks.backup.designated_device = {deviceId, label, designatedAt}`. RLS on that
+  table makes INSERT/UPDATE/DELETE **Admin-only**, so the row is authoritative.
+  Written by the renderer (`src/features/settings/backup-designation.ts`) from
+  the "Make this PC the backup PC" confirmation.
+- **Server enforcement:** `handleUpload` calls `requireDesignatedDevice()`,
+  which reads `x-dks-device-id` and re-reads the settings row with the
+  uploader's own JWT on every upload. Mismatch or no designation →
+  `403 DEVICE_NOT_DESIGNATED`; unreadable row → fail closed. The local copy in
+  main is only a scheduling hint.
+- **Behaviour:** the designated PC runs T1/T2/T3. Any other Admin PC gets
+  `no_changes` — "Automatic backup runs on another designated Admin PC" — and
+  cannot force one either: `runNow('manual')` returns "Back up now is only
+  available on the designated backup PC" and the UI hides the button. List,
+  download, key import and test-restore stay available from any Admin PC. No
+  implicit takeover: the row has to change.
+
+### 8.3 Upload limit
+
+`MAX_UPLOAD_BYTES = 25 * 1024 * 1024`. Both guards kept: the `content-length`
+early refusal and the counting `TransformStream`. A real snapshot is ~65 KB at
+~1,200 rows, so this is ~380x headroom that still trips on a corrupt or
+runaway snapshot.
+
+### 8.4 Completeness — never a silent partial cache
+
+Three conditions must hold before a snapshot is taken:
+
+1. the local outbox is empty (pre-existing);
+2. a **full authorized pull/reconcile completed** — reported by the renderer's
+   sync engine over the existing `dks:local:set-sync-status` channel as
+   `lastPullAt` + `lastPullComplete` + `lastPullRows`;
+3. no local mutation happened after that pull — `enqueueOutbox()` (the single
+   funnel for local mutations) stamps `lastLocalMutationAt`, compared against
+   `lastPullAt`.
+
+`lastPullComplete` is true only when the paginated walk reached a short page for
+**both** `entries` and `app_columns`, and it is recorded only when the whole
+sync run finished healthy. If any condition fails, the run ends `incomplete`
+with the specific reason, records no success, and retries in 5 minutes.
+`source` stays `local-cache`; the UI wording is now "Encrypted snapshot of the
+designated Admin PC's synchronised local workspace… Supabase remains the live
+authority… disaster-recovery copy, not an authoritative backup".
+No Supabase logic moved into main: the coordination path is the existing typed
+sync-state channel, extended with four optional fields.
+
+### 8.5 Pagination proven safe under RLS
+
+`tests/sync-pagination-rls.test.ts` (13 tests) drives a PostgREST-faithful
+double (1000-row response cap, `range()` narrowing **after** the RLS policy):
+Admin walks 1,200 rows over 3 pages with a stable `order('id')` and no
+duplicates; Office sees only rows inside its visibility window on every page and
+never a row outside it; a failed later page throws instead of returning a
+partial cache; both `entries` and `app_columns` are walked; a runaway cursor
+stops at 100,000 rows. `runSupabaseSync` reports `lastPullComplete` for a
+paginated client and refuses to claim it for one that cannot paginate. The
+existing `office-3-day-window-postgres`, `entry-visibility-postgres` and
+`entries-rls` suites stay green.
+
+### 8.6 JWT hardening
+
+- `iss` must equal `${SUPABASE_URL}/auth/v1` exactly (`expectedIssuer`).
+- `aud` must be `authenticated` — Supabase's audience for a signed-in user's
+  access token — or an array containing it. Overridable only via the optional
+  `SUPABASE_JWT_AUDIENCE` var; `service_role` and `anon` are refused.
+- An unknown `kid` triggers exactly **one** forced JWKS refresh before
+  rejection; the normal 10-minute cache is unchanged and there is no loop.
+- Signature/exp/nbf/sub validation is untouched, and HS256 and foreign-key
+  tokens are still refused.

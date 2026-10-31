@@ -5,7 +5,11 @@ import { resolve } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AppShell } from '../src/renderer/components/AppShell';
-import { SAVE_BANNER_VISIBLE_MS, SettingsPage } from '../src/features/settings/SettingsPage';
+import {
+  SAVE_BANNER_VISIBLE_MS,
+  SettingsPage,
+  visibleSettingsSections,
+} from '../src/features/settings/SettingsPage';
 
 // FIXES_UI §9.1: Settings now uses an inner navigation (Expiry rules /
 // Notifications / Workspace / About & updates) with one section at a time, so
@@ -20,6 +24,21 @@ describe('settings page', () => {
     expect(screen.queryByLabelText('Green status color')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Backup Now' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Sign out all office sessions' })).not.toBeInTheDocument();
+    // Office is denied the whole page, so it can never reach a backup control.
+    expect(screen.queryByRole('button', { name: 'Backup & recovery' })).not.toBeInTheDocument();
+  });
+
+  it('keeps the Backup & recovery tab out of the nav for any non-admin role', () => {
+    // Defence in depth: if a future role is ever allowed into Settings without
+    // being an admin, the backup tab must still not appear for it.
+    expect(visibleSettingsSections('admin').map((section) => section.id)).toEqual([
+      'expiry', 'notifications', 'workspace', 'backup', 'about',
+    ]);
+    for (const role of ['office', '', null, undefined]) {
+      expect(visibleSettingsSections(role).map((section) => section.id)).toEqual([
+        'expiry', 'notifications', 'workspace', 'about',
+      ]);
+    }
   });
 
   it('renders injectable admin settings and emits local-first changes and actions', () => {

@@ -5,6 +5,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   BackupHttpError,
   authenticate,
+  expectedAudience,
+  expectedIssuer,
   lookupCallerRole,
   lookupOfficeApproval,
   resetJwksCacheForTests,
@@ -50,7 +52,16 @@ function base64Url(bytes: ArrayBuffer | Uint8Array): string {
 async function signToken(sub: string, overrides: Record<string, unknown> = {}): Promise<string> {
   const header = { alg: 'RS256', typ: 'JWT', kid: 'test-key-1' };
   const now = Math.floor(Date.now() / 1000);
-  const payload = { sub, iat: now - 10, exp: now + 3600, ...overrides };
+  // iss/aud mirror what Supabase actually puts in an access token; the Worker
+  // now checks both exactly.
+  const payload = {
+    sub,
+    iat: now - 10,
+    exp: now + 3600,
+    iss: 'https://project.supabase.co/auth/v1',
+    aud: 'authenticated',
+    ...overrides,
+  };
   const encoder = new TextEncoder();
   const data = encoder.encode(`${base64Url(encoder.encode(JSON.stringify(header)))}.${base64Url(encoder.encode(JSON.stringify(payload)))}`);
   const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keyPair.privateKey, data);
@@ -174,14 +185,24 @@ function createFakeBucket(): R2BucketLike & { objects: Map<string, FakeObject> }
 interface SupabaseMock {
   roles: Map<string, string>;
   approvals: Map<string, boolean>;
+  /** The `public.settings` rows the Worker reads with the caller's JWT. */
+  settings: Map<string, unknown>;
   fetchImpl: typeof fetch;
   calls: string[];
 }
+
+/** The device id this test suite's uploads present. Opaque and random. */
+const DEVICE_ID = 'a1b2c3d4e5f60718293a4b5c6d7e8f90';
+const OTHER_DEVICE_ID = 'f0e1d2c3b4a5968778695a4b3c2d1e0f';
 
 function createSupabaseMock(): SupabaseMock {
   const roles = new Map<string, string>([[ADMIN_SUB, 'admin'], [OFFICE_SUB, 'office']]);
   const approvals = new Map<string, boolean>([[OFFICE_SUB, true]]);
   const calls: string[] = [];
+  /** `public.settings` — Admin-only writes, the authoritative designation. */
+  const settings = new Map<string, unknown>([
+    ['dks.backup.designated_device', { deviceId: DEVICE_ID, label: 'Front desk Admin', designatedAt: '2026-10-01T06:00:00.000Z' }],
+  ]);
 
   const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
@@ -200,6 +221,11 @@ function createSupabaseMock(): SupabaseMock {
       const role = roles.get(sub);
       return Response.json(role ? [{ role }] : []);
     }
+    if (url.includes('/rest/v1/settings')) {
+      const key = /key=eq\.([^&]+)/.exec(url)?.[1] ?? '';
+      const value = settings.get(decodeURIComponent(key));
+      return Response.json(value === undefined ? [] : [{ key, value }]);
+    }
     if (url.includes('/rest/v1/rpc/office_session_is_approved')) {
       // Derive the subject from the token the caller presented.
       const token = authorization.replace(/^Bearer\s+/i, '');
@@ -209,7 +235,7 @@ function createSupabaseMock(): SupabaseMock {
     return new Response('not found', { status: 404 });
   }) as unknown as typeof fetch;
 
-  return { roles, approvals, fetchImpl, calls };
+  return { roles, approvals, settings, fetchImpl, calls };
 }
 
 /**
@@ -245,6 +271,7 @@ function uploadRequest(body: Uint8Array, token: string, meta: Record<string, str
       'x-dks-ciphertext-sha256': clientSha256(body),
       'x-dks-key-id': 'ab'.repeat(12),
       'x-dks-source': 'local-cache',
+      'x-dks-device-id': DEVICE_ID,
       'x-dks-fingerprint': 'f'.repeat(64),
       'x-dks-schema-version': '4',
       'x-dks-record-counts': 'entries=12;columns=3',
@@ -395,13 +422,42 @@ describe('POST /v1/backups', () => {
     expect(bucket.objects.get(result.key)?.customMetadata.role).toBe('admin');
   });
 
-  it('accepts an Office upload only when the server-side approval check passes', async () => {
+  it('refuses an approved Office upload with OFFICE_NOT_ALLOWED', async () => {
     const token = await signToken(OFFICE_SUB);
-    const result = await handleUpload(uploadRequest(envelope(), token), env, deps);
-    expect(bucket.objects.get(result.key)?.customMetadata.role).toBe('office');
+    // The Office session IS approved — v1 policy still refuses the upload.
+    expect(supabase.approvals.get(OFFICE_SUB)).toBe(true);
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toMatchObject({ status: 403, code: 'OFFICE_NOT_ALLOWED' });
+    expect(bucket.objects.size).toBe(0);
+  });
 
+  it('refuses a revoked or pending Office upload too', async () => {
     supabase.approvals.set(OFFICE_SUB, false);
-    await expect(handleUpload(uploadRequest(envelope(), token), env, deps)).rejects.toThrow(/approved/i);
+    const token = await signToken(OFFICE_SUB);
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toMatchObject({ status: 403, code: 'OFFICE_NOT_ALLOWED' });
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('never lets a request-body or header role widen access', async () => {
+    // A caller cannot talk its way in by claiming a role: only the Postgres
+    // lookup of the JWT's own subject decides.
+    const stranger = await signToken('33333333-3333-4333-8333-333333333333');
+    const spoofed = new Request('https://dks-backup.example.workers.dev/v1/backups', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${stranger}`,
+        'x-dks-plaintext-sha256': 'a'.repeat(64),
+        'x-dks-ciphertext-sha256': 'c'.repeat(64),
+        'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+        'x-dks-device-id': DEVICE_ID,
+        role: 'admin',
+        'x-dks-role': 'admin',
+      },
+      body: bodyOf(envelope()),
+    });
+    await expect(handleUpload(spoofed, env, deps)).rejects.toThrow(/cannot use cloud backup/i);
+    expect(bucket.objects.size).toBe(0);
   });
 
   it('refuses an unauthenticated request and a role the JWT does not carry', async () => {
@@ -428,6 +484,7 @@ describe('POST /v1/backups', () => {
         'x-dks-plaintext-sha256': 'a'.repeat(64),
         'x-dks-ciphertext-sha256': 'c'.repeat(64),
         'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+        'x-dks-device-id': DEVICE_ID,
       },
       body: bodyOf(envelope()),
     });
@@ -461,6 +518,205 @@ describe('POST /v1/backups', () => {
       uploadRequest(envelope(), token, { 'x-dks-created-at': 'yesterday' }),
       env, deps,
     )).rejects.toThrow(/timestamp/i);
+  });
+});
+
+describe('designated backup PC (server-enforced)', () => {
+  it('accepts the designated Admin PC and records which PC uploaded', async () => {
+    const token = await signToken(ADMIN_SUB);
+    const result = await handleUpload(uploadRequest(envelope(), token), env, deps);
+
+    const stored = bucket.objects.get(result.key);
+    expect(stored?.customMetadata.deviceId).toBe(DEVICE_ID);
+    expect(stored?.customMetadata.deviceLabel).toBe('Front desk Admin');
+    expect(stored?.customMetadata.role).toBe('admin');
+  });
+
+  it('rejects a correct Admin JWT from a non-designated device', async () => {
+    const token = await signToken(ADMIN_SUB);
+    const body = envelope();
+    const request = new Request('https://dks-backup.example.workers.dev/v1/backups', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'x-dks-plaintext-sha256': 'a'.repeat(64),
+        'x-dks-ciphertext-sha256': clientSha256(body),
+        'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+        'x-dks-device-id': OTHER_DEVICE_ID,
+      },
+      body: bodyOf(body),
+    });
+
+    await expect(handleUpload(request, env, deps))
+      .rejects.toMatchObject({ status: 403, code: 'DEVICE_NOT_DESIGNATED' });
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('rejects an upload when no PC is designated at all', async () => {
+    supabase.settings.delete('dks.backup.designated_device');
+    const token = await signToken(ADMIN_SUB);
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toMatchObject({ status: 403, code: 'DEVICE_NOT_DESIGNATED' });
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('refuses a malformed or missing device identifier', async () => {
+    const token = await signToken(ADMIN_SUB);
+    for (const deviceId of ['', 'not-a-device-id', 'z'.repeat(32)]) {
+      const body = envelope();
+      const request = new Request('https://dks-backup.example.workers.dev/v1/backups', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-dks-plaintext-sha256': 'a'.repeat(64),
+          'x-dks-ciphertext-sha256': clientSha256(body),
+          'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+          ...(deviceId ? { 'x-dks-device-id': deviceId } : {}),
+        },
+        body: bodyOf(body),
+      });
+      await expect(handleUpload(request, env, deps))
+        .rejects.toMatchObject({ status: 400, code: 'BAD_REQUEST' });
+    }
+    expect(bucket.objects.size).toBe(0);
+  });
+
+  it('follows a transfer of the designation', async () => {
+    const token = await signToken(ADMIN_SUB);
+    const body = envelope();
+    const requestFrom = (deviceId: string): Request => new Request(
+      'https://dks-backup.example.workers.dev/v1/backups',
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${token}`,
+          'x-dks-plaintext-sha256': 'a'.repeat(64),
+          'x-dks-ciphertext-sha256': clientSha256(body),
+          'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+          'x-dks-device-id': deviceId,
+        },
+        body: bodyOf(body),
+      },
+    );
+
+    // Before the transfer the second PC is refused.
+    await expect(handleUpload(requestFrom(OTHER_DEVICE_ID), env, deps))
+      .rejects.toMatchObject({ code: 'DEVICE_NOT_DESIGNATED' });
+
+    // An administrator moves the duty. There is no implicit takeover: the row
+    // has to change, and the old PC stops being accepted at the same moment.
+    supabase.settings.set('dks.backup.designated_device', {
+      deviceId: OTHER_DEVICE_ID,
+      label: 'Back office Admin',
+      designatedAt: '2026-10-31T07:00:00.000Z',
+    });
+
+    const accepted = await handleUpload(requestFrom(OTHER_DEVICE_ID), env, deps);
+    expect(bucket.objects.get(accepted.key)?.customMetadata.deviceId).toBe(OTHER_DEVICE_ID);
+    await expect(handleUpload(requestFrom(DEVICE_ID), env, deps))
+      .rejects.toMatchObject({ code: 'DEVICE_NOT_DESIGNATED' });
+  });
+
+  it('fails closed when the designation cannot be read', async () => {
+    const token = await signToken(ADMIN_SUB);
+    supabase.settings.set('dks.backup.designated_device', 'not-an-object');
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toMatchObject({ code: 'DEVICE_NOT_DESIGNATED' });
+    expect(bucket.objects.size).toBe(0);
+  });
+});
+
+describe('the upload limit is 25 MB', () => {
+  it('is set well above a real snapshot and enforced while streaming', () => {
+    expect(MAX_UPLOAD_BYTES).toBe(25 * 1024 * 1024);
+    // A real DKS snapshot is ~65 KB at ~1,200 rows, so this is ~380x headroom.
+    expect(MAX_UPLOAD_BYTES / 65_571).toBeGreaterThan(300);
+  });
+
+  it('refuses a declared body just over the limit', async () => {
+    const token = await signToken(ADMIN_SUB);
+    const body = envelope();
+    const request = new Request('https://dks-backup.example.workers.dev/v1/backups', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${token}`,
+        'content-length': String(MAX_UPLOAD_BYTES + 1),
+        'x-dks-plaintext-sha256': 'a'.repeat(64),
+        'x-dks-ciphertext-sha256': clientSha256(body),
+        'x-dks-created-at': '2026-10-31T08:00:00.000Z',
+        'x-dks-device-id': DEVICE_ID,
+      },
+      body: bodyOf(body),
+    });
+    await expect(handleUpload(request, env, deps))
+      .rejects.toMatchObject({ status: 413, code: 'PAYLOAD_TOO_LARGE' });
+  });
+});
+
+describe('JWT issuer, audience and key rotation', () => {
+  it('refuses a token from another Supabase project', async () => {
+    const token = await signToken(ADMIN_SUB, { iss: 'https://some-other-project.supabase.co/auth/v1' });
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toMatchObject({ status: 401, code: 'UNAUTHORIZED' });
+  });
+
+  it('refuses a token with no issuer', async () => {
+    const token = await signToken(ADMIN_SUB, { iss: undefined });
+    await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+      .rejects.toThrow(/not issued by this project/i);
+  });
+
+  it('refuses a service_role or anon audience', async () => {
+    for (const aud of ['service_role', 'anon']) {
+      const token = await signToken(ADMIN_SUB, { aud });
+      await expect(handleUpload(uploadRequest(envelope(), token), env, deps))
+        .rejects.toThrow(/audience is not accepted/i);
+    }
+  });
+
+  it('accepts the documented audience and an array form containing it', async () => {
+    expect(expectedAudience(env)).toBe('authenticated');
+    expect(expectedIssuer(env)).toBe('https://project.supabase.co/auth/v1');
+    const token = await signToken(ADMIN_SUB, { aud: ['authenticated'] });
+    const result = await handleUpload(uploadRequest(envelope(), token), env, deps);
+    expect(result.key).toMatch(/\.sqlite\.enc$/);
+  });
+
+  it('refreshes the JWKS once for an unknown kid, then rejects if still unknown', async () => {
+    // Warm the cache with an ordinary request, so the only fetch counted below
+    // is the single forced refresh for the unknown kid — never one per attempt.
+    await handleUpload(uploadRequest(envelope(), await signToken(ADMIN_SUB)), env, deps);
+    const jwksCallsBefore = supabase.calls.filter((url) => url.includes('jwks.json')).length;
+    const token = await signToken(ADMIN_SUB);
+    const header = { alg: 'RS256', typ: 'JWT', kid: 'rotated-key-2' };
+    const parts = token.split('.');
+    const encoder = new TextEncoder();
+    const data = encoder.encode(`${base64Url(encoder.encode(JSON.stringify(header)))}.${parts[1]}`);
+    // Signed with the real key but advertising a kid the cache does not hold.
+    const signature = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', keyPair.privateKey, data);
+    const rotated = `${new TextDecoder().decode(data)}.${base64Url(signature)}`;
+
+    await expect(handleUpload(uploadRequest(envelope(), rotated), env, deps))
+      .rejects.toThrow(/signing key for this token is unknown/i);
+
+    // Exactly one forced refresh: bounded, not a loop and not never.
+    const jwksCallsAfter = supabase.calls.filter((url) => url.includes('jwks.json')).length;
+    expect(jwksCallsAfter - jwksCallsBefore).toBe(1);
+  });
+
+  it('still refuses HS256, a foreign key and an expired token', async () => {
+    const hs256 = await signToken(ADMIN_SUB);
+    const [headerPart, payloadPart] = hs256.split('.');
+    const forged = `${base64Url(new TextEncoder().encode(JSON.stringify({ alg: 'HS256', typ: 'JWT' })))}.${payloadPart}.${headerPart}`;
+    await expect(handleUpload(uploadRequest(envelope(), forged), env, deps))
+      .rejects.toThrow(/Only RS256/i);
+
+    await expect(handleUpload(uploadRequest(envelope(), await signWithForeignKey(ADMIN_SUB)), env, deps))
+      .rejects.toThrow(/signature is invalid/i);
+
+    const expired = await signToken(ADMIN_SUB, { exp: Math.floor(Date.now() / 1000) - 60 });
+    await expect(handleUpload(uploadRequest(envelope(), expired), env, deps))
+      .rejects.toThrow(/expired/i);
   });
 });
 
@@ -502,6 +758,7 @@ describe('streaming upload (Worker memory safety)', () => {
         'x-dks-ciphertext-sha256': 'c'.repeat(64),
         'x-dks-key-id': 'ab'.repeat(12),
         'x-dks-source': 'local-cache',
+        'x-dks-device-id': DEVICE_ID,
         'x-dks-created-at': '2026-10-31T08:00:00.000Z',
       },
       body: body as BodyInit,
@@ -659,7 +916,7 @@ describe('GET /v1/backups (list)', () => {
       `https://x/v1/backups?year=${String(now.getUTCFullYear())}&month=${String(now.getUTCMonth() + 1)}`,
       { headers: { authorization: `Bearer ${await signToken(OFFICE_SUB)}` } },
     );
-    await expect(handleList(request, env, deps)).rejects.toThrow(/Only administrators/i);
+    await expect(handleList(request, env, deps)).rejects.toThrow(/Office sessions cannot use cloud backup/i);
   });
 
   it('rejects a missing or impossible year and month', async () => {
@@ -717,7 +974,7 @@ describe('GET / HEAD /v1/backups/{id}', () => {
     await expect(handleGetObject(
       new Request('https://x/v1/backups/abc', { headers: { authorization: `Bearer ${officeToken}` } }),
       env, deps, 'backups/2026/10/2026-10-31/083015-0123456789ab.sqlite.enc',
-    )).rejects.toThrow(/Only administrators/i);
+    )).rejects.toThrow(/Office sessions cannot use cloud backup/i);
 
     const adminToken = await signToken(ADMIN_SUB);
     await expect(handleGetObject(

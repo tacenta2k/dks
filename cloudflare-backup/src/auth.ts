@@ -57,6 +57,11 @@ export interface BackupEnv {
   /** 'dry-run' (default) logs retention candidates; only 'enforce' deletes. */
   RETENTION_MODE?: string;
   RETENTION_DAYS?: string;
+  /**
+   * Accepted JWT `aud`. Defaults to Supabase's `authenticated`; set only if the
+   * project issues access tokens with a different audience.
+   */
+  SUPABASE_JWT_AUDIENCE?: string;
 }
 
 export interface AuthDeps {
@@ -91,7 +96,11 @@ export type BackupErrorCode =
   | 'METHOD_NOT_ALLOWED'
   | 'STEP_UP_REQUIRED'
   | 'UNAVAILABLE'
-  | 'INTERNAL';
+  | 'INTERNAL'
+  /** v1 policy: an Office session may not touch cloud backup at all. */
+  | 'OFFICE_NOT_ALLOWED'
+  /** The uploading PC is not the one designated in `public.settings`. */
+  | 'DEVICE_NOT_DESIGNATED';
 
 export class BackupHttpError extends Error {
   public readonly status: number;
@@ -122,14 +131,36 @@ export function resetJwksCacheForTests(): void {
   keyCache.clear();
 }
 
+/** Supabase signs access tokens with `iss` = `<project>/auth/v1`. */
+export function expectedIssuer(env: BackupEnv): string {
+  return `${String(env.SUPABASE_URL).replace(/\/+$/, '')}/auth/v1`;
+}
+
+/** Supabase's audience for a signed-in user's access token. */
+export const DEFAULT_JWT_AUDIENCE = 'authenticated';
+
+/** The one accepted `aud` value; overridable only via `SUPABASE_JWT_AUDIENCE`. */
+export function expectedAudience(env: BackupEnv): string {
+  const override = typeof env.SUPABASE_JWT_AUDIENCE === 'string' ? env.SUPABASE_JWT_AUDIENCE.trim() : '';
+  return override.length > 0 ? override : DEFAULT_JWT_AUDIENCE;
+}
+
 export function jwksUrl(env: BackupEnv): string {
   return `${String(env.SUPABASE_URL).replace(/\/+$/, '')}/auth/v1/.well-known/jwks.json`;
 }
 
-async function loadJwks(env: BackupEnv, deps: AuthDeps): Promise<JsonWebKeySet['keys']> {
+/**
+ * Read Supabase's JWKS, cached for {@link JWKS_TTL_MS}.
+ *
+ * `force` bypasses the cache. It is used exactly once when a token presents a
+ * `kid` the cache does not know, so a key rotation cannot lock the Worker out
+ * for up to ten minutes — while an attacker still cannot make the Worker fetch
+ * per request, because the retry happens only after the cache lookup misses.
+ */
+async function loadJwks(env: BackupEnv, deps: AuthDeps, force = false): Promise<JsonWebKeySet['keys']> {
   const url = jwksUrl(env);
   const cached = jwksCache.get(url);
-  if (cached && deps.now() - cached.at < JWKS_TTL_MS) {
+  if (!force && cached && deps.now() - cached.at < JWKS_TTL_MS) {
     return cached.keys;
   }
   let response: Response;
@@ -231,10 +262,16 @@ export async function verifySupabaseJwt(
     throw new BackupHttpError(401, 'UNAUTHORIZED', 'Only RS256 access tokens are accepted');
   }
 
-  const keys = await loadJwks(env, deps);
-  const jwk = header.kid
+  const matches = (keys: JsonWebKeySet['keys']) => header.kid
     ? keys.find((candidate) => candidate.kid === header.kid)
     : keys.find((candidate) => candidate.kty === 'RSA');
+
+  let jwk = matches(await loadJwks(env, deps));
+  if (!jwk) {
+    // Unknown kid: the key may have rotated inside the cache window. Refresh
+    // once, then reject — never in a loop.
+    jwk = matches(await loadJwks(env, deps, true));
+  }
   if (!jwk) {
     throw new BackupHttpError(401, 'UNAUTHORIZED', 'The signing key for this token is unknown');
   }
@@ -269,6 +306,19 @@ export async function verifySupabaseJwt(
   const sub = payload.sub;
   if (typeof sub !== 'string' || sub.trim().length === 0) {
     throw new BackupHttpError(401, 'UNAUTHORIZED', 'The sign-in token has no subject');
+  }
+
+  // Issuer and audience are compared exactly. Together they refuse a token
+  // minted by a different Supabase project and a `service_role`/`anon` token
+  // from this one, even in the unlikely event such a signature verified.
+  const iss = typeof payload.iss === 'string' ? payload.iss : '';
+  if (iss !== expectedIssuer(env)) {
+    throw new BackupHttpError(401, 'UNAUTHORIZED', 'The sign-in token was not issued by this project');
+  }
+  const audience = payload.aud;
+  const audiences = (Array.isArray(audience) ? audience : [audience]).filter((value): value is string => typeof value === 'string');
+  if (!audiences.includes(expectedAudience(env))) {
+    throw new BackupHttpError(401, 'UNAUTHORIZED', 'The sign-in token audience is not accepted');
   }
 
   return {
@@ -389,16 +439,111 @@ export async function authenticate(
 }
 
 /** Admin-only routes: listing and downloading backups. */
+/**
+ * The gate for **every** backup operation in v1 — upload, list, download.
+ *
+ * Admin only. An Office session is refused with `OFFICE_NOT_ALLOWED` whether or
+ * not its sign-in approval is valid, so no approval state can widen access to
+ * backups and the Worker never even calls the approval RPC for this path.
+ *
+ * Trust order, unchanged: verify the JWT (RS256, signature over the exact
+ * received bytes, exp/nbf/sub/iss/aud), then read the caller's `role` from
+ * Postgres with the caller's own token under RLS. `app_metadata` and any role
+ * in the request body or headers are never read.
+ */
+export async function requireBackupAdmin(
+  request: Request,
+  env: BackupEnv,
+  deps: AuthDeps,
+): Promise<AuthenticatedCaller & { token: string }> {
+  const token = bearerToken(request);
+  const claims = await verifySupabaseJwt(token, env, deps);
+  const role = await lookupCallerRole(claims, token, env, deps);
+  if (!role) {
+    throw new BackupHttpError(403, 'FORBIDDEN', 'This account cannot use cloud backup');
+  }
+  if (role === 'office') {
+    throw new BackupHttpError(
+      403,
+      'OFFICE_NOT_ALLOWED',
+      'Office sessions cannot use cloud backup, approved or not',
+    );
+  }
+  if (role !== 'admin') {
+    throw new BackupHttpError(403, 'FORBIDDEN', 'Only administrators can use cloud backup');
+  }
+  return { claims, role, officeApproved: false, token };
+}
+
+/** Row key in `public.settings` that holds the shared, authoritative designation. */
+export const DESIGNATED_DEVICE_KEY = 'dks.backup.designated_device';
+
+/** Opaque random device id shape: 16 random bytes, hex. Never derived from PII. */
+export const DEVICE_ID_PATTERN = /^[0-9a-f]{32}$/i;
+
+export interface DesignatedDevice {
+  deviceId: string;
+  /** Human-readable label chosen by the administrator. Must carry no PII. */
+  label: string;
+  designatedAt: string | null;
+}
+
+/**
+ * Read the designated backup PC from `public.settings`, with the CALLER's JWT.
+ *
+ * This is the server-side enforcement point for "only one PC uploads": RLS on
+ * `public.settings` allows INSERT/UPDATE/DELETE for Admins only, so the row is
+ * authoritative and a local "I am designated" flag on a second PC cannot
+ * substitute for it. Nothing is cached here — the answer is read per upload.
+ *
+ * Fails closed: an unreadable settings row is a 5xx, never "no designation".
+ */
+export async function lookupDesignatedDevice(
+  token: string,
+  env: BackupEnv,
+  deps: AuthDeps,
+): Promise<DesignatedDevice | null> {
+  const url = `${restBase(env)}/settings?key=eq.${encodeURIComponent(DESIGNATED_DEVICE_KEY)}&select=value`;
+  let response: Response;
+  try {
+    response = await deps.fetchImpl(url, {
+      headers: {
+        apikey: env.SUPABASE_ANON_KEY,
+        authorization: `Bearer ${token}`,
+        accept: 'application/json',
+      },
+    });
+  } catch {
+    throw new BackupHttpError(503, 'UNAVAILABLE', 'The designated backup PC could not be checked');
+  }
+  if (!response.ok) {
+    throw new BackupHttpError(
+      response.status === 401 ? 401 : 503,
+      response.status === 401 ? 'UNAUTHORIZED' : 'UNAVAILABLE',
+      'The designated backup PC could not be checked',
+    );
+  }
+  const rows = await response.json() as unknown;
+  if (!Array.isArray(rows) || rows.length === 0) return null;
+  const value = (rows[0] as { value?: unknown }).value;
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as { deviceId?: unknown; label?: unknown; designatedAt?: unknown };
+  const deviceId = typeof record.deviceId === 'string' ? record.deviceId.trim().toLowerCase() : '';
+  if (!DEVICE_ID_PATTERN.test(deviceId)) return null;
+  return {
+    deviceId,
+    // Length-capped so a long label cannot become a metadata or log problem.
+    label: typeof record.label === 'string' ? record.label.slice(0, 60) : '',
+    designatedAt: typeof record.designatedAt === 'string' ? record.designatedAt : null,
+  };
+}
+
 export async function requireAdmin(
   request: Request,
   env: BackupEnv,
   deps: AuthDeps,
 ): Promise<AuthenticatedCaller & { token: string }> {
-  const caller = await authenticate(request, env, deps);
-  if (caller.role !== 'admin') {
-    throw new BackupHttpError(403, 'FORBIDDEN', 'Only administrators can read backups');
-  }
-  return caller;
+  return requireBackupAdmin(request, env, deps);
 }
 
 /**

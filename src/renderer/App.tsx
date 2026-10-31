@@ -1172,22 +1172,25 @@ export function App({
   // authorise Worker calls. The token is refreshed by Supabase in the renderer,
   // so this re-runs on every refresh and clears on sign-out. The main process
   // never stores it, and the Worker verifies the signature itself.
+  //
+  // ADMIN ONLY in v1. An Office session is never pushed, so the scheduler on an
+  // Office PC has no credential to run with — and the Worker would refuse the
+  // upload with OFFICE_NOT_ALLOWED anyway.
   useEffect(() => {
     const backupBridge = typeof window !== 'undefined' ? window.dks?.backup : undefined;
     if (!backupBridge) {
       return undefined;
     }
-    const role = profile?.role === 'admin' || profile?.role === 'office' ? profile.role : null;
-    const accessToken = authStatus === 'authenticated' && role !== null
+    const accessToken = authStatus === 'authenticated' && profile?.role === 'admin'
       ? (session?.access_token ?? null)
       : null;
 
-    if (!role || !accessToken) {
+    if (!accessToken) {
       void backupBridge.setSession(null);
       return undefined;
     }
 
-    void backupBridge.setSession({ role, accessToken });
+    void backupBridge.setSession({ role: 'admin', accessToken });
     return undefined;
   }, [authStatus, profile?.role, session?.access_token]);
 

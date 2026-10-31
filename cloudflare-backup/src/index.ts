@@ -43,7 +43,7 @@ function corsHeaders(): Headers {
   return new Headers({
     'access-control-allow-origin': '*',
     'access-control-allow-methods': CORS_ALLOWED_METHODS,
-    'access-control-allow-headers': 'authorization, content-type, x-dks-plaintext-sha256, x-dks-ciphertext-sha256, x-dks-fingerprint, x-dks-schema-version, x-dks-record-counts, x-dks-created-at, x-dks-app-version, x-dks-key-id, x-dks-source',
+    'access-control-allow-headers': 'authorization, content-type, x-dks-plaintext-sha256, x-dks-ciphertext-sha256, x-dks-fingerprint, x-dks-schema-version, x-dks-record-counts, x-dks-created-at, x-dks-app-version, x-dks-key-id, x-dks-source, x-dks-device-id',
     'access-control-max-age': '600',
     vary: 'Origin',
   });

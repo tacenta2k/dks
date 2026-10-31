@@ -8,6 +8,21 @@ export interface SyncState {
   last_sync_at?: string | null;
   last_error?: string | null;
   pending_count?: number;
+  /**
+   * Cache-completeness evidence, reported by the renderer's sync engine over
+   * the existing `dks:local:set-sync-status` channel. Nothing here is inferred
+   * in the main process: the main process does not talk to Supabase.
+   *
+   * `lastPullAt` is when a full authorized pull/reconcile completed,
+   * `lastPullComplete` is true only when every paginated page of `entries` and
+   * `app_columns` arrived, and `lastLocalMutationAt` is when this PC last
+   * enqueued a local change. Cloud backup refuses to snapshot a cache that
+   * cannot show it was fully pulled after its newest local mutation.
+   */
+  lastPullAt?: string | null;
+  lastPullComplete?: boolean;
+  lastPullRows?: number | null;
+  lastLocalMutationAt?: string | null;
 }
 
 export interface TimestampedRecord {

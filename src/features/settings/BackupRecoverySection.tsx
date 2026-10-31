@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { Role } from '../auth/auth-types';
 import type {
+  DksBackupDesignation,
   DksBackupDrillResult as BackupDrillResult,
   DksBackupHealthResult as BackupHealthResult,
   DksBackupHistoryEntry as BackupHistoryEntry,
@@ -19,6 +20,34 @@ import type {
  * the main process re-checks the admin role on each one.
  */
 
+/**
+ * Reads and writes the designated backup PC in Supabase `public.settings`.
+ * Injectable so the panel is testable without a Supabase client.
+ */
+export interface BackupDesignationBridge {
+  read: () => Promise<DksBackupDesignation | null>;
+  claim: (input: { deviceId: string; label: string }) => Promise<DksBackupDesignation>;
+}
+
+/**
+ * The production bridge. Both imports are dynamic: the renderer startup graph
+ * must not pull in the Supabase client for a Settings panel.
+ */
+async function defaultDesignationBridge(): Promise<BackupDesignationBridge | null> {
+  const [{ supabase }, { readDesignation, claimDesignation }] = await Promise.all([
+    import('../../lib/supabase'),
+    import('./backup-designation'),
+  ]);
+  if (!supabase) return null;
+  // The runtime client is a real Supabase client; the auth-service type only
+  // declares the auth paths DKS already uses.
+  const client = supabase as unknown as import('./settings-service').SettingsDataClient;
+  return {
+    read: () => readDesignation(client),
+    claim: (input) => claimDesignation(client, input),
+  };
+}
+
 export interface BackupBridge {
   getState: (input: { role: string }) => Promise<BackupState>;
   runNow: (input: { role: string; trigger?: string }) => Promise<BackupRunResult>;
@@ -33,12 +62,27 @@ export interface BackupBridge {
     keyId?: string;
   }) => Promise<BackupKeySetupResult>;
   healthCheck: (input: { role: string }) => Promise<BackupHealthResult>;
+  /**
+   * Pushes the designated backup PC (read from Supabase) into main so the
+   * scheduler knows whether this PC should run automatic backups.
+   */
+  setDesignation: (input: {
+    role: string;
+    designation: DksBackupDesignation | null;
+  }) => Promise<BackupState>;
+  /** Renames this PC. A safe label only — never a hostname or user name. */
+  setDeviceLabel: (input: { role: string; label: string }) => Promise<BackupState>;
 }
 
 export interface BackupRecoverySectionProps {
   role?: Role | string | null;
   /** The preload bridge. `null` forces the "desktop bridge unavailable" state. */
   backup?: BackupBridge | null;
+  /**
+   * Reads/writes the designated backup PC in Supabase. Injected in tests;
+   * defaults to the real `public.settings` client.
+   */
+  designation?: BackupDesignationBridge | null;
 }
 
 type LoadStatus = 'idle' | 'loading' | 'ready' | 'error';
@@ -146,7 +190,11 @@ function connectionLabel(state: BackupState): string {
   }
 }
 
-export function BackupRecoverySection({ role, backup }: BackupRecoverySectionProps): JSX.Element {
+export function BackupRecoverySection({
+  role,
+  backup,
+  designation: designationBridge,
+}: BackupRecoverySectionProps): JSX.Element {
   const bridge = backup === undefined ? resolveBridge() : backup;
 
   const [status, setStatus] = useState<LoadStatus>('idle');
@@ -161,6 +209,12 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
   const [typedKey, setTypedKey] = useState('');
   const [wizardError, setWizardError] = useState<string | null>(null);
   const [wizardBusy, setWizardBusy] = useState(false);
+  // The designated backup PC, as read from Supabase.
+  const [designation, setDesignation] = useState<DksBackupDesignation | null>(null);
+  const [designationError, setDesignationError] = useState<string | null>(null);
+  const [claimConfirmOpen, setClaimConfirmOpen] = useState(false);
+  const [claimBusy, setClaimBusy] = useState(false);
+  const [labelDraft, setLabelDraft] = useState('');
   // Importing the key from another PC: the replacement-machine path.
   const [importOpen, setImportOpen] = useState(false);
   const [importKey, setImportKey] = useState('');
@@ -209,8 +263,15 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
   /** A key id is a hash prefix: safe to show, and enough to match a key. */
   const shortKeyId = (keyId: string): string => `${keyId.slice(0, 8)}…${keyId.slice(-4)}`;
 
+  /** A device id is random, not PII — but only a short form is ever displayed. */
+  const shortDeviceId = (deviceId: string): string => `${deviceId.slice(0, 4)}…${deviceId.slice(-4)}`;
+
+  /**
+   * What a backup holds. Never "authoritative": Supabase is the live authority
+   * and this is a disaster-recovery copy of one PC's synchronised workspace.
+   */
   const sourceLabel = (source: string | null): string => (
-    source === 'local-cache' ? 'This PC’s local cache' : 'Unknown'
+    source === 'local-cache' ? 'Synchronised local workspace' : 'Unknown'
   );
 
   const monthKey = (year: number, month: number): string => `${String(year)}-${String(month).padStart(2, '0')}`;
@@ -370,6 +431,68 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
     }
   };
 
+  /**
+   * Read the shared designation from Supabase and hand it to main.
+   *
+   * Main uses it only to decide whether THIS PC schedules automatic backups;
+   * the Worker re-reads the same row on every upload, so a stale or hostile
+   * local copy cannot make a non-designated PC's uploads succeed.
+   */
+  const syncDesignation = useCallback(async (): Promise<void> => {
+    if (!bridge || !adminRole) return;
+    let impl: BackupDesignationBridge | null = designationBridge ?? null;
+    if (designationBridge === undefined) {
+      try {
+        impl = await defaultDesignationBridge();
+      } catch (caught) {
+        setDesignationError(messageFromError(caught, 'DKS could not reach Supabase to read the backup PC'));
+        return;
+      }
+    }
+    if (!impl) return;
+    try {
+      const next = await impl.read();
+      setDesignation(next);
+      await bridge.setDesignation({ role: adminRole, designation: next });
+      await load();
+    } catch (caught) {
+      setDesignationError(messageFromError(caught, 'DKS could not read which PC is designated for backup'));
+    }
+  }, [adminRole, bridge, designationBridge, load]);
+
+  useEffect(() => {
+    void syncDesignation();
+  }, [syncDesignation]);
+
+  /**
+   * Make this PC the designated backup PC. This transfers automatic backup duty
+   * away from whichever PC held it, which is why the UI asks for confirmation.
+   */
+  const handleClaimDesignation = async (): Promise<void> => {
+    if (!bridge || !adminRole || !state) return;
+    let impl: BackupDesignationBridge | null = designationBridge ?? null;
+    if (designationBridge === undefined) impl = await defaultDesignationBridge();
+    if (!impl) {
+      setDesignationError('DKS is not connected to Supabase, so the backup PC cannot be changed.');
+      return;
+    }
+    setClaimBusy(true);
+    setDesignationError(null);
+    try {
+      const label = labelDraft.trim() || state.deviceLabel;
+      const next = await impl.claim({ deviceId: state.deviceId, label });
+      setDesignation(next);
+      await bridge.setDesignation({ role: adminRole, designation: next });
+      setClaimConfirmOpen(false);
+      setLabelDraft('');
+      await load();
+    } catch (caught) {
+      setDesignationError(messageFromError(caught, 'DKS could not make this PC the backup PC'));
+    } finally {
+      setClaimBusy(false);
+    }
+  };
+
   const handleRunNow = async (): Promise<void> => {
     if (!bridge || !adminRole) return;
     setRunning(true);
@@ -502,13 +625,26 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
               />
               <StatusItem label="Backup key on this PC" value={state.keyId ? shortKeyId(state.keyId) : 'Not set up'} />
               <StatusItem label="What a backup holds" value={sourceLabel(state.source)} />
+              <StatusItem
+                label="Backup PC"
+                value={state.designated
+                  ? `${state.deviceLabel} (this PC)`
+                  : state.designatedDeviceLabel
+                    ? `${state.designatedDeviceLabel} (another PC)`
+                    : state.designatedDeviceId
+                      ? `${shortDeviceId(state.designatedDeviceId)} (another PC)`
+                      : 'Not designated yet'}
+              />
+              <StatusItem
+                label="Local cache synced"
+                value={state.cacheComplete ? 'Yes' : 'Not yet — backups wait'}
+              />
             </div>
 
             <p className="settings-muted settings-backup__scope">
-              A backup is an encrypted copy of <strong>this PC’s local cache</strong>, taken when DKS has pushed
-              its pending changes. Supabase stays the system of record: a cloud backup is a copy of one machine’s
-              cache, not an authoritative copy of the organisation’s data, and it is never restored over live data
-              in this release.
+              Encrypted snapshot of the <strong>designated Admin PC’s synchronised local workspace</strong>.
+              Supabase remains the live authority: this is a disaster-recovery copy, not an authoritative
+              backup of the organisation’s data, and it is never restored over live data in this release.
             </p>
 
             <label className="settings-toggle settings-backup__toggle" htmlFor="settings-backup-enabled">
@@ -531,15 +667,33 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
               <p className="settings-backup__note" role="status">{state.lastError}</p>
             ) : null}
 
+            {!state.designated ? (
+              <p className="settings-backup__note" role="status">
+                {state.designatedDeviceId
+                  ? <>
+                      Automatic backup runs on another designated Admin PC
+                      {state.designatedDeviceLabel
+                        ? ` — ${state.designatedDeviceLabel}`
+                        : ` — ${shortDeviceId(state.designatedDeviceId)}`}.
+                      {' '}You can still list, download, import a recovery key and test a restore from here.
+                    </>
+                  : 'No Admin PC is designated for cloud backup yet. Designate one below to start automatic backups.'}
+              </p>
+            ) : null}
+
             <div className="settings-backup__actions">
-              <button
-                type="button"
-                className="button button--secondary"
-                onClick={() => void handleRunNow()}
-                disabled={running || !state.enabled}
-              >
-                {running ? 'Backing up…' : 'Back up now'}
-              </button>
+              {/* v1: only the designated PC may start a backup. Allowing a second
+                  Admin PC to force one would create a second backup lineage. */}
+              {state.designated ? (
+                <button
+                  type="button"
+                  className="button button--secondary"
+                  onClick={() => void handleRunNow()}
+                  disabled={running || !state.enabled}
+                >
+                  {running ? 'Backing up…' : 'Back up now'}
+                </button>
+              ) : null}
               <button
                 type="button"
                 className="button button--secondary"
@@ -584,6 +738,96 @@ export function BackupRecoverySection({ role, backup }: BackupRecoverySectionPro
             >
               {savingUrl ? 'Saving…' : 'Save address'}
             </button>
+          </div>
+
+          <div className="settings-maintenance__card settings-backup__device" aria-labelledby="backup-device-title">
+            <h3 id="backup-device-title">Backup PC</h3>
+            <p className="settings-muted">
+              One Admin PC runs the automatic backups. This PC is
+              {' '}<strong>{state.deviceLabel}</strong>{' '}
+              (<code className="settings-backup__key-id">{shortDeviceId(state.deviceId)}</code>).
+              The designation is stored in Supabase, so it applies to every PC in the workspace.
+            </p>
+            <dl className="settings-backup__device-grid">
+              <div>
+                <dt>Designated</dt>
+                <dd>
+                  {state.designated
+                    ? 'This PC'
+                    : state.designatedDeviceLabel
+                      ? state.designatedDeviceLabel
+                      : state.designatedDeviceId
+                        ? shortDeviceId(state.designatedDeviceId)
+                        : 'No PC yet'}
+                </dd>
+              </div>
+              <div>
+                <dt>Changed</dt>
+                <dd>{state.designatedAt ? formatBackupInstant(state.designatedAt) ?? '—' : '—'}</dd>
+              </div>
+            </dl>
+
+            {designationError ? (
+              <p className="settings-backup__note" role="alert">{designationError}</p>
+            ) : null}
+
+            {state.designated ? (
+              <p className="settings-muted">
+                Automatic backups run from this PC. To move the duty, run DKS on the other Admin PC and
+                designate it there.
+              </p>
+            ) : claimConfirmOpen ? (
+              <div className="settings-backup__import">
+                <p className="settings-backup__key-warning" role="alert">
+                  This transfers automatic backup duty{designation?.label ? ` away from ${designation.label}` : ''} to
+                  this PC. The other PC stops backing up. Both PCs keep their own recovery keys, so backups
+                  already stored stay openable only with the key of the PC that made them.
+                </p>
+                <label className="settings-field" htmlFor="settings-backup-device-label">
+                  <span>Label for this PC (no personal names)</span>
+                  <input
+                    id="settings-backup-device-label"
+                    type="text"
+                    autoComplete="off"
+                    spellCheck={false}
+                    maxLength={60}
+                    value={labelDraft}
+                    placeholder={state.deviceLabel}
+                    onChange={(event) => setLabelDraft(event.target.value)}
+                  />
+                </label>
+                <div className="settings-backup__import-actions">
+                  <button
+                    type="button"
+                    className="button button--secondary"
+                    onClick={() => void handleClaimDesignation()}
+                    disabled={claimBusy}
+                  >
+                    {claimBusy ? 'Designating…' : 'Yes, make this PC the backup PC'}
+                  </button>
+                  <button
+                    type="button"
+                    className="button button--ghost"
+                    onClick={() => {
+                      setClaimConfirmOpen(false);
+                      setLabelDraft('');
+                    }}
+                    disabled={claimBusy}
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="button button--secondary"
+                onClick={() => setClaimConfirmOpen(true)}
+                disabled={claimBusy}
+              >
+                Make this PC the backup PC
+              </button>
+            )}
           </div>
 
           <div className="settings-maintenance__card settings-backup__wizard" aria-labelledby="backup-key-title">

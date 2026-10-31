@@ -1,11 +1,14 @@
 import {
-  authenticate,
   BackupHttpError,
+  DEVICE_ID_PATTERN,
+  lookupDesignatedDevice,
   requireAdmin,
+  requireBackupAdmin,
   requireStepUp,
   type AuthDeps,
   type AuthenticatedCaller,
   type BackupEnv,
+  type DesignatedDevice,
   type R2Object,
 } from './auth';
 
@@ -21,7 +24,12 @@ import {
  * Delete and restore are PR2/PR3 and are not registered at all.
  */
 
-export const MAX_UPLOAD_BYTES = 200 * 1024 * 1024;
+/**
+ * 25 MB. A real DKS snapshot is ~65 KB at ~1,200 rows, so this is ~380x headroom
+ * that still trips on a corrupt or runaway snapshot. Enforced twice: a cheap
+ * `content-length` refusal, and a counting TransformStream while streaming.
+ */
+export const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 export const BACKUP_KEY_PREFIX = 'backups/';
 export const DEFAULT_RETENTION_DAYS = 90;
 
@@ -366,8 +374,11 @@ export async function handleUpload(
   env: BackupEnv,
   deps: RouteDeps,
 ): Promise<UploadResult> {
-  const caller = await requireAdminOrApprovedOffice(request, env, deps);
+  // v1 policy: backup upload is ADMIN ONLY. An Office session is refused with
+  // OFFICE_NOT_ALLOWED even when its sign-in approval is valid.
+  const caller = await requireBackupAdmin(request, env, deps);
   const metadata = readUploadMetadata(request);
+  const designated = await requireDesignatedDevice(request, caller.token, env, deps);
 
   // Cheap early refusal when the client declares an oversized body.
   const declared = Number(request.headers.get('content-length') ?? '0');
@@ -409,6 +420,10 @@ export async function handleUpload(
         muscatDate: parts.day,
         uploadedBy: caller.claims.sub,
         role: caller.role,
+        // Which PC produced this object: the opaque random id it presented and
+        // the administrator-chosen label. Neither is PII by construction.
+        deviceId: designated.deviceId,
+        deviceLabel: designated.label,
       },
     });
   } catch (error) {
@@ -432,16 +447,6 @@ export async function handleUpload(
 }
 
 /** Admin, or an Office session approved by the server-side RPC. */
-async function requireAdminOrApprovedOffice(
-  request: Request,
-  env: BackupEnv,
-  deps: AuthDeps,
-): Promise<AuthenticatedCaller & { token: string }> {
-  // `authenticate` verifies the JWT, looks the role up in Postgres with the
-  // caller's own token, and for Office runs the SECURITY DEFINER approval RPC —
-  // throwing when it returns false. Reaching this line is therefore sufficient.
-  return authenticate(request, env, deps);
-}
 
 export interface BackupListItem {
   id: string;
@@ -460,6 +465,40 @@ export interface BackupListItem {
   /** What the snapshot covers; null for objects that predate the field. */
   source: string | null;
   outcome: 'verified';
+}
+
+/**
+ * Reject any upload from a PC that is not the one designated in `public.settings`.
+ *
+ * Server-side by design: a second Admin PC cannot talk itself into uploading by
+ * flipping a local flag, because the answer comes from Supabase on every call.
+ */
+async function requireDesignatedDevice(
+  request: Request,
+  token: string,
+  env: BackupEnv,
+  deps: AuthDeps,
+): Promise<DesignatedDevice> {
+  const presented = (request.headers.get('x-dks-device-id') ?? '').trim().toLowerCase();
+  if (!DEVICE_ID_PATTERN.test(presented)) {
+    throw new BackupHttpError(400, 'BAD_REQUEST', 'The device identifier is missing or malformed');
+  }
+  const designated = await lookupDesignatedDevice(token, env, deps);
+  if (!designated) {
+    throw new BackupHttpError(
+      403,
+      'DEVICE_NOT_DESIGNATED',
+      'No Admin PC is designated for cloud backup. Use "Make this PC the backup PC" in Settings.',
+    );
+  }
+  if (designated.deviceId !== presented) {
+    throw new BackupHttpError(
+      403,
+      'DEVICE_NOT_DESIGNATED',
+      'This PC is not the designated backup PC. Automatic backup runs on the designated Admin PC.',
+    );
+  }
+  return designated;
 }
 
 /**

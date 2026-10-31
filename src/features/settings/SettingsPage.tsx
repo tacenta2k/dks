@@ -205,13 +205,25 @@ const STATUS_COLOR_FIELDS: ReadonlyArray<{
  */
 export type SettingsSectionId = 'expiry' | 'notifications' | 'workspace' | 'backup' | 'about';
 
-export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSectionId; label: string }> = [
+/**
+ * `adminOnly` sections are hidden from the nav entirely for Office sessions —
+ * not shown-then-refused. Cloud backup is an Admin-only feature in v1: an
+ * Office user gets no tab, no controls and no bridge call.
+ */
+export const SETTINGS_SECTIONS: ReadonlyArray<{ id: SettingsSectionId; label: string; adminOnly?: boolean }> = [
   { id: 'expiry', label: 'Expiry rules' },
   { id: 'notifications', label: 'Notifications' },
   { id: 'workspace', label: 'Workspace' },
-  { id: 'backup', label: 'Backup & recovery' },
+  { id: 'backup', label: 'Backup & recovery', adminOnly: true },
   { id: 'about', label: 'About & updates' },
 ];
+
+/** The sections a given role may see in the nav. */
+export function visibleSettingsSections(
+  role: string | null | undefined,
+): ReadonlyArray<{ id: SettingsSectionId; label: string }> {
+  return SETTINGS_SECTIONS.filter((section) => section.adminOnly !== true || role === 'admin');
+}
 
 interface ResolvedSettingsInput extends PartialSettings {
   primaryExpiryColumnId?: string;
@@ -595,7 +607,7 @@ export function SettingsPage({
     <div className="settings-page">
       <div className="settings-layout">
         <nav className="settings-nav" aria-label="Settings sections">
-          {SETTINGS_SECTIONS.map((item) => (
+          {visibleSettingsSections(role).map((item) => (
             <button
               key={item.id}
               type="button"

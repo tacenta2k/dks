@@ -115,6 +115,21 @@ function clearOutbox(): void {
   }
 }
 
+/**
+ * Stand in for the renderer's sync engine reporting a fully successful
+ * authorized pull — every page read, nothing pending afterwards. Backup refuses
+ * to snapshot a cache that cannot show this, so every mutation in these tests
+ * is followed by one.
+ */
+function markCacheSynced(): void {
+  store.setSyncStatus({
+    status: 'healthy',
+    lastPullAt: new Date().toISOString(),
+    lastPullComplete: true,
+    lastPullRows: store.listEntries(true).length,
+  });
+}
+
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'dks-backup-service-'));
   userDataPath = join(dir, 'DKS');
@@ -143,6 +158,13 @@ beforeEach(() => {
   service.setEnabled(true);
   service.setWorkerUrl('https://dks-backup.example.workers.dev');
   service.setSession({ role: 'admin', accessToken: 'test-access-token' });
+  // This PC is the designated Admin backup PC (normally read from Supabase).
+  service.setDesignation({
+    deviceId: service.deviceId(),
+    label: 'DKS-TEST-PC',
+    designatedAt: '2026-10-01T06:00:00.000Z',
+  });
+  markCacheSynced();
 });
 
 afterEach(() => {
@@ -202,9 +224,10 @@ describe('offline queue', () => {
     const fingerprintA = currentFingerprint();
     expect(pendingFiles()).toHaveLength(1);
 
-    // The data changes while still offline.
+    // The data changes while still offline, and the change reaches Supabase.
     store.createEntry({ id: 'entry-added-offline', category: 'Employee', data: { Name: 'Offline edit' } });
     clearOutbox();
+    markCacheSynced();
     const fingerprintB = currentFingerprint();
     expect(fingerprintB).not.toBe(fingerprintA);
 
@@ -379,6 +402,10 @@ describe('before-quit budget', () => {
     });
     slow.setWorkerUrl('https://dks-backup.example.workers.dev');
     slow.setSession({ role: 'admin', accessToken: 'test-access-token' });
+    slow.setEnabled(true);
+    // The designation lives in memory per process, so this second instance has
+    // to be told it is the designated PC — as a real PC learns on every launch.
+    slow.setDesignation({ deviceId: slow.deviceId(), label: 'DKS-TEST-PC', designatedAt: null });
 
     const result = await slow.runBeforeQuit(20);
     expect(result.outcome).toBe('pending');

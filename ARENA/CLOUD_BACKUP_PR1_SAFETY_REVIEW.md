@@ -43,6 +43,38 @@ in §7 of `ARENA/CLOUD_BACKUP_PR1_REPORT.md`.
 Full suite after the round-2 changes: **113 files, 1157 passed, 3 skipped,
 0 failed** (246 s); `npm run typecheck` and `npm run build` clean.
 
+### Round 3 — owner-approved v1 policy
+
+Six corrections followed from the owner's review of this document. Details and
+the test names are in §8 of `ARENA/CLOUD_BACKUP_PR1_REPORT.md`; the items below
+supersede the corresponding findings here.
+
+1. **Upload is now Admin-only.** `handleUpload` uses `requireBackupAdmin`;
+   `requireAdminOrApprovedOffice` was deleted. An Office session is refused with
+   `403 OFFICE_NOT_ALLOWED` even when its sign-in approval is valid, and the
+   Electron side refuses an Office credential outright. §3's description of the
+   Office upload path no longer applies.
+2. **One designated Admin backup PC, enforced by the Worker** against
+   `public.settings` → `dks.backup.designated_device` on every upload
+   (`403 DEVICE_NOT_DESIGNATED`). The §4 "Multi-PC caveat" is now a control, not
+   an operational note: a second Admin PC cannot start a parallel lineage.
+3. **`MAX_UPLOAD_BYTES` is 25 MB**, not 200 MB — ~380x the observed snapshot
+   size, so it is a real tripwire.
+4. **Completeness is now evidenced, not assumed.** Backup requires an empty
+   outbox, a completed full authorized pull that walked every page, and no local
+   mutation after it; otherwise the run is `incomplete` with a specific reason.
+   §1's "Evidence that justifies calling a snapshot complete" gains a fifth
+   item: the sync engine's own completeness report.
+5. **The pagination change is proven safe under RLS** for both roles
+   (`tests/sync-pagination-rls.test.ts`), including that a failed page throws
+   rather than yielding a partial cache.
+6. **JWT issuer and audience are now validated exactly**, and an unknown `kid`
+   refreshes the JWKS once. §7 risk 6 is closed except for the `kid`-reuse
+   note, which the single forced refresh bounds rather than eliminates.
+
+Full suite after round 3: **115 files, 1207 passed, 3 skipped, 0 failed**;
+`npm run typecheck` and `npm run build` clean.
+
 ---
 
 ## 1. Scope and completeness
