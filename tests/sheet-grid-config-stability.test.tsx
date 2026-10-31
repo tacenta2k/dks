@@ -95,6 +95,30 @@ describe('visa sheet grid configuration', () => {
     expect(typeof second.onCellValueChanged).toBe('function');
   });
 
+  it('keeps the scroll-performance grid contract (virtualized, unanimated)', async () => {
+    // Scroll lag investigation: the sheet must stay on AG Grid's bounded,
+    // virtualized rendering path. domLayout "normal" + no suppression of
+    // row/column virtualisation means only a viewport slice of rows/columns
+    // is ever in the DOM (proven on the real grid in
+    // tests/sheet-scroll-perf.test.tsx). animateRows stays OFF: this sheet
+    // replaces all row objects on every quiet refresh, so FLIP row
+    // animations would run over full update sets during scroll recycling.
+    // NOTE: this asserts the configuration, not visual smoothness — jsdom
+    // has no layout or frame pacing to measure.
+    const repository = await seededRepository();
+    render(<SheetPage repository={repository} role="admin" refreshToken={0} renderGridInTests />);
+    await waitFor(() => expect(gridCapture.props).not.toBeNull());
+    const props = currentProps();
+    expect(props.domLayout).toBe('normal');
+    expect(props.animateRows).toBeFalsy();
+    expect(props.suppressRowVirtualisation).toBeFalsy();
+    expect(props.suppressColumnVirtualisation).toBeFalsy();
+    // The gutter's O(1) numbering hint must be wired through the context.
+    const context = props.context as { syntheticRowsInterleaved?: unknown };
+    expect(typeof context?.syntheticRowsInterleaved).toBe('function');
+    expect((context.syntheticRowsInterleaved as () => boolean)()).toBe(false);
+  });
+
   it('drives search through the real grid rowData, not the jsdom table', async () => {
     const repository = await seededRepository();
     const { getByLabelText } = render(

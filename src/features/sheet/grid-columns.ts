@@ -29,6 +29,16 @@ export interface BuildGridRowsOptions {
 export interface GridColumnCallbacks extends RowActionsContext {
   /** FIXES_UI §5.5 (SHEET-10): opens Column Setup from the `+` header. */
   onAddColumn?: () => void;
+  /**
+   * Scroll-performance hint for the row-number gutter: true when synthetic
+   * rows (Group-by headers) are interleaved BETWEEN real records in the
+   * row model. When false, the ONLY synthetic row is the draft row, which
+   * SheetPage's postSortRows forces to the very end — so a real record's
+   * display number is exactly `rowIndex + 1` and the getter must not walk
+   * the whole model to count it. When absent/true, the getter falls back
+   * to exact counting (correct for grouped views and unit harnesses).
+   */
+  syntheticRowsInterleaved?: () => boolean;
 }
 
 export interface BuiltGridRows {
@@ -226,8 +236,28 @@ export function buildGridColumns(
       if (!params.data?.__sheetRow) {
         return '';
       }
-      const api = params.api;
       const rowIndex = params.node?.rowIndex;
+      // Scroll perf: AG Grid calls this getter for every rendered gutter
+      // cell on every scroll repaint. Counting real records by walking the
+      // model (below) is O(displayed rows) PER CELL — with a full-height
+      // viewport (~40 rows) and N records that is ~40×N callback
+      // invocations per repaint (measured: 200k at N=5000), which made
+      // scrolling visibly laggy as sheets grew. When no synthetic rows are
+      // interleaved (grouping off), the only synthetic row is the draft,
+      // forced LAST by postSortRows, so every displayed row above a real
+      // record is itself a real record and the display number is exactly
+      // rowIndex + 1 — O(1), same result incl. after AG sort/filter
+      // (rowIndex is the post-filter/sort displayed index, and the draft
+      // stays last through both).
+      if (
+        typeof rowIndex === 'number'
+        && rowIndex >= 0
+        && callbacks.syntheticRowsInterleaved
+        && !callbacks.syntheticRowsInterleaved()
+      ) {
+        return rowIndex + 1;
+      }
+      const api = params.api;
       if (api && params.node && typeof api.forEachNodeAfterFilterAndSort === 'function') {
         let displayNumber = 0;
         let found = false;

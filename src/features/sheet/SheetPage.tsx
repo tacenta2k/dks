@@ -551,6 +551,11 @@ export function SheetPage({
     () => groupable.find((column) => column.id === groupByColumnId) ?? null,
     [groupable, groupByColumnId],
   );
+  // Live mirror for the row-number gutter's scroll-perf hint: the getter
+  // may use its O(1) fast path only while no Group-by headers are
+  // interleaved between records (draft row alone stays forced last).
+  const groupColumnRef = useRef(groupColumn);
+  groupColumnRef.current = groupColumn;
   // Bug 2 redux: AG Grid MUTATES the draft row's data object when an editor
   // commits into it (plain `field:` columns), so after a draft create the
   // previous draft object still holds the committed name. Bumping this
@@ -837,6 +842,9 @@ export function SheetPage({
     onRenew: handleRenew,
     // FIXES_UI §5.5 (SHEET-10): the `+` header opens Column Setup.
     onAddColumn: () => setWizardOpen(true),
+    // Row-number gutter scroll-perf hint (reads the live ref, so this
+    // context object stays referentially stable across group toggles).
+    syntheticRowsInterleaved: () => groupColumnRef.current !== null,
   }), [handleDuplicate, handleDelete, handleRenew]);
 
   const gridColumnDefs = useMemo(
@@ -1575,7 +1583,13 @@ export function SheetPage({
                   // Shift+Tab the previous one; system columns are skipped.
                   tabToNextCell={handleTabToNextCell}
                   domLayout="normal"
-                  animateRows
+                  // Scroll perf: NO animateRows. This sheet replaces the
+                  // whole rowData (new row objects) on every quiet refresh
+                  // — cell edits, sync landings — so AG would run FLIP row
+                  // animations over a full update set on top of scroll
+                  // recycling. Row/column virtualization (AG defaults,
+                  // domLayout="normal") does the real work; sorting and
+                  // editing are unaffected, rows just don't glide.
                   {...GRID_KEYBOARD_PROPS}
                 />
               </div>
