@@ -14,6 +14,7 @@ export type Capability =
   | 'renew'
   | 'search'
   | 'filter'
+  | 'refresh'
   | 'notifications'
   | 'adminNavigation'
   | 'export'
@@ -42,6 +43,11 @@ const OFFICE_CAPABILITIES: ReadonlySet<Capability> = new Set([
   'renew',
   'search',
   'filter',
+  // Bug 3: Refresh (manual sync + local reload) is an explicit shared
+  // capability. It grants no wider data access — the reload still reads
+  // through the role-scoped snapshot (Office = 3-day window) and the sync
+  // run is the same RLS-bounded one that already runs in the background.
+  'refresh',
   'notifications',
 ]);
 

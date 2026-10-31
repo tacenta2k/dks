@@ -7,11 +7,110 @@
  * draft-row helper defines exactly what counts as the "first meaningful value"
  * (focus or keystrokes alone must never create a record).
  */
-import type { CellPosition, Column, ColumnMovedEvent, GridApi, TabToNextCellParams } from 'ag-grid-community';
+import type {
+  CellPosition,
+  Column,
+  ColumnMovedEvent,
+  GridApi,
+  RowSelectionOptions,
+  SelectionColumnDef,
+  TabToNextCellParams,
+} from 'ag-grid-community';
 
 import { extractUserColumnOrder, type ColumnDefinition } from '../../lib/columns';
 
 export const DRAFT_ROW_ID = '__draft';
+
+/* --------------------------------------------------------------------------
+ * Bug 2 — one Enter must create exactly one row.
+ *
+ * Two small, pure pieces carry the contract (SheetPage wires them in):
+ *
+ * 1. `isRepeatOrComposingKey` — a HELD Enter fires repeated keydowns
+ *    (`event.repeat`), and Enter that merely confirms an IME composition
+ *    candidate fires while `isComposing` (legacy keyCode 229). Neither is a
+ *    new commit gesture, so neither may (re)trigger the draft create.
+ *
+ * 2. `DraftCreateIdentityBox` — the draft row's create carries a stable
+ *    client-generated row id + idempotency key. Every retry of the SAME
+ *    draft commit (focus-loss commit after Enter, a replayed
+ *    cell-value-changed, an IPC retry) reuses that identity, so the layers
+ *    below can turn it into "return the existing row" instead of a second
+ *    insert. The identity rotates only when a NEW draft editing session
+ *    begins after a successful create — typing the same name again in the
+ *    fresh draft row is a legitimate new record with a fresh identity.
+ *
+ *    NOTE (Bug 2 redux): identity/repeat handling alone was NOT sufficient
+ *    — the owner's duplicate storm was a handoff/editor loop that minted a
+ *    legitimately-rotated identity per cycle. The loop itself is stopped
+ *    in SheetPage (fresh-draft generation + model-freshness gate on the
+ *    handoff + cancelling transient draft editors) and by
+ *    `isDraftSessionStartRecommit` below; this box remains the retry
+ *    dedupe layer underneath, not the loop fix.
+ * ------------------------------------------------------------------------ */
+
+/** Structural subset of KeyboardEvent / React.KeyboardEvent we need. */
+export interface KeyEventLike {
+  repeat?: unknown;
+  isComposing?: unknown;
+  keyCode?: unknown;
+  nativeEvent?: { isComposing?: unknown; keyCode?: unknown } | null;
+}
+
+export function isRepeatOrComposingKey(event: KeyEventLike | null | undefined): boolean {
+  if (!event) {
+    return false;
+  }
+  return event.repeat === true
+    || event.isComposing === true
+    || event.nativeEvent?.isComposing === true
+    || event.keyCode === 229
+    || event.nativeEvent?.keyCode === 229;
+}
+
+export interface DraftCreateIdentity {
+  id: string;
+  idempotencyKey: string;
+}
+
+let draftIdentityCounter = 0;
+
+function defaultDraftRowId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  draftIdentityCounter += 1;
+  return `draft-${Date.now()}-${draftIdentityCounter}-${Math.random().toString(16).slice(2)}`;
+}
+
+export class DraftCreateIdentityBox {
+  private current: (DraftCreateIdentity & { consumed: boolean }) | null = null;
+
+  public constructor(private readonly mintId: () => string = defaultDraftRowId) {}
+
+  /** The identity for the draft commit now in progress (minted on first use). */
+  public ensure(): DraftCreateIdentity {
+    if (!this.current) {
+      const id = this.mintId();
+      this.current = { id, idempotencyKey: `entry:create:${id}`, consumed: false };
+    }
+    return { id: this.current.id, idempotencyKey: this.current.idempotencyKey };
+  }
+
+  /** The current identity created its row; keep it for replay dedupe. */
+  public markConsumed(): void {
+    if (this.current) {
+      this.current.consumed = true;
+    }
+  }
+
+  /** A new draft editing session: a consumed identity rotates to a fresh one. */
+  public prepareForNextDraftEdit(): void {
+    if (this.current?.consumed) {
+      this.current = null;
+    }
+  }
+}
 
 /** AG Grid Community keyboard contract for the sheet (SHEET-12). */
 export const GRID_KEYBOARD_PROPS = Object.freeze({
@@ -52,6 +151,59 @@ export function isMeaningfulDraftValue(value: unknown): boolean {
     return true;
   }
   return true;
+}
+
+/* --------------------------------------------------------------------------
+ * Bug 2 redux — the Enter-duplicate LOOP (reproduced on the real grid in
+ * tests/enter-single-grid-repro.test.tsx; the 8e20826 fix did not stop it).
+ *
+ * The loop: a draft commit's focus handoff can reopen an editor on the
+ * draft row BEFORE AG Grid applies the refreshed rowData. That editor is
+ * seeded from the draft data object AG just mutated with the committed
+ * name, so it "starts" already holding the previous record's value. When
+ * AG then swaps the draft node's data for a fresh blank draft object and
+ * the editor is stopped (handoff retry, focus loss), AG compares the
+ * editor value against the node's CURRENT value (blank) — so the stop
+ * looks like a brand-new edit and fires cellValueChanged again with the
+ * same name, creating another row.
+ *
+ * The session-start snapshot breaks the commit leg of that loop by
+ * definition: a draft-row create is legitimate only when the value was
+ * ENTERED during the editing session that is committing. If the editor
+ * started with a meaningful value and commits exactly that same value,
+ * nothing was typed in this session — it is a re-commit of a pre-held
+ * (leaked) value and must never create a record. Typing the same name
+ * into a BLANK draft (session start = empty) still creates, as does
+ * editing the opened value to something different.
+ * ------------------------------------------------------------------------ */
+
+/** Scalar equality for cell values (editors surface strings; data may hold numbers). */
+export function draftValuesEqual(left: unknown, right: unknown): boolean {
+  const a = left === undefined ? null : left;
+  const b = right === undefined ? null : right;
+  if (Object.is(a, b)) {
+    return true;
+  }
+  if (a === null || b === null) {
+    return false;
+  }
+  const scalar = (value: unknown) => (
+    typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean'
+  );
+  return scalar(a) && scalar(b) && String(a) === String(b);
+}
+
+/**
+ * True when a draft commit merely re-applies the meaningful value the
+ * editor STARTED this session with (i.e. nothing was entered — the value
+ * leaked in from the previous commit). Such a commit must not create.
+ */
+export function isDraftSessionStartRecommit(
+  sessionStartValue: unknown,
+  committedValue: unknown,
+): boolean {
+  return isMeaningfulDraftValue(sessionStartValue)
+    && draftValuesEqual(sessionStartValue, committedValue);
 }
 
 /** R2-07: the grid theme class follows the app theme (no white dark panels). */
@@ -252,3 +404,56 @@ export function columnOrderFromMovedEvent<TData>(
   }
   return extractUserColumnOrder(displayedColumnIds(event.api), activeColumns);
 }
+
+/* --------------------------------------------------------------------------
+ * Bug 4 — AG Grid Community multi-row checkbox selection for bulk delete.
+ *
+ * The v32 selection API (not the deprecated `checkboxSelection` colDef):
+ *  - `mode: 'multiRow'` with checkboxes and a header select-all checkbox;
+ *  - `selectAll: 'filtered'` — the header checkbox selects ONLY the rows
+ *    visible under the current grid filters, never hidden ones;
+ *  - `enableClickSelection: false` — clicking cells keeps its editing
+ *    behaviour; rows are selected with the checkboxes only;
+ *  - only REAL records are selectable/checkable — synthetic group-header
+ *    rows and the blank draft row can never be bulk-deleted by accident.
+ * ------------------------------------------------------------------------ */
+
+export interface SelectableSheetRowData {
+  __sheetRow?: unknown;
+}
+
+export function isSelectableSheetRowData(
+  data: SelectableSheetRowData | null | undefined,
+): boolean {
+  return Boolean(data?.__sheetRow);
+}
+
+export function sheetRowSelectionOptions<TData extends SelectableSheetRowData>(
+  enabled: boolean,
+): RowSelectionOptions<TData> | undefined {
+  if (!enabled) {
+    return undefined;
+  }
+  return {
+    mode: 'multiRow',
+    selectAll: 'filtered',
+    headerCheckbox: true,
+    hideDisabledCheckboxes: true,
+    enableClickSelection: false,
+    checkboxes: (params) => isSelectableSheetRowData(params.data),
+    isRowSelectable: (node) => isSelectableSheetRowData(node.data),
+  };
+}
+
+/** The auto generated selection (checkbox) column, pinned left and compact. */
+export const SHEET_SELECTION_COLUMN_DEF: SelectionColumnDef = Object.freeze({
+  pinned: 'left',
+  lockPinned: true,
+  sortable: false,
+  resizable: false,
+  width: 40,
+  minWidth: 40,
+  maxWidth: 40,
+  headerTooltip: 'Select rows',
+  cellClass: 'sheet-select-cell',
+});

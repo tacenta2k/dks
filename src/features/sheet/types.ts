@@ -39,6 +39,20 @@ export interface SheetImportRecord {
   sourceRowNumber?: number;
 }
 
+/**
+ * Stable identity for one logical row creation (Bug 2).
+ *
+ * `id` is a client-generated row id and `idempotencyKey` names the create
+ * operation itself. Passing the same pair twice is a RETRY of the same
+ * create — repositories must return/update the existing row instead of
+ * inserting a second one. Omitting both keeps the legacy behaviour (the
+ * store mints a fresh id per call), which imports/duplicates rely on.
+ */
+export interface SheetCreateRowOptions {
+  id?: string;
+  idempotencyKey?: string;
+}
+
 /** Optional attribution and source details for repository audit events. */
 export interface SheetAuditOptions {
   actorId?: string | null;

@@ -13,6 +13,7 @@ import type {
   RenewalRecord,
   SheetAuditEntry,
   SheetAuditOptions,
+  SheetCreateRowOptions,
   SheetImportRecord,
   SheetRow,
   SheetSnapshot,
@@ -33,10 +34,26 @@ export interface SheetRepository {
    */
   reorderColumns?(columnIds: readonly string[]): Promise<ColumnDefinition[]>;
   softDeleteColumn(columnId: string, role?: string): Promise<ColumnDefinition | null>;
-  createRow(data?: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
+  /**
+   * Create one row. With `options.id`/`options.idempotencyKey` (Bug 2) the
+   * call is idempotent: a retry of the same logical create returns/updates
+   * the row that identity already created instead of inserting a duplicate.
+   */
+  createRow(
+    data?: Record<string, unknown>,
+    category?: string | null,
+    options?: SheetCreateRowOptions,
+  ): Promise<SheetRow>;
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   duplicateRow(rowId: string): Promise<SheetRow>;
   softDeleteRow(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
+  /**
+   * Bug 4: soft-delete several rows as one all-or-nothing batch (one store
+   * transaction, one outbox item and one audit entry per row, capped at
+   * MAX_BULK_SOFT_DELETE_ROWS). Optional so older adapters/test doubles
+   * stay assignable — SheetPage falls back to per-row deletes for those.
+   */
+  softDeleteRows?(rowIds: readonly string[], options?: SheetAuditOptions): Promise<SheetRow[]>;
   /** Optional admin methods keep older adapters and test doubles assignable. */
   restoreRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
   permanentDeleteRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow | null>;
@@ -56,6 +73,9 @@ export interface SheetRepository {
   ): Promise<SheetRow>;
   getRenewalHistory(rowId?: string): Promise<RenewalRecord[]>;
 }
+
+/** Bug 4: hard cap for one bulk soft-delete (mirrors the main-process cap). */
+export const MAX_BULK_SOFT_DELETE_ROWS = 1_000;
 
 function clone<T>(value: T): T {
   if (typeof structuredClone === 'function') {
@@ -117,6 +137,9 @@ export class InMemorySheetRepository implements SheetRepository {
   private renewals: RenewalRecord[];
 
   private auditHistory: SheetAuditEntry[];
+
+  /** Bug 2: idempotency key of a completed create → the row it created. */
+  private readonly createdRowIdByIdempotencyKey = new Map<string, string>();
 
   constructor(snapshot: Partial<SheetSnapshot> = {}) {
     this.columns = normalizeColumns(snapshot.columns ?? []);
@@ -212,10 +235,49 @@ export class InMemorySheetRepository implements SheetRepository {
     return clone(this.columns.find((column) => column.id === columnId) ?? target);
   }
 
-  async createRow(data: Record<string, unknown> = {}, category: string | null = null): Promise<SheetRow> {
+  async createRow(
+    data: Record<string, unknown> = {},
+    category: string | null = null,
+    options: SheetCreateRowOptions = {},
+  ): Promise<SheetRow> {
+    // Bug 2: a create carrying a stable client identity is idempotent. A
+    // retry (held-Enter replay, focus-loss second commit, IPC retry) finds
+    // the row its id/idempotency key already created and updates it in
+    // place instead of inserting a duplicate.
+    const retryKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+      ? options.idempotencyKey
+      : null;
+    const requestedId = typeof options.id === 'string' && options.id.trim() ? options.id : null;
+    const existingId = requestedId
+      ?? (retryKey ? this.createdRowIdByIdempotencyKey.get(retryKey) ?? null : null);
+    const existing = existingId
+      ? this.rows.find((row) => row.id === existingId) ?? null
+      : null;
+    if (existing) {
+      if (retryKey) {
+        this.createdRowIdByIdempotencyKey.set(retryKey, existing.id);
+      }
+      const mergedData = { ...existing.data, ...clone(data) };
+      if (JSON.stringify(mergedData) === JSON.stringify(existing.data)
+        && (category === null || category === existing.category)) {
+        return clone(existing);
+      }
+      const timestamp = now();
+      const updated: SheetRow = {
+        ...existing,
+        data: mergedData,
+        category: category ?? existing.category,
+        updatedAt: timestamp,
+        updated_at: timestamp,
+      };
+      this.rows = this.rows.map((row) => (row.id === existing.id ? updated : row));
+      this.recordAudit('update', { rowId: existing.id }, undefined);
+      return clone(updated);
+    }
+
     const timestamp = now();
     const row: SheetRow = {
-      id: makeId('row'),
+      id: requestedId ?? makeId('row'),
       data: clone(data),
       category: category ?? (typeof data.category === 'string' ? data.category : null),
       deleted: false,
@@ -223,6 +285,9 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: timestamp,
     };
     this.rows = [...this.rows, row];
+    if (retryKey) {
+      this.createdRowIdByIdempotencyKey.set(retryKey, row.id);
+    }
     this.recordAudit('create', { rowId: row.id }, undefined);
     return clone(row);
   }
@@ -308,6 +373,46 @@ export class InMemorySheetRepository implements SheetRepository {
     this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? updated : row);
     this.recordAudit('soft_delete', { rowId }, options);
     return clone(updated);
+  }
+
+  async softDeleteRows(
+    rowIds: readonly string[],
+    options: SheetAuditOptions = {},
+  ): Promise<SheetRow[]> {
+    // Bug 4: validate the WHOLE batch before the first mutation so a bad
+    // id rejects everything (mirrors the store's single-transaction rule).
+    if (!Array.isArray(rowIds) || rowIds.length === 0) {
+      throw new Error('ids must not be empty');
+    }
+    if (rowIds.length > MAX_BULK_SOFT_DELETE_ROWS) {
+      throw new Error(`ids must contain at most ${MAX_BULK_SOFT_DELETE_ROWS} rows`);
+    }
+    if (new Set(rowIds).size !== rowIds.length) {
+      throw new Error('ids must not contain duplicates');
+    }
+    const targets = rowIds.map((rowId) => {
+      const row = typeof rowId === 'string'
+        ? this.rows.find((candidate) => candidate.id === rowId)
+        : undefined;
+      if (!row) {
+        throw new Error(`Unknown sheet row: ${String(rowId)}`);
+      }
+      if (row.deleted === true) {
+        throw new Error(`Row is already in the Recycle Bin: ${rowId}`);
+      }
+      return row;
+    });
+
+    const timestamp = now();
+    const updatedById = new Map(targets.map((row) => [
+      row.id,
+      { ...row, deleted: true, updatedAt: timestamp, updated_at: timestamp } as SheetRow,
+    ]));
+    this.rows = this.rows.map((row) => updatedById.get(row.id) ?? row);
+    for (const row of targets) {
+      this.recordAudit('soft_delete', { rowId: row.id }, options);
+    }
+    return clone(targets.map((row) => updatedById.get(row.id) ?? row));
   }
 
   async restoreRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {
