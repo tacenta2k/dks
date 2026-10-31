@@ -47,6 +47,13 @@ export interface SheetRepository {
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   duplicateRow(rowId: string): Promise<SheetRow>;
   softDeleteRow(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
+  /**
+   * Bug 4: soft-delete several rows as one all-or-nothing batch (one store
+   * transaction, one outbox item and one audit entry per row, capped at
+   * MAX_BULK_SOFT_DELETE_ROWS). Optional so older adapters/test doubles
+   * stay assignable — SheetPage falls back to per-row deletes for those.
+   */
+  softDeleteRows?(rowIds: readonly string[], options?: SheetAuditOptions): Promise<SheetRow[]>;
   /** Optional admin methods keep older adapters and test doubles assignable. */
   restoreRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
   permanentDeleteRow?(rowId: string, options?: SheetAuditOptions): Promise<SheetRow | null>;
@@ -66,6 +73,9 @@ export interface SheetRepository {
   ): Promise<SheetRow>;
   getRenewalHistory(rowId?: string): Promise<RenewalRecord[]>;
 }
+
+/** Bug 4: hard cap for one bulk soft-delete (mirrors the main-process cap). */
+export const MAX_BULK_SOFT_DELETE_ROWS = 1_000;
 
 function clone<T>(value: T): T {
   if (typeof structuredClone === 'function') {
@@ -363,6 +373,46 @@ export class InMemorySheetRepository implements SheetRepository {
     this.rows = this.rows.map((row, currentIndex) => currentIndex === index ? updated : row);
     this.recordAudit('soft_delete', { rowId }, options);
     return clone(updated);
+  }
+
+  async softDeleteRows(
+    rowIds: readonly string[],
+    options: SheetAuditOptions = {},
+  ): Promise<SheetRow[]> {
+    // Bug 4: validate the WHOLE batch before the first mutation so a bad
+    // id rejects everything (mirrors the store's single-transaction rule).
+    if (!Array.isArray(rowIds) || rowIds.length === 0) {
+      throw new Error('ids must not be empty');
+    }
+    if (rowIds.length > MAX_BULK_SOFT_DELETE_ROWS) {
+      throw new Error(`ids must contain at most ${MAX_BULK_SOFT_DELETE_ROWS} rows`);
+    }
+    if (new Set(rowIds).size !== rowIds.length) {
+      throw new Error('ids must not contain duplicates');
+    }
+    const targets = rowIds.map((rowId) => {
+      const row = typeof rowId === 'string'
+        ? this.rows.find((candidate) => candidate.id === rowId)
+        : undefined;
+      if (!row) {
+        throw new Error(`Unknown sheet row: ${String(rowId)}`);
+      }
+      if (row.deleted === true) {
+        throw new Error(`Row is already in the Recycle Bin: ${rowId}`);
+      }
+      return row;
+    });
+
+    const timestamp = now();
+    const updatedById = new Map(targets.map((row) => [
+      row.id,
+      { ...row, deleted: true, updatedAt: timestamp, updated_at: timestamp } as SheetRow,
+    ]));
+    this.rows = this.rows.map((row) => updatedById.get(row.id) ?? row);
+    for (const row of targets) {
+      this.recordAudit('soft_delete', { rowId: row.id }, options);
+    }
+    return clone(targets.map((row) => updatedById.get(row.id) ?? row));
   }
 
   async restoreRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {

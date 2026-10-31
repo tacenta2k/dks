@@ -486,6 +486,53 @@ export class ElectronSheetRepository implements SheetRepository {
     ).then((row) => requiredRow(row, 'deleted row'));
   }
 
+  /**
+   * Bug 4: bulk soft-delete. Preferred path is the bridge's atomic bulk
+   * channel (one SQLite transaction, role-checked in preload AND main).
+   * A bridge without it (older preload) still deletes against the SAME
+   * authority through sequential single deletes after validating that
+   * every target exists and is active — never against the empty fallback.
+   */
+  async softDeleteRows(
+    rowIds: readonly string[],
+    options: SheetAuditOptions = {},
+  ): Promise<SheetRow[]> {
+    const local = this.local();
+    if (local && typeof local.softDeleteRows === 'function') {
+      const rows = await local.softDeleteRows({
+        ids: [...rowIds],
+        role: this.role,
+        actorId: options.actorId,
+        actor: options.actor,
+        updatedBy: options.actor ?? null,
+      });
+      return rows.map((row) => requiredRow(row, 'deleted row'));
+    }
+    if (local && typeof local.softDeleteRow === 'function') {
+      const current = await this.getRows();
+      const byId = new Map(current.map((row) => [row.id, row]));
+      for (const rowId of rowIds) {
+        const row = byId.get(rowId);
+        if (!row || row.deleted === true) {
+          throw new Error(row ? `Row is already in the Recycle Bin: ${rowId}` : `Unknown sheet row: ${rowId}`);
+        }
+      }
+      const deleted: SheetRow[] = [];
+      for (const rowId of rowIds) {
+        deleted.push(await this.softDeleteRow(rowId, options));
+      }
+      return deleted;
+    }
+    if (this.fallback.softDeleteRows) {
+      return this.fallback.softDeleteRows(rowIds, options);
+    }
+    const deleted: SheetRow[] = [];
+    for (const rowId of rowIds) {
+      deleted.push(await this.fallback.softDeleteRow(rowId, options));
+    }
+    return deleted;
+  }
+
   async restoreRow(rowId: string, options: SheetAuditOptions = {}): Promise<SheetRow> {
     return this.use(
       'restoreRow',

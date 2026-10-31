@@ -561,7 +561,8 @@ describe('SheetPage drag-reorder wiring', () => {
       <SheetPage repository={repository} role="office" refreshToken={0} renderGridInTests />,
     );
     await screen.findByText('A1234567');
-    expect(headerLabels()).toEqual(['Actions', 'Name', 'Passport No', 'Country', 'Civil ID', 'Visa Expiry', '+', 'Days Left']);
+    // Bug 4: the leading '' is the (blank) bulk-select checkbox header.
+    expect(headerLabels()).toEqual(['', 'Actions', 'Name', 'Passport No', 'Country', 'Civil ID', 'Visa Expiry', '+', 'Days Left']);
     expect(gridUserColumnIds()).toEqual(['name', 'passport_no', 'country', 'civil_id', 'visa_expiry']);
 
     const onColumnMoved = capturedOnColumnMoved() as (event: unknown) => void;
@@ -588,7 +589,7 @@ describe('SheetPage drag-reorder wiring', () => {
       onColumnMoved(dragEvent);
     });
     await waitFor(() => {
-      expect(headerLabels()).toEqual(['Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
+      expect(headerLabels()).toEqual(['', 'Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
     });
     expect(reorderSpy).toHaveBeenCalledTimes(1);
     expect(reorderSpy).toHaveBeenCalledWith(['name', 'passport_no', 'civil_id', 'country', 'visa_expiry']);
@@ -602,7 +603,7 @@ describe('SheetPage drag-reorder wiring', () => {
     // A quiet background refresh neither undoes the order nor writes again.
     rerender(<SheetPage repository={repository} role="office" refreshToken={1} renderGridInTests />);
     await waitFor(() => {
-      expect(headerLabels()).toEqual(['Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
+      expect(headerLabels()).toEqual(['', 'Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
     });
     expect(reorderSpy).toHaveBeenCalledTimes(1);
 
@@ -610,7 +611,7 @@ describe('SheetPage drag-reorder wiring', () => {
     unmount();
     render(<SheetPage repository={repository} role="office" renderGridInTests />);
     await screen.findByText('A1234567');
-    expect(headerLabels()).toEqual(['Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
+    expect(headerLabels()).toEqual(['', 'Actions', 'Name', 'Passport No', 'Civil ID', 'Country', 'Visa Expiry', '+', 'Days Left']);
   });
 });
 

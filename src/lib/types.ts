@@ -87,6 +87,16 @@ export interface DksLocalRowCommand {
   role?: string;
 }
 
+/** Bug 4: bulk soft-delete (one store transaction, capped batch, role-checked). */
+export interface DksLocalBulkSoftDeleteInput {
+  ids: readonly string[];
+  role: string;
+  idempotencyKey?: string;
+  updatedBy?: string | null;
+  actorId?: string | null;
+  actor?: string | null;
+}
+
 export interface DksLocalColumnInput {
   id?: string;
   name: string;
@@ -220,6 +230,8 @@ export interface DksLocalApi {
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   softDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
+  /** Optional like `reorderColumns`: older preloads lack the bulk channel. */
+  softDeleteRows?: (input: DksLocalBulkSoftDeleteInput) => Promise<DksLocalRow[]>;
   restoreRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   permanentDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;

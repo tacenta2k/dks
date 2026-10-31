@@ -21,6 +21,7 @@ import type {
   IsFullWidthRowParams,
   PostSortRowsParams,
   RowClassParams,
+  SelectionChangedEvent,
 } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
@@ -74,7 +75,9 @@ import {
   isMeaningfulDraftValue,
   isRepeatOrComposingKey,
   rowIndexOfRowId,
+  SHEET_SELECTION_COLUMN_DEF,
   sheetGridThemeClass,
+  sheetRowSelectionOptions,
   type DraftFocusTarget,
 } from './grid-behaviour';
 import { GroupHeaderCell } from './group-header';
@@ -313,10 +316,16 @@ export function SheetPage({
   // SET-11: row / column deletion confirms in-app instead of window.confirm.
   const [pendingDelete, setPendingDelete] = useState<
     | { kind: 'row'; row: SheetRow }
+    | { kind: 'rows'; rows: SheetRow[] }
     | { kind: 'column'; column: ColumnDefinition; populated: number }
     | null
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // Bug 4: ids of the rows checked for bulk delete. React owns the state so
+  // the real grid, the test/host table and the "Delete selected (N)" count
+  // can never disagree; AG Grid merely mirrors it (selectionChanged) and is
+  // cleared through its API after a successful batch.
+  const [selectedRowIds, setSelectedRowIds] = useState<readonly string[]>([]);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [columnMenu, setColumnMenu] = useState<{ column: ColumnDefinition; x: number; y: number } | null>(null);
   const [renameColumn, setRenameColumn] = useState<ColumnDefinition | null>(null);
@@ -477,6 +486,64 @@ export function SheetPage({
     thresholds,
   }), [rows, activeColumns, search, quickFilter, daysRange, statusFilter, today, expiringSoonThreshold, thresholds]);
   const matchingIds = useMemo(() => new Set(matchingRows.map((row) => row.id)), [matchingRows]);
+
+  // Bug 4: bulk delete is offered to exactly the roles that may soft-delete
+  // a single row today (deny-by-default capability check, mirrored at IPC).
+  const canBulkDelete = can(role, 'softDelete');
+  const selectedIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
+  const selectedRowsForDelete = useMemo(
+    () => rows.filter((row) => row.deleted !== true && selectedIdSet.has(row.id)),
+    [rows, selectedIdSet],
+  );
+  // Drop ids whose rows left the sheet (deleted elsewhere / sync) so the
+  // count and the eventual batch can never target ghosts.
+  useEffect(() => {
+    setSelectedRowIds((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+      const alive = new Set(rows.filter((row) => row.deleted !== true).map((row) => row.id));
+      const next = current.filter((id) => alive.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [rows]);
+  const allVisibleSelected = matchingRows.length > 0
+    && matchingRows.every((row) => selectedIdSet.has(row.id));
+  const someVisibleSelected = matchingRows.some((row) => selectedIdSet.has(row.id));
+
+  const toggleRowSelected = useCallback((rowId: string, selected: boolean) => {
+    setSelectedRowIds((current) => {
+      if (selected) {
+        return current.includes(rowId) ? current : [...current, rowId];
+      }
+      return current.filter((id) => id !== rowId);
+    });
+  }, []);
+
+  // Select-all covers ONLY the currently matching (visible) rows.
+  const toggleSelectAllVisible = useCallback((selected: boolean) => {
+    setSelectedRowIds(selected ? matchingRows.map((row) => row.id) : []);
+  }, [matchingRows]);
+
+  // Keep React's selection in step with the grid's checkboxes (including
+  // its filtered header select-all). Synthetic rows never carry a record.
+  const handleSelectionChanged = useCallback((
+    event: SelectionChangedEvent<SheetGridRendererData>,
+  ) => {
+    const ids = event.api.getSelectedNodes()
+      .map((node) => node.data?.__sheetRow?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    setSelectedRowIds((current) => (
+      current.length === ids.length && current.every((id) => ids.includes(id))
+        ? current
+        : ids
+    ));
+  }, []);
+
+  const gridRowSelection = useMemo(
+    () => sheetRowSelectionOptions<SheetGridRendererData>(canBulkDelete),
+    [canBulkDelete],
+  );
   const builtRows = useMemo(() => buildGridRows(rows, activeColumns, { today }), [rows, activeColumns, today]);
   const groupable = useMemo(() => groupableColumns(activeColumns), [activeColumns]);
   const groupColumn = useMemo(
@@ -677,7 +744,29 @@ export function SheetPage({
     try {
       if (pending.kind === 'row') {
         await repository.softDeleteRow(pending.row.id);
+        setSelectedRowIds((current) => current.filter((id) => id !== pending.row.id));
         setStatusMessage(`Moved ${displayLabel(pending.row, activeColumns)} to the recycle bin.`);
+      } else if (pending.kind === 'rows') {
+        // Bug 4: ONE bulk call down to the store's single transaction.
+        // Adapters without it (older test doubles) fall back to the same
+        // per-row soft deletes the single-row button already performs.
+        const ids = pending.rows.map((row) => row.id);
+        if (repository.softDeleteRows) {
+          await repository.softDeleteRows(ids);
+        } else {
+          for (const row of pending.rows) {
+            await repository.softDeleteRow(row.id);
+          }
+        }
+        setSelectedRowIds([]);
+        try {
+          gridApiRef.current?.deselectAll();
+        } catch {
+          // The grid may already be gone; the quiet refresh re-renders it.
+        }
+        setStatusMessage(
+          `Moved ${ids.length} row${ids.length === 1 ? '' : 's'} to the recycle bin.`,
+        );
       } else {
         await repository.softDeleteColumn(pending.column.id, role ?? '');
         setStatusMessage(`Removed ${pending.column.name}.`);
@@ -685,6 +774,8 @@ export function SheetPage({
       await refresh({ quiet: true });
       setPendingDelete(null);
     } catch (caught) {
+      // All-or-nothing: the store rolls the batch back; keep the dialog and
+      // the selection so the user sees the error and can retry or cancel.
       setError(caught instanceof Error ? caught.message : 'Unable to delete.');
     } finally {
       setDeleteBusy(false);
@@ -1266,6 +1357,23 @@ export function SheetPage({
               ) : null}
             </div>
             <div className="sheet-toolbar__actions">
+              {/* Bug 4: bulk soft-delete. Shown only when 1+ real rows are
+                  checked, and only to roles that may soft-delete today.
+                  The count is the live selection, so the confirm that
+                  follows can state exactly what will move. */}
+              {canBulkDelete && selectedRowsForDelete.length > 0 ? (
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => {
+                    setError(null);
+                    setPendingDelete({ kind: 'rows', rows: [...selectedRowsForDelete] });
+                  }}
+                >
+                  {`Delete selected (${selectedRowsForDelete.length})`}
+                </button>
+              ) : null}
               {/* Bug 3: Refresh for every role with the `refresh` capability
                   (Admin and Office) — previously the Visa Sheet had no
                   Refresh button at all. Disabled (with the busy label)
@@ -1345,6 +1453,12 @@ export function SheetPage({
                   onGridReady={handleGridReady}
                   onCellValueChanged={handleCellValueChangedEvent}
                   onCellEditingStarted={handleCellEditingStarted}
+                  // Bug 4: Community multi-row checkbox selection (header
+                  // select-all = filtered rows only). Only roles allowed to
+                  // soft-delete get it; selection mirrors into React state.
+                  rowSelection={gridRowSelection}
+                  selectionColumnDef={canBulkDelete ? SHEET_SELECTION_COLUMN_DEF : undefined}
+                  onSelectionChanged={handleSelectionChanged}
                   // The refreshed row set reaches the grid asynchronously: a
                   // pending draft-commit focus handoff is resolved here, when
                   // the new row indexes are final.
@@ -1398,6 +1512,24 @@ export function SheetPage({
               <table className="sheet-accessible-table" aria-label="Visa records table">
                 <thead>
                   <tr>
+                    {/* Bug 4: same checkbox-selection surface as the grid
+                        (header select-all covers only the filtered rows). */}
+                    {canBulkDelete ? (
+                      <th scope="col" className="sheet-select-cell">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible rows"
+                          checked={allVisibleSelected}
+                          disabled={matchingRows.length === 0}
+                          ref={(element) => {
+                            if (element) {
+                              element.indeterminate = !allVisibleSelected && someVisibleSelected;
+                            }
+                          }}
+                          onChange={(event) => toggleSelectAllVisible(event.target.checked)}
+                        />
+                      </th>
+                    ) : null}
                     <th scope="col">Actions</th>
                     {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
                     {/* SHEET-10: the `+` add-column header (same surface as the
@@ -1427,6 +1559,16 @@ export function SheetPage({
                     );
                     return (
                       <tr key={row.id} className={rowClassForStatus(derived.status)}>
+                        {canBulkDelete ? (
+                          <td className="sheet-select-cell">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select row ${displayLabel(row, activeColumns)}`}
+                              checked={selectedIdSet.has(row.id)}
+                              onChange={(event) => toggleRowSelected(row.id, event.target.checked)}
+                            />
+                          </td>
+                        ) : null}
                         <td>
                           <RowActions
                             row={row}
@@ -1454,6 +1596,7 @@ export function SheetPage({
                       row, so the "first meaningful value creates one record"
                       behaviour is exercised without a layout engine. */}
                   <tr className="sheet-draft-row" aria-label="New record">
+                    {canBulkDelete ? <td /> : null}
                     <td />
                     {activeColumns.map((column) => (
                       <td key={column.id}>
@@ -1498,7 +1641,9 @@ export function SheetPage({
         title={
           pendingDelete?.kind === 'column'
             ? `Delete column "${pendingDelete.column.name}"?`
-            : 'Move this record to the Recycle Bin?'
+            : pendingDelete?.kind === 'rows'
+              ? `Move ${pendingDelete.rows.length} row${pendingDelete.rows.length === 1 ? '' : 's'} to the Recycle Bin?`
+              : 'Move this record to the Recycle Bin?'
         }
         confirmLabel={pendingDelete?.kind === 'column' ? 'Delete column' : 'Move to Recycle Bin'}
         destructive
@@ -1518,6 +1663,11 @@ export function SheetPage({
             {pendingDelete.populated > 0
               ? ` ${pendingDelete.populated} record${pendingDelete.populated === 1 ? '' : 's'} currently hold a value in it.`
               : ' It is currently empty.'}
+          </p>
+        ) : pendingDelete?.kind === 'rows' ? (
+          <p>
+            The selected record{pendingDelete.rows.length === 1 ? '' : 's'} can be restored
+            individually from the Recycle Bin by an administrator.
           </p>
         ) : pendingDelete?.kind === 'row' ? (
           <p>

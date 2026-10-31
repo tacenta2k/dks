@@ -26,6 +26,7 @@ export const LOCAL_IPC_CHANNELS = Object.freeze({
   updateRow: 'dks:local:update-row',
   duplicateRow: 'dks:local:duplicate-row',
   softDeleteRow: 'dks:local:soft-delete-row',
+  softDeleteRows: 'dks:local:soft-delete-rows',
   restoreRow: 'dks:local:restore-row',
   permanentDeleteRow: 'dks:local:permanent-delete-row',
   addColumn: 'dks:local:add-column',
@@ -123,6 +124,12 @@ export interface LocalIpcStore {
   updateRow: (id: string, patch: EntryPatch) => unknown | null;
   updateEntry?: (id: string, patch: EntryPatch) => unknown | null;
   softDeleteEntry?: (id: string, idempotencyKey?: string, updatedBy?: string | null) => unknown | null;
+  /** Bug 4: atomic bulk soft-delete (one transaction in the store). */
+  softDeleteEntries?: (
+    ids: readonly string[],
+    idempotencyKey?: string,
+    updatedBy?: string | null,
+  ) => readonly unknown[];
   deleteRow?: (id: string, idempotencyKey?: string, updatedBy?: string | null) => unknown | null;
   restoreEntry?: (id: string, idempotencyKey?: string, updatedBy?: string | null) => unknown | null;
   permanentDeleteEntry?: (id: string, idempotencyKey?: string, updatedBy?: string | null) => unknown | null;
@@ -202,6 +209,8 @@ const DEFAULT_AUDIT_LIMIT = 500;
 const MAX_AUDIT_LIMIT = 5_000;
 /** Bound one reorder payload; real sheets hold far fewer columns than this. */
 const MAX_REORDER_COLUMNS = 1_000;
+/** Bug 4: bound one bulk soft-delete payload (mirrors the store/preload cap). */
+const MAX_BULK_DELETE_ROWS = 1_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -632,6 +641,43 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         optionalString(input.idempotencyKey, 'idempotencyKey'),
         optionalNullableString(input.updatedBy ?? input.actorId ?? input.actor, 'updatedBy'),
       ), 'deleted row');
+    },
+
+    [LOCAL_IPC_CHANNELS.softDeleteRows]: (payload) => {
+      const input = asRecord(payload, 'bulk soft-delete rows input');
+      // Bug 4: bulk delete carries the SAME rights as today's single-row
+      // soft delete. Renderer permissions grant `softDelete` to both
+      // session roles (Admin and Office) and to no one else, so a validated
+      // admin/office role is required here too — a missing or unknown role
+      // is rejected before the store is touched. (Permanent delete stays
+      // Admin-only on its own channel; this path only soft-deletes.)
+      roleFrom(input.role);
+      if (!Array.isArray(input.ids)) {
+        throw new Error('ids must be an array');
+      }
+      if (input.ids.length === 0) {
+        throw new Error('ids must not be empty');
+      }
+      if (input.ids.length > MAX_BULK_DELETE_ROWS) {
+        throw new Error(`ids must contain at most ${MAX_BULK_DELETE_ROWS} rows`);
+      }
+      const ids = input.ids.map((value, index) => requiredString(value, `ids[${index}]`));
+      if (new Set(ids).size !== ids.length) {
+        throw new Error('ids must not contain duplicates');
+      }
+      if (!store.softDeleteEntries) {
+        throw new Error('Bulk row deletion is unavailable in this local store');
+      }
+      // One store call = one SQLite transaction: the batch lands completely
+      // (rows + one outbox item + one audit entry per row) or not at all.
+      const deleted = store.softDeleteEntries(
+        ids,
+        optionalString(input.idempotencyKey, 'idempotencyKey'),
+        optionalNullableString(input.updatedBy ?? input.actorId ?? input.actor, 'updatedBy'),
+      );
+      return deleted
+        .map((row) => rowFromUnknown(row, 'deleted row'))
+        .filter((row): row is Record<string, unknown> => row !== null);
     },
 
     [LOCAL_IPC_CHANNELS.restoreRow]: (payload) => {
@@ -1111,6 +1157,7 @@ function isExpectedIpcValidationOrAuthError(error: unknown): boolean {
     || msg.includes('must not ')
     || msg.includes('Invalid ')
     || msg.includes('Unknown sheet ')
+    || msg.includes('already in the Recycle Bin')
     || msg.includes('Waiting for admin approval')
     || msg.includes('Only administrators')
     || msg.includes('Office users cannot')

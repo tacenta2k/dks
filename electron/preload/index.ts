@@ -89,6 +89,17 @@ export interface DksLocalRowCommand {
   role?: string;
 }
 
+/** Bug 4: bulk soft-delete command (ids are capped/validated at this bridge). */
+export interface DksLocalBulkSoftDeleteInput {
+  ids: readonly string[];
+  /** Required: the same admin/office roles that may soft-delete one row. */
+  role: string;
+  idempotencyKey?: string;
+  updatedBy?: string | null;
+  actorId?: string | null;
+  actor?: string | null;
+}
+
 export interface DksLocalColumnInput {
   id?: string;
   name: string;
@@ -222,6 +233,7 @@ export interface DksLocalApi {
   updateRow: (input: DksLocalUpdateRowInput) => Promise<DksLocalRow | null>;
   duplicateRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   softDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
+  softDeleteRows: (input: DksLocalBulkSoftDeleteInput) => Promise<DksLocalRow[]>;
   restoreRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   permanentDeleteRow: (input: DksLocalRowCommand) => Promise<DksLocalRow | null>;
   addColumn: (input: DksLocalColumnInput) => Promise<DksLocalColumn>;
@@ -328,6 +340,7 @@ const LOCAL_CHANNELS = {
   updateRow: 'dks:local:update-row',
   duplicateRow: 'dks:local:duplicate-row',
   softDeleteRow: 'dks:local:soft-delete-row',
+  softDeleteRows: 'dks:local:soft-delete-rows',
   restoreRow: 'dks:local:restore-row',
   permanentDeleteRow: 'dks:local:permanent-delete-row',
   addColumn: 'dks:local:add-column',
@@ -414,6 +427,30 @@ function validateUpdateRow(value: unknown): void {
 function validateRowCommand(value: unknown): void {
   const input = requireRecord(value, 'row command input');
   requireId(input.id ?? input.rowId, 'row id');
+}
+
+/** Bug 4: mirror the main-process bulk-delete validation at the bridge. */
+function validateBulkSoftDeleteRows(value: unknown): void {
+  const input = requireRecord(value, 'bulk soft-delete rows input');
+  if (!Array.isArray(input.ids) || input.ids.length === 0) {
+    throw new TypeError('ids must be a non-empty array');
+  }
+  if (input.ids.length > 1_000) {
+    throw new TypeError('ids must contain at most 1000 rows');
+  }
+  const seen = new Set<string>();
+  input.ids.forEach((rowId, index) => {
+    requireId(rowId, `ids[${index}]`);
+    const id = (rowId as string).trim();
+    if (seen.has(id)) {
+      throw new TypeError('ids must not contain duplicates');
+    }
+    seen.add(id);
+  });
+  requireRole(input.role);
+  if (input.role !== 'admin' && input.role !== 'office') {
+    throw new TypeError('role must be admin or office');
+  }
 }
 
 function validateAdminRowCommand(value: unknown): void {
@@ -699,6 +736,7 @@ const localApi: DksLocalApi = Object.freeze({
   updateRow: (input: DksLocalUpdateRowInput) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.updateRow, input, validateUpdateRow),
   duplicateRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.duplicateRow, input, validateRowCommand),
   softDeleteRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.softDeleteRow, input, validateRowCommand),
+  softDeleteRows: (input: DksLocalBulkSoftDeleteInput) => invokeLocal<DksLocalRow[]>(LOCAL_CHANNELS.softDeleteRows, input, validateBulkSoftDeleteRows),
   restoreRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.restoreRow, input, validateAdminRowCommand),
   permanentDeleteRow: (input: DksLocalRowCommand) => invokeLocal<DksLocalRow | null>(LOCAL_CHANNELS.permanentDeleteRow, input, validateAdminRowCommand),
   addColumn: (input: DksLocalColumnInput) => invokeLocal<DksLocalColumn>(LOCAL_CHANNELS.addColumn, input, validateAddColumn),

@@ -7,7 +7,15 @@
  * draft-row helper defines exactly what counts as the "first meaningful value"
  * (focus or keystrokes alone must never create a record).
  */
-import type { CellPosition, Column, ColumnMovedEvent, GridApi, TabToNextCellParams } from 'ag-grid-community';
+import type {
+  CellPosition,
+  Column,
+  ColumnMovedEvent,
+  GridApi,
+  RowSelectionOptions,
+  SelectionColumnDef,
+  TabToNextCellParams,
+} from 'ag-grid-community';
 
 import { extractUserColumnOrder, type ColumnDefinition } from '../../lib/columns';
 
@@ -335,3 +343,56 @@ export function columnOrderFromMovedEvent<TData>(
   }
   return extractUserColumnOrder(displayedColumnIds(event.api), activeColumns);
 }
+
+/* --------------------------------------------------------------------------
+ * Bug 4 — AG Grid Community multi-row checkbox selection for bulk delete.
+ *
+ * The v32 selection API (not the deprecated `checkboxSelection` colDef):
+ *  - `mode: 'multiRow'` with checkboxes and a header select-all checkbox;
+ *  - `selectAll: 'filtered'` — the header checkbox selects ONLY the rows
+ *    visible under the current grid filters, never hidden ones;
+ *  - `enableClickSelection: false` — clicking cells keeps its editing
+ *    behaviour; rows are selected with the checkboxes only;
+ *  - only REAL records are selectable/checkable — synthetic group-header
+ *    rows and the blank draft row can never be bulk-deleted by accident.
+ * ------------------------------------------------------------------------ */
+
+export interface SelectableSheetRowData {
+  __sheetRow?: unknown;
+}
+
+export function isSelectableSheetRowData(
+  data: SelectableSheetRowData | null | undefined,
+): boolean {
+  return Boolean(data?.__sheetRow);
+}
+
+export function sheetRowSelectionOptions<TData extends SelectableSheetRowData>(
+  enabled: boolean,
+): RowSelectionOptions<TData> | undefined {
+  if (!enabled) {
+    return undefined;
+  }
+  return {
+    mode: 'multiRow',
+    selectAll: 'filtered',
+    headerCheckbox: true,
+    hideDisabledCheckboxes: true,
+    enableClickSelection: false,
+    checkboxes: (params) => isSelectableSheetRowData(params.data),
+    isRowSelectable: (node) => isSelectableSheetRowData(node.data),
+  };
+}
+
+/** The auto generated selection (checkbox) column, pinned left and compact. */
+export const SHEET_SELECTION_COLUMN_DEF: SelectionColumnDef = Object.freeze({
+  pinned: 'left',
+  lockPinned: true,
+  sortable: false,
+  resizable: false,
+  width: 40,
+  minWidth: 40,
+  maxWidth: 40,
+  headerTooltip: 'Select rows',
+  cellClass: 'sheet-select-cell',
+});

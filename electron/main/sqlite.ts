@@ -318,6 +318,9 @@ export const ERROR_REPORT_DEDUPE_COOLDOWN_MS = 6 * 60 * 60 * 1000;
 const ERROR_REPORT_DEDUPE_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const MAX_ERROR_REPORT_OCCURRENCES = 10_000;
 
+/** Bug 4: hard cap for one bulk soft-delete transaction (mirrored at the IPC/preload layers). */
+export const MAX_BULK_SOFT_DELETE_ROWS = 1_000;
+
 const MIGRATIONS: readonly string[] = [
   `
     CREATE TABLE IF NOT EXISTS columns (
@@ -1033,6 +1036,67 @@ export class SqliteStore {
       idempotencyKey,
       updatedBy,
     });
+  }
+
+  /**
+   * Bug 4: bulk soft-delete as ONE transaction — all rows or none.
+   *
+   * Every row goes through the exact per-entry update path a single
+   * soft-delete uses (entries UPDATE + one outbox 'delete' item + one
+   * 'soft_delete' audit record per row, all with one shared timestamp), but
+   * the whole batch is wrapped in a single database transaction: the inner
+   * per-entry transactions nest as savepoints and their audit inserts happen
+   * inside this outer transaction, so any failure mid-batch (unknown id,
+   * already-deleted row, storage error) rolls back EVERY row, outbox item
+   * and audit entry of the batch. All ids are validated before the first
+   * mutation for the same reason.
+   */
+  public softDeleteEntries(
+    ids: readonly string[],
+    idempotencyKey?: string,
+    updatedBy?: string | null,
+  ): LocalEntry[] {
+    this.ensureOpen();
+    if (!Array.isArray(ids) || ids.length === 0) {
+      throw new Error('ids must not be empty');
+    }
+    if (ids.length > MAX_BULK_SOFT_DELETE_ROWS) {
+      throw new Error(`ids must contain at most ${MAX_BULK_SOFT_DELETE_ROWS} rows`);
+    }
+    if (new Set(ids).size !== ids.length) {
+      throw new Error('ids must not contain duplicates');
+    }
+
+    const timestamp = this.now();
+    const execute = this.database.transaction((): LocalEntry[] => {
+      // Validate the whole batch first so a bad id can never leave earlier
+      // rows deleted behind it.
+      for (const id of ids) {
+        const current = this.getEntry(id);
+        if (!current) {
+          throw new Error(`Unknown sheet row: ${id}`);
+        }
+        if (current.deleted) {
+          throw new Error(`Row is already in the Recycle Bin: ${id}`);
+        }
+      }
+      return ids.map((id) => {
+        const deleted = this.updateEntry(id, {
+          deleted: true,
+          deletedAt: timestamp,
+          updatedAt: timestamp,
+          // A caller-supplied batch key fans out to one stable per-row key;
+          // without one, updateEntry mints its usual per-row key.
+          idempotencyKey: idempotencyKey ? `${idempotencyKey}:${id}` : undefined,
+          updatedBy,
+        });
+        if (!deleted) {
+          throw new Error(`Unknown sheet row: ${id}`);
+        }
+        return deleted;
+      });
+    });
+    return execute();
   }
 
   public restoreEntry(id: string, idempotencyKey?: string, updatedBy?: string | null): LocalEntry | null {

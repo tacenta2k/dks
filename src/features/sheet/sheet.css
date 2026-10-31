@@ -394,6 +394,21 @@
   text-align: center;
 }
 
+/* Bug 4: bulk-delete checkbox column (grid selection column + table). */
+.sheet-select-cell {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  text-align: center;
+}
+.sheet-select-cell input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  vertical-align: middle;
+  accent-color: var(--color-primary);
+  cursor: pointer;
+}
+
 /* FIXES_UI §5.3 (SHEET-08): denser rows for a dense office data-entry screen. */
 .sheet-grid.ag-theme-quartz {
   --ag-row-height: 26px;
