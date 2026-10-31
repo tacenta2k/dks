@@ -22,6 +22,7 @@ import type {
   RenewalRecord,
   SheetAuditEntry,
   SheetAuditOptions,
+  SheetCreateRowOptions,
   SheetImportRecord,
   SheetRow,
 } from './types';
@@ -427,11 +428,23 @@ export class ElectronSheetRepository implements SheetRepository {
     );
   }
 
-  async createRow(data: Record<string, unknown> = {}, category: string | null = null): Promise<SheetRow> {
+  async createRow(
+    data: Record<string, unknown> = {},
+    category: string | null = null,
+    options: SheetCreateRowOptions = {},
+  ): Promise<SheetRow> {
+    // Bug 2: forward the stable client identity so the main-process store
+    // can recognise a retried create and return the existing row instead of
+    // minting a fresh UUID (and a second outbox create) per call.
     return this.use(
       'createRow',
-      (local) => local.createRow({ data: clone(data), category }),
-      () => this.fallback.createRow(data, category),
+      (local) => local.createRow({
+        data: clone(data),
+        category,
+        ...(options.id ? { id: options.id } : {}),
+        ...(options.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+      }),
+      () => this.fallback.createRow(data, category, options),
     ).then((row) => requiredRow(row, 'created row'));
   }
 

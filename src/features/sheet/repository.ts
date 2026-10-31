@@ -13,6 +13,7 @@ import type {
   RenewalRecord,
   SheetAuditEntry,
   SheetAuditOptions,
+  SheetCreateRowOptions,
   SheetImportRecord,
   SheetRow,
   SheetSnapshot,
@@ -33,7 +34,16 @@ export interface SheetRepository {
    */
   reorderColumns?(columnIds: readonly string[]): Promise<ColumnDefinition[]>;
   softDeleteColumn(columnId: string, role?: string): Promise<ColumnDefinition | null>;
-  createRow(data?: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
+  /**
+   * Create one row. With `options.id`/`options.idempotencyKey` (Bug 2) the
+   * call is idempotent: a retry of the same logical create returns/updates
+   * the row that identity already created instead of inserting a duplicate.
+   */
+  createRow(
+    data?: Record<string, unknown>,
+    category?: string | null,
+    options?: SheetCreateRowOptions,
+  ): Promise<SheetRow>;
   updateRow(rowId: string, patch: Record<string, unknown>, category?: string | null): Promise<SheetRow>;
   duplicateRow(rowId: string): Promise<SheetRow>;
   softDeleteRow(rowId: string, options?: SheetAuditOptions): Promise<SheetRow>;
@@ -117,6 +127,9 @@ export class InMemorySheetRepository implements SheetRepository {
   private renewals: RenewalRecord[];
 
   private auditHistory: SheetAuditEntry[];
+
+  /** Bug 2: idempotency key of a completed create → the row it created. */
+  private readonly createdRowIdByIdempotencyKey = new Map<string, string>();
 
   constructor(snapshot: Partial<SheetSnapshot> = {}) {
     this.columns = normalizeColumns(snapshot.columns ?? []);
@@ -212,10 +225,49 @@ export class InMemorySheetRepository implements SheetRepository {
     return clone(this.columns.find((column) => column.id === columnId) ?? target);
   }
 
-  async createRow(data: Record<string, unknown> = {}, category: string | null = null): Promise<SheetRow> {
+  async createRow(
+    data: Record<string, unknown> = {},
+    category: string | null = null,
+    options: SheetCreateRowOptions = {},
+  ): Promise<SheetRow> {
+    // Bug 2: a create carrying a stable client identity is idempotent. A
+    // retry (held-Enter replay, focus-loss second commit, IPC retry) finds
+    // the row its id/idempotency key already created and updates it in
+    // place instead of inserting a duplicate.
+    const retryKey = typeof options.idempotencyKey === 'string' && options.idempotencyKey.trim()
+      ? options.idempotencyKey
+      : null;
+    const requestedId = typeof options.id === 'string' && options.id.trim() ? options.id : null;
+    const existingId = requestedId
+      ?? (retryKey ? this.createdRowIdByIdempotencyKey.get(retryKey) ?? null : null);
+    const existing = existingId
+      ? this.rows.find((row) => row.id === existingId) ?? null
+      : null;
+    if (existing) {
+      if (retryKey) {
+        this.createdRowIdByIdempotencyKey.set(retryKey, existing.id);
+      }
+      const mergedData = { ...existing.data, ...clone(data) };
+      if (JSON.stringify(mergedData) === JSON.stringify(existing.data)
+        && (category === null || category === existing.category)) {
+        return clone(existing);
+      }
+      const timestamp = now();
+      const updated: SheetRow = {
+        ...existing,
+        data: mergedData,
+        category: category ?? existing.category,
+        updatedAt: timestamp,
+        updated_at: timestamp,
+      };
+      this.rows = this.rows.map((row) => (row.id === existing.id ? updated : row));
+      this.recordAudit('update', { rowId: existing.id }, undefined);
+      return clone(updated);
+    }
+
     const timestamp = now();
     const row: SheetRow = {
-      id: makeId('row'),
+      id: requestedId ?? makeId('row'),
       data: clone(data),
       category: category ?? (typeof data.category === 'string' ? data.category : null),
       deleted: false,
@@ -223,6 +275,9 @@ export class InMemorySheetRepository implements SheetRepository {
       updated_at: timestamp,
     };
     this.rows = [...this.rows, row];
+    if (retryKey) {
+      this.createdRowIdByIdempotencyKey.set(retryKey, row.id);
+    }
     this.recordAudit('create', { rowId: row.id }, undefined);
     return clone(row);
   }

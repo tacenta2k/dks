@@ -395,6 +395,14 @@ function requireRole(value: unknown): void {
 function validateCreateRow(value: unknown): void {
   const input = requireRecord(value, 'create row input');
   requireData(input.data);
+  // Bug 2: the optional stable client identity, when present, must be a
+  // usable non-empty string — a blank id/key would defeat retry dedupe.
+  if (input.id !== undefined) {
+    requireId(input.id, 'row id');
+  }
+  if (input.idempotencyKey !== undefined) {
+    requireId(input.idempotencyKey, 'idempotencyKey');
+  }
 }
 
 function validateUpdateRow(value: unknown): void {

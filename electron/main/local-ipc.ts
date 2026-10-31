@@ -554,8 +554,13 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
         ? undefined
         : requiredString(input.category, 'category');
       const updatedBy = optionalNullableString(input.updatedBy ?? input.updated_by, 'updatedBy');
+      const requestedId = optionalString(input.id, 'id');
+      // Bug 2: a create retried with the same stable client id returns the
+      // row the first call created — that is not a second creation and must
+      // not write a second 'create' audit entry.
+      const retryOfExisting = requestedId !== undefined && getRow(store, requestedId) !== null;
       const result = createRow(store, {
-        id: optionalString(input.id, 'id'),
+        id: requestedId,
         data,
         category,
         idempotencyKey: optionalString(input.idempotencyKey ?? input.idempotency_key, 'idempotencyKey'),
@@ -564,7 +569,7 @@ export function createLocalIpcHandlers(dependencies: LocalIpcDependencies): Loca
       const created = rowFromUnknown(result, 'created row');
       // S3: record who created the row (single audit per created row; bulk
       // imports record one 'import' audit instead).
-      if (store.recordAudit && created && typeof created === 'object') {
+      if (!retryOfExisting && store.recordAudit && created && typeof created === 'object') {
         store.recordAudit(makeAuditRecord({
           actor: updatedBy,
           entityType: 'entry',

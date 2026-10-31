@@ -13,6 +13,89 @@ import { extractUserColumnOrder, type ColumnDefinition } from '../../lib/columns
 
 export const DRAFT_ROW_ID = '__draft';
 
+/* --------------------------------------------------------------------------
+ * Bug 2 — one Enter must create exactly one row.
+ *
+ * Two small, pure pieces carry the contract (SheetPage wires them in):
+ *
+ * 1. `isRepeatOrComposingKey` — a HELD Enter fires repeated keydowns
+ *    (`event.repeat`), and Enter that merely confirms an IME composition
+ *    candidate fires while `isComposing` (legacy keyCode 229). Neither is a
+ *    new commit gesture, so neither may (re)trigger the draft create.
+ *
+ * 2. `DraftCreateIdentityBox` — the draft row's create carries a stable
+ *    client-generated row id + idempotency key. Every retry of the SAME
+ *    draft commit (focus-loss commit after Enter, a replayed
+ *    cell-value-changed, an IPC retry) reuses that identity, so the layers
+ *    below can turn it into "return the existing row" instead of a second
+ *    insert. The identity rotates only when a NEW draft editing session
+ *    begins after a successful create — typing the same name again in the
+ *    fresh draft row is a legitimate new record with a fresh identity.
+ * ------------------------------------------------------------------------ */
+
+/** Structural subset of KeyboardEvent / React.KeyboardEvent we need. */
+export interface KeyEventLike {
+  repeat?: unknown;
+  isComposing?: unknown;
+  keyCode?: unknown;
+  nativeEvent?: { isComposing?: unknown; keyCode?: unknown } | null;
+}
+
+export function isRepeatOrComposingKey(event: KeyEventLike | null | undefined): boolean {
+  if (!event) {
+    return false;
+  }
+  return event.repeat === true
+    || event.isComposing === true
+    || event.nativeEvent?.isComposing === true
+    || event.keyCode === 229
+    || event.nativeEvent?.keyCode === 229;
+}
+
+export interface DraftCreateIdentity {
+  id: string;
+  idempotencyKey: string;
+}
+
+let draftIdentityCounter = 0;
+
+function defaultDraftRowId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  draftIdentityCounter += 1;
+  return `draft-${Date.now()}-${draftIdentityCounter}-${Math.random().toString(16).slice(2)}`;
+}
+
+export class DraftCreateIdentityBox {
+  private current: (DraftCreateIdentity & { consumed: boolean }) | null = null;
+
+  public constructor(private readonly mintId: () => string = defaultDraftRowId) {}
+
+  /** The identity for the draft commit now in progress (minted on first use). */
+  public ensure(): DraftCreateIdentity {
+    if (!this.current) {
+      const id = this.mintId();
+      this.current = { id, idempotencyKey: `entry:create:${id}`, consumed: false };
+    }
+    return { id: this.current.id, idempotencyKey: this.current.idempotencyKey };
+  }
+
+  /** The current identity created its row; keep it for replay dedupe. */
+  public markConsumed(): void {
+    if (this.current) {
+      this.current.consumed = true;
+    }
+  }
+
+  /** A new draft editing session: a consumed identity rotates to a fresh one. */
+  public prepareForNextDraftEdit(): void {
+    if (this.current?.consumed) {
+      this.current = null;
+    }
+  }
+}
+
 /** AG Grid Community keyboard contract for the sheet (SHEET-12). */
 export const GRID_KEYBOARD_PROPS = Object.freeze({
   // Click a cell, then type to edit; F2 / double-click also edit.

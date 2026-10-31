@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import type {
+  CellEditingStartedEvent,
   CellValueChangedEvent,
   ColDef,
   ColumnMovedEvent,
@@ -65,11 +66,13 @@ import {
 } from './grid-columns';
 import {
   DRAFT_ROW_ID,
+  DraftCreateIdentityBox,
   GRID_KEYBOARD_PROPS,
   columnOrderFromMovedEvent,
   createTabToNextCell,
   draftFocusTarget,
   isMeaningfulDraftValue,
+  isRepeatOrComposingKey,
   rowIndexOfRowId,
   sheetGridThemeClass,
   type DraftFocusTarget,
@@ -766,7 +769,17 @@ export function SheetPage({
    */
   const draftCommitIntentRef = useRef<'tab' | 'enter' | null>(null);
   const draftCreateInFlightRef = useRef(false);
+  // Bug 2: one stable client identity per draft-row commit. It is reused by
+  // every retry of that commit and rotates only when a NEW draft editing
+  // session begins after a successful create (see DraftCreateIdentityBox).
+  const draftCreateIdentityBox = useMemo(() => new DraftCreateIdentityBox(), []);
   const rememberGridKeyIntent = useCallback((event: ReactKeyboardEvent) => {
+    // A held key's auto-repeat and an IME-confirming Enter are not new
+    // commit gestures — they must neither re-arm the intent nor be treated
+    // as another physical Enter/Tab press.
+    if (isRepeatOrComposingKey(event)) {
+      return;
+    }
     if (event.key === 'Tab') {
       draftCommitIntentRef.current = 'tab';
     } else if (event.key === 'Enter') {
@@ -775,6 +788,15 @@ export function SheetPage({
       draftCommitIntentRef.current = null;
     }
   }, []);
+
+  /** Bug 2: starting to edit the (fresh) draft row rotates a consumed identity. */
+  const handleCellEditingStarted = useCallback((
+    event: CellEditingStartedEvent<SheetGridRendererData>,
+  ) => {
+    if (event.data?.__rowId === DRAFT_ROW_ID) {
+      draftCreateIdentityBox.prepareForNextDraftEdit();
+    }
+  }, [draftCreateIdentityBox]);
 
   const createFromDraft = useCallback(async (field: string, value: unknown) => {
     if (!field || field === DAYS_LEFT_COLUMN_ID || field === '__actions' || !isMeaningfulDraftValue(value)) {
@@ -791,7 +813,16 @@ export function SheetPage({
     }
     draftCreateInFlightRef.current = true;
     try {
-      const created = await repository.createRow({ [field]: value });
+      // Bug 2, second layer: the in-flight guard above only covers calls
+      // that OVERLAP. A repeated commit that lands after the first create
+      // settles (focus-loss commit, held-Enter re-edit, IPC retry) carries
+      // the same client id + idempotency key, so the repository/store can
+      // recognise the retry and return the existing row instead of
+      // inserting a duplicate. The identity rotates when the next draft
+      // editing session begins (handleCellEditingStarted / draft inputs).
+      const identity = draftCreateIdentityBox.ensure();
+      const created = await repository.createRow({ [field]: value }, null, identity);
+      draftCreateIdentityBox.markConsumed();
       await refresh({ quiet: true });
       setStatusMessage('Added a new record.');
       const api = gridApiRef.current;
@@ -815,7 +846,7 @@ export function SheetPage({
     } finally {
       draftCreateInFlightRef.current = false;
     }
-  }, [repository, refresh, editableColumnIds]);
+  }, [repository, refresh, editableColumnIds, draftCreateIdentityBox, flushPendingDraftFocus]);
 
   const handleCellValueChanged = useCallback(async (
     event: CellValueChangedEvent<SheetGridRendererData>,
@@ -1248,6 +1279,7 @@ export function SheetPage({
                   getContextMenuItems={getSheetContextMenuItems}
                   onGridReady={handleGridReady}
                   onCellValueChanged={handleCellValueChangedEvent}
+                  onCellEditingStarted={handleCellEditingStarted}
                   // The refreshed row set reaches the grid asynchronously: a
                   // pending draft-commit focus handoff is resolved here, when
                   // the new row indexes are final.
@@ -1365,6 +1397,8 @@ export function SheetPage({
                           aria-label={`New record ${column.name}`}
                           type="text"
                           defaultValue=""
+                          onFocus={() => draftCreateIdentityBox.prepareForNextDraftEdit()}
+                          onChange={() => draftCreateIdentityBox.prepareForNextDraftEdit()}
                           onBlur={(event) => {
                             const value = event.target.value;
                             if (isMeaningfulDraftValue(value)) {
@@ -1373,7 +1407,9 @@ export function SheetPage({
                             }
                           }}
                           onKeyDown={(event) => {
-                            if (event.key === 'Enter') {
+                            // Bug 2: a held Enter (repeat) or an
+                            // IME-confirming Enter must not commit again.
+                            if (event.key === 'Enter' && !isRepeatOrComposingKey(event)) {
                               event.currentTarget.blur();
                             }
                           }}
