@@ -90,6 +90,7 @@ import {
   useCollapsedQuickFilters,
 } from './toolbar-layout';
 import type { SheetRow } from './types';
+import { can } from '../../lib/permissions';
 import './sheet.css';
 
 export interface SheetPageProps {
@@ -111,6 +112,14 @@ export interface SheetPageProps {
    * editors, dialogs and input focus survive background refreshes.
    */
   refreshToken?: number;
+  /**
+   * Bug 3: optional host sync action for the toolbar Refresh button (the
+   * full app supplies its existing Supabase sync run, exactly as it does for
+   * the Dashboard). Without it, Refresh honestly reloads the local,
+   * role-scoped repository only. The button itself renders for any role
+   * with the `refresh` capability (Admin and Office).
+   */
+  onRefresh?: () => Promise<void>;
   /**
    * Tests only: mount the REAL AG Grid alongside the accessible table
    * (jsdom normally swaps the virtualised grid for the deterministic table,
@@ -278,6 +287,7 @@ export function SheetPage({
   theme = 'light',
   thresholds,
   refreshToken = 0,
+  onRefresh,
   renderGridInTests = false,
   dashboardFilter = null,
   dashboardFilterToken = 0,
@@ -376,6 +386,46 @@ export function SheetPage({
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Bug 3: the toolbar Refresh button (Admin AND Office, via the explicit
+  // `refresh` capability). It runs the host sync first when one is supplied
+  // — the SAME RLS-bounded sync run the background loop already performs —
+  // then reloads the local snapshot in place. The repository read stays
+  // role-scoped (Electron adapter → getSnapshot IPC with the session role),
+  // so an Office refresh can never pull or show records outside the 3-day
+  // window. Single-flight: the ref closes the gap before React re-renders
+  // the button as disabled (same pattern as the Dashboard Refresh).
+  const canRefresh = can(role, 'refresh');
+  const [refreshing, setRefreshing] = useState(false);
+  const manualRefreshInFlightRef = useRef(false);
+  const handleManualRefresh = useCallback(async () => {
+    if (!canRefresh || manualRefreshInFlightRef.current) {
+      return;
+    }
+    manualRefreshInFlightRef.current = true;
+    setRefreshing(true);
+    let syncError: string | null = null;
+    try {
+      if (onRefresh) {
+        try {
+          await onRefresh();
+        } catch (caught) {
+          syncError = caught instanceof Error ? caught.message : 'Sync did not complete.';
+        }
+      }
+      // Always reload locally afterwards: a failed sync must not discard the
+      // device's current data or unsaved outbox work.
+      await refresh({ quiet: true });
+      setStatusMessage(syncError
+        ? `Sync did not complete (${syncError}). Showing the latest local data.`
+        : onRefresh
+          ? 'Sync complete. Visa Sheet refreshed.'
+          : 'Visa Sheet refreshed.');
+    } finally {
+      manualRefreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
+  }, [canRefresh, onRefresh, refresh]);
 
   const lastRefreshToken = useRef(refreshToken);
   useEffect(() => {
@@ -1216,6 +1266,21 @@ export function SheetPage({
               ) : null}
             </div>
             <div className="sheet-toolbar__actions">
+              {/* Bug 3: Refresh for every role with the `refresh` capability
+                  (Admin and Office) — previously the Visa Sheet had no
+                  Refresh button at all. Disabled (with the busy label)
+                  while a refresh/sync is running. */}
+              {canRefresh ? (
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-busy={refreshing}
+                  disabled={refreshing}
+                  onClick={() => void handleManualRefresh()}
+                >
+                  {refreshing ? 'Refreshing…' : 'Refresh'}
+                </button>
+              ) : null}
               {toolsMenu}
             </div>
             {/* OW-04: Office sees only records created in the last 3 calendar

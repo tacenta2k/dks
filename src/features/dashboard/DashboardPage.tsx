@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 
 import type { StatusColors, StatusThresholds } from '../../lib/domain';
+import { can } from '../../lib/permissions';
 import type { SheetRepository } from '../sheet/repository';
 import { createInMemorySheetRepository } from '../sheet/repository';
 import {
@@ -37,6 +38,13 @@ export interface DashboardPageProps {
   /** Bumped after local mutations / successful syncs; the page re-fetches in
    *  place so remounts cannot steal focus from user inputs. */
   refreshToken?: number;
+  /**
+   * Bug 3: the signed-in role, when the host knows it. The Refresh button
+   * is gated by the explicit `refresh` capability (Admin and Office). A
+   * host that does not supply a role (older embeds/tests) keeps the
+   * historical unconditional button; the real shell always passes one.
+   */
+  role?: string | null;
 }
 
 interface DashboardRefreshFeedback {
@@ -148,7 +156,9 @@ export function DashboardPage({
   onFilter,
   onRefresh,
   refreshToken = 0,
+  role,
 }: DashboardPageProps) {
+  const canRefresh = role === undefined || can(role, 'refresh');
   const repository = useMemo(
     () => providedRepository ?? createInMemorySheetRepository(),
     [providedRepository],
@@ -198,7 +208,7 @@ export function DashboardPage({
   const handleRefresh = useCallback(async () => {
     // A ref guard closes the tiny window before React re-renders the button
     // as disabled, so an enthusiastic double-click can never overlap syncs.
-    if (manualRefreshInFlight.current) {
+    if (!canRefresh || manualRefreshInFlight.current) {
       return;
     }
     manualRefreshInFlight.current = true;
@@ -232,7 +242,7 @@ export function DashboardPage({
     }
     manualRefreshInFlight.current = false;
     setRefreshing(false);
-  }, [loadSummary, onRefresh]);
+  }, [canRefresh, loadSummary, onRefresh]);
 
   if (loading) {
     return <div className="dashboard-page dashboard-page--loading" aria-live="polite">Loading dashboard…</div>;
@@ -255,15 +265,17 @@ export function DashboardPage({
 
       <div className="dashboard-summary-header">
         <span className="dashboard-summary-header__label">Expiry summary</span>
-        <button
-          className="button button--secondary dashboard-refresh-button"
-          type="button"
-          aria-busy={refreshing}
-          disabled={refreshing}
-          onClick={() => void handleRefresh()}
-        >
-          {refreshing ? 'Refreshing…' : 'Refresh'}
-        </button>
+        {canRefresh ? (
+          <button
+            className="button button--secondary dashboard-refresh-button"
+            type="button"
+            aria-busy={refreshing}
+            disabled={refreshing}
+            onClick={() => void handleRefresh()}
+          >
+            {refreshing ? 'Refreshing…' : 'Refresh'}
+          </button>
+        ) : null}
       </div>
       {refreshFeedback ? (
         <p
