@@ -781,6 +781,7 @@ export function AppShell({
                 onFilter={onDashboardFilter}
                 onRefresh={onDashboardRefresh}
                 refreshToken={pageRefreshToken}
+                role={role}
               />
             ) : effectiveView === 'sheet' ? (
               // R2-09: no centered wrapper and no Administrator Tools card. The
@@ -790,6 +791,12 @@ export function AppShell({
                 repository={sheetRepository}
                 role={role}
                 refreshToken={pageRefreshToken}
+                // Bug 3: the Visa Sheet Refresh runs the same host sync as
+                // the Dashboard Refresh; SheetPage gates the button itself
+                // on the `refresh` capability (Admin and Office) and the
+                // reload stays role-scoped, so Office keeps its 3-day
+                // window. Nothing Admin-only is exposed by this callback.
+                onRefresh={onDashboardRefresh}
                 dashboardFilter={sheetDashboardFilter?.filter ?? null}
                 dashboardFilterToken={sheetDashboardFilter?.token ?? 0}
                 theme={resolvedTheme}

@@ -10,6 +10,7 @@ import {
   type ReactNode,
 } from 'react';
 import type {
+  CellEditingStartedEvent,
   CellValueChangedEvent,
   ColDef,
   ColumnMovedEvent,
@@ -20,6 +21,7 @@ import type {
   IsFullWidthRowParams,
   PostSortRowsParams,
   RowClassParams,
+  SelectionChangedEvent,
 } from 'ag-grid-community';
 import { AgGridReact } from 'ag-grid-react';
 import 'ag-grid-community/styles/ag-grid.css';
@@ -65,13 +67,18 @@ import {
 } from './grid-columns';
 import {
   DRAFT_ROW_ID,
+  DraftCreateIdentityBox,
   GRID_KEYBOARD_PROPS,
   columnOrderFromMovedEvent,
   createTabToNextCell,
   draftFocusTarget,
+  isDraftSessionStartRecommit,
   isMeaningfulDraftValue,
+  isRepeatOrComposingKey,
   rowIndexOfRowId,
+  SHEET_SELECTION_COLUMN_DEF,
   sheetGridThemeClass,
+  sheetRowSelectionOptions,
   type DraftFocusTarget,
 } from './grid-behaviour';
 import { GroupHeaderCell } from './group-header';
@@ -87,6 +94,7 @@ import {
   useCollapsedQuickFilters,
 } from './toolbar-layout';
 import type { SheetRow } from './types';
+import { can } from '../../lib/permissions';
 import './sheet.css';
 
 export interface SheetPageProps {
@@ -108,6 +116,14 @@ export interface SheetPageProps {
    * editors, dialogs and input focus survive background refreshes.
    */
   refreshToken?: number;
+  /**
+   * Bug 3: optional host sync action for the toolbar Refresh button (the
+   * full app supplies its existing Supabase sync run, exactly as it does for
+   * the Dashboard). Without it, Refresh honestly reloads the local,
+   * role-scoped repository only. The button itself renders for any role
+   * with the `refresh` capability (Admin and Office).
+   */
+  onRefresh?: () => Promise<void>;
   /**
    * Tests only: mount the REAL AG Grid alongside the accessible table
    * (jsdom normally swaps the virtualised grid for the deterministic table,
@@ -275,6 +291,7 @@ export function SheetPage({
   theme = 'light',
   thresholds,
   refreshToken = 0,
+  onRefresh,
   renderGridInTests = false,
   dashboardFilter = null,
   dashboardFilterToken = 0,
@@ -300,10 +317,16 @@ export function SheetPage({
   // SET-11: row / column deletion confirms in-app instead of window.confirm.
   const [pendingDelete, setPendingDelete] = useState<
     | { kind: 'row'; row: SheetRow }
+    | { kind: 'rows'; rows: SheetRow[] }
     | { kind: 'column'; column: ColumnDefinition; populated: number }
     | null
   >(null);
   const [deleteBusy, setDeleteBusy] = useState(false);
+  // Bug 4: ids of the rows checked for bulk delete. React owns the state so
+  // the real grid, the test/host table and the "Delete selected (N)" count
+  // can never disagree; AG Grid merely mirrors it (selectionChanged) and is
+  // cleared through its API after a successful batch.
+  const [selectedRowIds, setSelectedRowIds] = useState<readonly string[]>([]);
   const [moreFiltersOpen, setMoreFiltersOpen] = useState(false);
   const [columnMenu, setColumnMenu] = useState<{ column: ColumnDefinition; x: number; y: number } | null>(null);
   const [renameColumn, setRenameColumn] = useState<ColumnDefinition | null>(null);
@@ -374,6 +397,46 @@ export function SheetPage({
     void refresh();
   }, [refresh]);
 
+  // Bug 3: the toolbar Refresh button (Admin AND Office, via the explicit
+  // `refresh` capability). It runs the host sync first when one is supplied
+  // — the SAME RLS-bounded sync run the background loop already performs —
+  // then reloads the local snapshot in place. The repository read stays
+  // role-scoped (Electron adapter → getSnapshot IPC with the session role),
+  // so an Office refresh can never pull or show records outside the 3-day
+  // window. Single-flight: the ref closes the gap before React re-renders
+  // the button as disabled (same pattern as the Dashboard Refresh).
+  const canRefresh = can(role, 'refresh');
+  const [refreshing, setRefreshing] = useState(false);
+  const manualRefreshInFlightRef = useRef(false);
+  const handleManualRefresh = useCallback(async () => {
+    if (!canRefresh || manualRefreshInFlightRef.current) {
+      return;
+    }
+    manualRefreshInFlightRef.current = true;
+    setRefreshing(true);
+    let syncError: string | null = null;
+    try {
+      if (onRefresh) {
+        try {
+          await onRefresh();
+        } catch (caught) {
+          syncError = caught instanceof Error ? caught.message : 'Sync did not complete.';
+        }
+      }
+      // Always reload locally afterwards: a failed sync must not discard the
+      // device's current data or unsaved outbox work.
+      await refresh({ quiet: true });
+      setStatusMessage(syncError
+        ? `Sync did not complete (${syncError}). Showing the latest local data.`
+        : onRefresh
+          ? 'Sync complete. Visa Sheet refreshed.'
+          : 'Visa Sheet refreshed.');
+    } finally {
+      manualRefreshInFlightRef.current = false;
+      setRefreshing(false);
+    }
+  }, [canRefresh, onRefresh, refresh]);
+
   const lastRefreshToken = useRef(refreshToken);
   useEffect(() => {
     if (lastRefreshToken.current === refreshToken) {
@@ -424,12 +487,84 @@ export function SheetPage({
     thresholds,
   }), [rows, activeColumns, search, quickFilter, daysRange, statusFilter, today, expiringSoonThreshold, thresholds]);
   const matchingIds = useMemo(() => new Set(matchingRows.map((row) => row.id)), [matchingRows]);
+
+  // Bug 4: bulk delete is offered to exactly the roles that may soft-delete
+  // a single row today (deny-by-default capability check, mirrored at IPC).
+  const canBulkDelete = can(role, 'softDelete');
+  const selectedIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
+  const selectedRowsForDelete = useMemo(
+    () => rows.filter((row) => row.deleted !== true && selectedIdSet.has(row.id)),
+    [rows, selectedIdSet],
+  );
+  // Drop ids whose rows left the sheet (deleted elsewhere / sync) so the
+  // count and the eventual batch can never target ghosts.
+  useEffect(() => {
+    setSelectedRowIds((current) => {
+      if (current.length === 0) {
+        return current;
+      }
+      const alive = new Set(rows.filter((row) => row.deleted !== true).map((row) => row.id));
+      const next = current.filter((id) => alive.has(id));
+      return next.length === current.length ? current : next;
+    });
+  }, [rows]);
+  const allVisibleSelected = matchingRows.length > 0
+    && matchingRows.every((row) => selectedIdSet.has(row.id));
+  const someVisibleSelected = matchingRows.some((row) => selectedIdSet.has(row.id));
+
+  const toggleRowSelected = useCallback((rowId: string, selected: boolean) => {
+    setSelectedRowIds((current) => {
+      if (selected) {
+        return current.includes(rowId) ? current : [...current, rowId];
+      }
+      return current.filter((id) => id !== rowId);
+    });
+  }, []);
+
+  // Select-all covers ONLY the currently matching (visible) rows.
+  const toggleSelectAllVisible = useCallback((selected: boolean) => {
+    setSelectedRowIds(selected ? matchingRows.map((row) => row.id) : []);
+  }, [matchingRows]);
+
+  // Keep React's selection in step with the grid's checkboxes (including
+  // its filtered header select-all). Synthetic rows never carry a record.
+  const handleSelectionChanged = useCallback((
+    event: SelectionChangedEvent<SheetGridRendererData>,
+  ) => {
+    const ids = event.api.getSelectedNodes()
+      .map((node) => node.data?.__sheetRow?.id)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
+    setSelectedRowIds((current) => (
+      current.length === ids.length && current.every((id) => ids.includes(id))
+        ? current
+        : ids
+    ));
+  }, []);
+
+  const gridRowSelection = useMemo(
+    () => sheetRowSelectionOptions<SheetGridRendererData>(canBulkDelete),
+    [canBulkDelete],
+  );
   const builtRows = useMemo(() => buildGridRows(rows, activeColumns, { today }), [rows, activeColumns, today]);
   const groupable = useMemo(() => groupableColumns(activeColumns), [activeColumns]);
   const groupColumn = useMemo(
     () => groupable.find((column) => column.id === groupByColumnId) ?? null,
     [groupable, groupByColumnId],
   );
+  // Live mirror for the row-number gutter's scroll-perf hint: the getter
+  // may use its O(1) fast path only while no Group-by headers are
+  // interleaved between records (draft row alone stays forced last).
+  const groupColumnRef = useRef(groupColumn);
+  groupColumnRef.current = groupColumn;
+  // Bug 2 redux: AG Grid MUTATES the draft row's data object when an editor
+  // commits into it (plain `field:` columns), so after a draft create the
+  // previous draft object still holds the committed name. Bumping this
+  // generation after every successful create guarantees the next render
+  // supplies a genuinely BLANK draft object — independent of whether the
+  // columns identity happened to change during the refresh — so no later
+  // editor can be seeded from the mutated object.
+  const [draftGeneration, setDraftGeneration] = useState(0);
+
   // SHEET-11 / R3 user decision: ONE blank draft row, placed immediately after
   // the last saved record (never pinned to the bottom of the viewport). The
   // first meaningful committed value turns it into a real record and a fresh
@@ -444,7 +579,7 @@ export function SheetPage({
       data[column.id] = null;
     });
     return data;
-  }, [activeColumns]);
+  }, [activeColumns, draftGeneration]);
 
   const displayRows = useMemo(() => {
     const visibleRows = builtRows.rows.filter((row) => matchingIds.has(row.__rowId));
@@ -508,11 +643,45 @@ export function SheetPage({
       rowIndex = draftIndex;
       pendingDraftFocusRef.current = { rowId, columnId, draftColumnId: target.draftColumnId };
     }
+    // Bug 2 redux — do not open the continuous-entry editor against a
+    // STALE or POLLUTED draft node. The handoff runs before the refreshed
+    // rowData necessarily reaches AG Grid: the grid can still hold the
+    // pre-refresh draft object whose fields AG mutated with the value just
+    // committed. Starting an editor there seeds it with that name; AG then
+    // swaps in the fresh blank draft, and stopping the editor re-commits
+    // the name as a "change" — the one-Enter duplicate loop. Wait (retry
+    // on the next frame / model update) until the grid's draft node IS
+    // the current blank draft object, and never open a handoff editor on
+    // a draft cell that already holds a value.
+    if (rowId === DRAFT_ROW_ID) {
+      if (renderedRowsRef.current !== latestRowsRef.current) {
+        return false; // the refresh has not been rendered yet
+      }
+      const currentDraft = displayRowsRef.current.find((row) => row.__rowId === DRAFT_ROW_ID);
+      const draftNode = api.getRowNode(DRAFT_ROW_ID) as
+        | { data?: SheetGridRendererData }
+        | null
+        | undefined;
+      if (!currentDraft || !draftNode || draftNode.data !== currentDraft) {
+        return false; // grid still holds the pre-refresh draft object
+      }
+      if (isMeaningfulDraftValue(draftNode.data?.[columnId])) {
+        // The current draft itself is polluted (a leaked committed value):
+        // force a blank draft and drop this handoff instead of opening an
+        // editor that could re-commit it.
+        setDraftGeneration((generation) => generation + 1);
+        pendingDraftFocusRef.current = null;
+        return true;
+      }
+    }
     try {
-      // Close the transient editor the Tab gesture opened on the draft row
-      // before the refreshed data arrived — one focused editor only.
+      // Close the transient editor the Tab/Enter gesture opened on the
+      // draft row before the refreshed data arrived — one focused editor
+      // only. CANCEL it: committing that transient editor is exactly how
+      // a pre-held value gets written into the fresh draft and counted as
+      // a new edit (the duplicate loop's commit leg).
       if (api.getEditingCells().length > 0) {
-        api.stopEditing();
+        api.stopEditing(true);
       }
       api.setFocusedCell(rowIndex, columnId);
       api.startEditingCell({ rowIndex, colKey: columnId });
@@ -624,7 +793,29 @@ export function SheetPage({
     try {
       if (pending.kind === 'row') {
         await repository.softDeleteRow(pending.row.id);
+        setSelectedRowIds((current) => current.filter((id) => id !== pending.row.id));
         setStatusMessage(`Moved ${displayLabel(pending.row, activeColumns)} to the recycle bin.`);
+      } else if (pending.kind === 'rows') {
+        // Bug 4: ONE bulk call down to the store's single transaction.
+        // Adapters without it (older test doubles) fall back to the same
+        // per-row soft deletes the single-row button already performs.
+        const ids = pending.rows.map((row) => row.id);
+        if (repository.softDeleteRows) {
+          await repository.softDeleteRows(ids);
+        } else {
+          for (const row of pending.rows) {
+            await repository.softDeleteRow(row.id);
+          }
+        }
+        setSelectedRowIds([]);
+        try {
+          gridApiRef.current?.deselectAll();
+        } catch {
+          // The grid may already be gone; the quiet refresh re-renders it.
+        }
+        setStatusMessage(
+          `Moved ${ids.length} row${ids.length === 1 ? '' : 's'} to the recycle bin.`,
+        );
       } else {
         await repository.softDeleteColumn(pending.column.id, role ?? '');
         setStatusMessage(`Removed ${pending.column.name}.`);
@@ -632,6 +823,8 @@ export function SheetPage({
       await refresh({ quiet: true });
       setPendingDelete(null);
     } catch (caught) {
+      // All-or-nothing: the store rolls the batch back; keep the dialog and
+      // the selection so the user sees the error and can retry or cancel.
       setError(caught instanceof Error ? caught.message : 'Unable to delete.');
     } finally {
       setDeleteBusy(false);
@@ -649,6 +842,9 @@ export function SheetPage({
     onRenew: handleRenew,
     // FIXES_UI §5.5 (SHEET-10): the `+` header opens Column Setup.
     onAddColumn: () => setWizardOpen(true),
+    // Row-number gutter scroll-perf hint (reads the live ref, so this
+    // context object stays referentially stable across group toggles).
+    syntheticRowsInterleaved: () => groupColumnRef.current !== null,
   }), [handleDuplicate, handleDelete, handleRenew]);
 
   const gridColumnDefs = useMemo(
@@ -766,7 +962,24 @@ export function SheetPage({
    */
   const draftCommitIntentRef = useRef<'tab' | 'enter' | null>(null);
   const draftCreateInFlightRef = useRef(false);
+  // Bug 2 redux: the value the CURRENT draft editing session STARTED with,
+  // captured from the row node at cellEditingStarted. A draft commit that
+  // merely re-applies this (meaningful) start value entered nothing during
+  // the session — it is the handoff/editor loop re-committing a leaked
+  // value, and handleCellValueChanged ignores it (see
+  // isDraftSessionStartRecommit). Null when no draft session is open.
+  const draftSessionStartRef = useRef<{ field: string; value: unknown } | null>(null);
+  // Bug 2: one stable client identity per draft-row commit. It is reused by
+  // every retry of that commit and rotates only when a NEW draft editing
+  // session begins after a successful create (see DraftCreateIdentityBox).
+  const draftCreateIdentityBox = useMemo(() => new DraftCreateIdentityBox(), []);
   const rememberGridKeyIntent = useCallback((event: ReactKeyboardEvent) => {
+    // A held key's auto-repeat and an IME-confirming Enter are not new
+    // commit gestures — they must neither re-arm the intent nor be treated
+    // as another physical Enter/Tab press.
+    if (isRepeatOrComposingKey(event)) {
+      return;
+    }
     if (event.key === 'Tab') {
       draftCommitIntentRef.current = 'tab';
     } else if (event.key === 'Enter') {
@@ -775,6 +988,25 @@ export function SheetPage({
       draftCommitIntentRef.current = null;
     }
   }, []);
+
+  /** Bug 2: starting to edit the (fresh) draft row rotates a consumed identity. */
+  const handleCellEditingStarted = useCallback((
+    event: CellEditingStartedEvent<SheetGridRendererData>,
+  ) => {
+    if (event.data?.__rowId === DRAFT_ROW_ID) {
+      draftCreateIdentityBox.prepareForNextDraftEdit();
+      // Bug 2 redux: remember what THIS draft session started with. If the
+      // session opened on a polluted draft (a leaked committed value), the
+      // snapshot holds that value and a later commit of the identical value
+      // is recognised as a no-input re-commit, not a new record.
+      const field = String(event.column?.getColId() ?? '');
+      draftSessionStartRef.current = field
+        ? { field, value: event.data?.[field] ?? null }
+        : null;
+    } else {
+      draftSessionStartRef.current = null;
+    }
+  }, [draftCreateIdentityBox]);
 
   const createFromDraft = useCallback(async (field: string, value: unknown) => {
     if (!field || field === DAYS_LEFT_COLUMN_ID || field === '__actions' || !isMeaningfulDraftValue(value)) {
@@ -791,7 +1023,40 @@ export function SheetPage({
     }
     draftCreateInFlightRef.current = true;
     try {
-      const created = await repository.createRow({ [field]: value });
+      // Bug 2, second layer: the in-flight guard above only covers calls
+      // that OVERLAP. A repeated commit that lands after the first create
+      // settles (focus-loss commit, held-Enter re-edit, IPC retry) carries
+      // the same client id + idempotency key, so the repository/store can
+      // recognise the retry and return the existing row instead of
+      // inserting a duplicate. The identity rotates when the next draft
+      // editing session begins (handleCellEditingStarted / draft inputs).
+      const identity = draftCreateIdentityBox.ensure();
+      const created = await repository.createRow({ [field]: value }, null, identity);
+      draftCreateIdentityBox.markConsumed();
+      // Bug 2 redux: retire the draft object AG mutated with this value so
+      // the next render's draft is blank by construction, and CANCEL any
+      // transient editor this same Enter/Tab gesture opened on the draft
+      // row BEFORE the refreshed rowData swaps draft objects underneath
+      // it. Committing (or letting the swap stop) that transient editor
+      // would write its pre-held value into the fresh blank draft and
+      // fire a second cellValueChanged — a duplicate record from one
+      // Enter. Only the draft row's editor is cancelled; an editor the
+      // user meanwhile opened on a real record is left untouched.
+      setDraftGeneration((generation) => generation + 1);
+      const apiBeforeRefresh = gridApiRef.current;
+      if (apiBeforeRefresh) {
+        try {
+          const draftIndex = rowIndexOfRowId(apiBeforeRefresh, DRAFT_ROW_ID);
+          if (
+            draftIndex !== null
+            && apiBeforeRefresh.getEditingCells().some((cell) => cell.rowIndex === draftIndex)
+          ) {
+            apiBeforeRefresh.stopEditing(true);
+          }
+        } catch {
+          // The grid can be torn down while the create is in flight.
+        }
+      }
       await refresh({ quiet: true });
       setStatusMessage('Added a new record.');
       const api = gridApiRef.current;
@@ -814,8 +1079,9 @@ export function SheetPage({
       setError(caught instanceof Error ? caught.message : 'Unable to add the record.');
     } finally {
       draftCreateInFlightRef.current = false;
+      draftSessionStartRef.current = null;
     }
-  }, [repository, refresh, editableColumnIds]);
+  }, [repository, refresh, editableColumnIds, draftCreateIdentityBox, flushPendingDraftFocus]);
 
   const handleCellValueChanged = useCallback(async (
     event: CellValueChangedEvent<SheetGridRendererData>,
@@ -825,6 +1091,25 @@ export function SheetPage({
       return;
     }
     if (event.data.__rowId === DRAFT_ROW_ID) {
+      // Bug 2 redux — the commit leg of the one-Enter duplicate loop: an
+      // editor that STARTED this draft session holding a leaked value and
+      // commits that identical value back entered nothing; AG only fires
+      // here because the draft node's data was swapped to blank underneath
+      // it, making the pre-held value look "changed". Never create from
+      // such a re-commit; force a blank draft so the leaked value AG just
+      // wrote into the draft object does not linger in the cell either.
+      const sessionStart = draftSessionStartRef.current;
+      if (
+        sessionStart
+        && sessionStart.field === field
+        && isDraftSessionStartRecommit(sessionStart.value, event.newValue)
+      ) {
+        draftSessionStartRef.current = null;
+        draftCommitIntentRef.current = null;
+        pendingDraftFocusRef.current = null;
+        setDraftGeneration((generation) => generation + 1);
+        return;
+      }
       await createFromDraft(field, event.newValue);
       return;
     }
@@ -1185,6 +1470,38 @@ export function SheetPage({
               ) : null}
             </div>
             <div className="sheet-toolbar__actions">
+              {/* Bug 4: bulk soft-delete. Shown only when 1+ real rows are
+                  checked, and only to roles that may soft-delete today.
+                  The count is the live selection, so the confirm that
+                  follows can state exactly what will move. */}
+              {canBulkDelete && selectedRowsForDelete.length > 0 ? (
+                <button
+                  className="button button--danger"
+                  type="button"
+                  disabled={deleteBusy}
+                  onClick={() => {
+                    setError(null);
+                    setPendingDelete({ kind: 'rows', rows: [...selectedRowsForDelete] });
+                  }}
+                >
+                  {`Delete selected (${selectedRowsForDelete.length})`}
+                </button>
+              ) : null}
+              {/* Bug 3: Refresh for every role with the `refresh` capability
+                  (Admin and Office) — previously the Visa Sheet had no
+                  Refresh button at all. Disabled (with the busy label)
+                  while a refresh/sync is running. */}
+              {canRefresh ? (
+                <button
+                  className="button button--secondary"
+                  type="button"
+                  aria-busy={refreshing}
+                  disabled={refreshing}
+                  onClick={() => void handleManualRefresh()}
+                >
+                  {refreshing ? 'Refreshing…' : 'Refresh'}
+                </button>
+              ) : null}
               {toolsMenu}
             </div>
             {/* OW-04: Office sees only records created in the last 3 calendar
@@ -1248,6 +1565,13 @@ export function SheetPage({
                   getContextMenuItems={getSheetContextMenuItems}
                   onGridReady={handleGridReady}
                   onCellValueChanged={handleCellValueChangedEvent}
+                  onCellEditingStarted={handleCellEditingStarted}
+                  // Bug 4: Community multi-row checkbox selection (header
+                  // select-all = filtered rows only). Only roles allowed to
+                  // soft-delete get it; selection mirrors into React state.
+                  rowSelection={gridRowSelection}
+                  selectionColumnDef={canBulkDelete ? SHEET_SELECTION_COLUMN_DEF : undefined}
+                  onSelectionChanged={handleSelectionChanged}
                   // The refreshed row set reaches the grid asynchronously: a
                   // pending draft-commit focus handoff is resolved here, when
                   // the new row indexes are final.
@@ -1259,7 +1583,13 @@ export function SheetPage({
                   // Shift+Tab the previous one; system columns are skipped.
                   tabToNextCell={handleTabToNextCell}
                   domLayout="normal"
-                  animateRows
+                  // Scroll perf: NO animateRows. This sheet replaces the
+                  // whole rowData (new row objects) on every quiet refresh
+                  // — cell edits, sync landings — so AG would run FLIP row
+                  // animations over a full update set on top of scroll
+                  // recycling. Row/column virtualization (AG defaults,
+                  // domLayout="normal") does the real work; sorting and
+                  // editing are unaffected, rows just don't glide.
                   {...GRID_KEYBOARD_PROPS}
                 />
               </div>
@@ -1301,6 +1631,24 @@ export function SheetPage({
               <table className="sheet-accessible-table" aria-label="Visa records table">
                 <thead>
                   <tr>
+                    {/* Bug 4: same checkbox-selection surface as the grid
+                        (header select-all covers only the filtered rows). */}
+                    {canBulkDelete ? (
+                      <th scope="col" className="sheet-select-cell">
+                        <input
+                          type="checkbox"
+                          aria-label="Select all visible rows"
+                          checked={allVisibleSelected}
+                          disabled={matchingRows.length === 0}
+                          ref={(element) => {
+                            if (element) {
+                              element.indeterminate = !allVisibleSelected && someVisibleSelected;
+                            }
+                          }}
+                          onChange={(event) => toggleSelectAllVisible(event.target.checked)}
+                        />
+                      </th>
+                    ) : null}
                     <th scope="col">Actions</th>
                     {activeColumns.map((column) => <th scope="col" key={column.id}>{column.name}</th>)}
                     {/* SHEET-10: the `+` add-column header (same surface as the
@@ -1330,6 +1678,16 @@ export function SheetPage({
                     );
                     return (
                       <tr key={row.id} className={rowClassForStatus(derived.status)}>
+                        {canBulkDelete ? (
+                          <td className="sheet-select-cell">
+                            <input
+                              type="checkbox"
+                              aria-label={`Select row ${displayLabel(row, activeColumns)}`}
+                              checked={selectedIdSet.has(row.id)}
+                              onChange={(event) => toggleRowSelected(row.id, event.target.checked)}
+                            />
+                          </td>
+                        ) : null}
                         <td>
                           <RowActions
                             row={row}
@@ -1357,6 +1715,7 @@ export function SheetPage({
                       row, so the "first meaningful value creates one record"
                       behaviour is exercised without a layout engine. */}
                   <tr className="sheet-draft-row" aria-label="New record">
+                    {canBulkDelete ? <td /> : null}
                     <td />
                     {activeColumns.map((column) => (
                       <td key={column.id}>
@@ -1365,6 +1724,8 @@ export function SheetPage({
                           aria-label={`New record ${column.name}`}
                           type="text"
                           defaultValue=""
+                          onFocus={() => draftCreateIdentityBox.prepareForNextDraftEdit()}
+                          onChange={() => draftCreateIdentityBox.prepareForNextDraftEdit()}
                           onBlur={(event) => {
                             const value = event.target.value;
                             if (isMeaningfulDraftValue(value)) {
@@ -1373,7 +1734,9 @@ export function SheetPage({
                             }
                           }}
                           onKeyDown={(event) => {
-                            if (event.key === 'Enter') {
+                            // Bug 2: a held Enter (repeat) or an
+                            // IME-confirming Enter must not commit again.
+                            if (event.key === 'Enter' && !isRepeatOrComposingKey(event)) {
                               event.currentTarget.blur();
                             }
                           }}
@@ -1397,7 +1760,9 @@ export function SheetPage({
         title={
           pendingDelete?.kind === 'column'
             ? `Delete column "${pendingDelete.column.name}"?`
-            : 'Move this record to the Recycle Bin?'
+            : pendingDelete?.kind === 'rows'
+              ? `Move ${pendingDelete.rows.length} row${pendingDelete.rows.length === 1 ? '' : 's'} to the Recycle Bin?`
+              : 'Move this record to the Recycle Bin?'
         }
         confirmLabel={pendingDelete?.kind === 'column' ? 'Delete column' : 'Move to Recycle Bin'}
         destructive
@@ -1417,6 +1782,11 @@ export function SheetPage({
             {pendingDelete.populated > 0
               ? ` ${pendingDelete.populated} record${pendingDelete.populated === 1 ? '' : 's'} currently hold a value in it.`
               : ' It is currently empty.'}
+          </p>
+        ) : pendingDelete?.kind === 'rows' ? (
+          <p>
+            The selected record{pendingDelete.rows.length === 1 ? '' : 's'} can be restored
+            individually from the Recycle Bin by an administrator.
           </p>
         ) : pendingDelete?.kind === 'row' ? (
           <p>

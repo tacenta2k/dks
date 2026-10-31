@@ -214,18 +214,85 @@ describe('Visa Sheet layout (R3 batch E)', () => {
   });
 
   it('makes the records grid fill all remaining viewport height', () => {
-    // Workbench is a full-height flex column; the grid wrap flexes to the
-    // bottom of the window.
+    // REGRESSION (owner report: grid rendered as a short ~9-row panel with
+    // empty space below): .sheet-page used
+    // `grid-template-rows: auto auto minmax(0, 1fr)`, but its children are
+    // [error?, status?, workbench] — so by grid auto-placement the
+    // workbench sat in an `auto` track unless BOTH alerts rendered, and
+    // collapsed to content height (grid ≈ 320px min-height). Checking the
+    // individual rule bodies below was NOT enough to catch that (this test
+    // used to pass while the layout was broken), so the sizing CHAIN from
+    // .sheet-page down to .sheet-grid is asserted as one contract:
+    // sheet-page is a flex column; alerts take natural height; the
+    // workbench flexes into the remainder; inside it the grid wrap flexes
+    // again; the grid takes 100% of the wrap. Every link allows shrinking
+    // (min-height: 0) so short windows cannot push the grid off-screen.
+
+    // 1. Page: flex column (placement-independent), still flexes itself.
+    const page = ruleBody(sheetCss, '.content.content--sheet .sheet-page {');
+    expect(page).toContain('display: flex');
+    expect(page).toContain('flex-direction: column');
+    expect(page).toContain('flex: 1');
+    expect(page).toContain('min-height: 0');
+    // The broken mechanism must not come back: sizing must never again
+    // depend on which grid track the workbench happens to land in. (Match
+    // a live declaration, not the historical note in the CSS comment.)
+    expect(page).not.toMatch(/(^|\n)\s*grid-template-rows\s*:/);
+
+    // 2. Workbench: consumes all height left after any alerts.
     const workbench = ruleBody(sheetCss, '.content--sheet .sheet-workbench {');
     expect(workbench).toContain('display: flex');
     expect(workbench).toContain('flex-direction: column');
-    expect(workbench).toContain('height: 100%');
+    expect(workbench).toContain('flex: 1 1 auto');
+    expect(workbench).toContain('min-height: 0');
 
+    // 3. Grid wrap + grid: flex to the bottom of the workbench, shrinkable
+    //    (no fixed pixel floor that only works at one window size).
     const wrap = ruleBody(sheetCss, '.content--sheet .sheet-grid-wrap {');
     expect(wrap).toContain('flex: 1 1 auto');
-    expect(wrap).toContain('min-height');
+    expect(wrap).toContain('min-height: 0');
 
-    const grid = ruleBody(sheetCss, '.content--sheet .sheet-grid {');
+    const grid = ruleBody(sheetCss, '.content.content--sheet .sheet-grid {');
     expect(grid).toContain('height: 100%');
+    expect(grid).toContain('min-height: 0');
+
+    // 4. ONE vertical scrollbar: the sheet content area hides overflow and
+    //    the grid scrolls internally (toolbar + column headers stay put).
+    const contentSheet = ruleBody(sheetCss, '.content.content--sheet {');
+    expect(contentSheet).toContain('overflow: hidden');
+    expect(contentSheet).toContain('min-height: 0');
+
+    // 5. Row virtualization preserved: bounded-height grid (domLayout
+    //    normal) instead of autoHeight growing the page per record.
+    expect(sheetPageSource).toContain('domLayout="normal"');
+    expect(sheetPageSource).not.toContain('autoHeight');
+
+    // 6. The accessible/test table keeps the same fill-and-scroll slot.
+    //    (Leading \n so the standalone sizing rule is matched, not the
+    //    earlier width-only multi-selector group rule.)
+    const tableWrap = ruleBody(sheetCss, '\n.content--sheet .sheet-accessible-table-wrap {');
+    expect(tableWrap).toContain('flex: 1 1 auto');
+    expect(tableWrap).toContain('overflow: auto');
+  });
+
+  it('alerts render as siblings above the workbench (why placement-independent sizing matters)', async () => {
+    // The store of the regression: error/status alerts are CONDITIONAL
+    // siblings before .sheet-workbench inside .sheet-page, so the layout
+    // must give the workbench the remaining height for 0, 1 or 2 alerts.
+    // The flex-column chain asserted above provides exactly that; this
+    // pins the DOM order that makes it necessary.
+    const repository = createInMemorySheetRepository();
+    await seedFixtureColumns(repository);
+    await repository.createRow({ name: 'Layout Person' });
+    const { container } = render(<SheetPage repository={repository} role="office" />);
+    await screen.findByLabelText('New record Name');
+    const page = container.querySelector('.sheet-page');
+    const workbench = container.querySelector('.sheet-workbench');
+    expect(page).toBeTruthy();
+    expect(workbench).toBeTruthy();
+    expect(page?.contains(workbench as Node)).toBe(true);
+    // Workbench is a direct child of .sheet-page (the flex item that gets
+    // flex: 1 1 auto in the sheet context).
+    expect((workbench as HTMLElement).parentElement).toBe(page);
   });
 });

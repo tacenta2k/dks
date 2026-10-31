@@ -380,11 +380,33 @@
   background: var(--color-primary-soft);
 }
 
-/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. */
+/* FIXES_UI §5.3 (SHEET-06): muted row-number gutter. The horizontal padding
+   is trimmed (same !important pattern as .sheet-actions-cell) so Quartz's
+   default 16px-per-side cell padding cannot squeeze multi-digit numbers
+   (10, 100, 1000…) down to their first digit. Tabular numerals keep every
+   digit the same width in both themes. */
 .sheet-row-number-cell {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
   color: var(--color-text-subtle);
   font-size: 11px;
+  font-variant-numeric: tabular-nums;
   text-align: center;
+}
+
+/* Bug 4: bulk-delete checkbox column (grid selection column + table). */
+.sheet-select-cell {
+  padding-left: 4px !important;
+  padding-right: 4px !important;
+  text-align: center;
+}
+.sheet-select-cell input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  vertical-align: middle;
+  accent-color: var(--color-primary);
+  cursor: pointer;
 }
 
 /* FIXES_UI §5.3 (SHEET-08): denser rows for a dense office data-entry screen. */
@@ -687,7 +709,16 @@
   max-width: none;
   flex: 1;
   min-height: 0;
-  grid-template-rows: auto auto minmax(0, 1fr);
+  /* Flex column, NOT grid tracks: the alert children above the workbench
+     are conditional (error / status), so with
+     `grid-template-rows: auto auto minmax(0, 1fr)` the workbench landed in
+     an `auto` track whenever fewer than two alerts rendered (i.e. almost
+     always) and collapsed to content height — the grid rendered at its
+     320px min-height (~9 rows) with the 1fr track left empty below it.
+     In a flex column each alert takes its natural height and the
+     workbench (flex: 1 1 auto, below) always consumes the rest. */
+  display: flex;
+  flex-direction: column;
   gap: 8px;
   margin-top: 0;
 }
@@ -708,7 +739,13 @@
 .content--sheet .sheet-workbench {
   display: flex;
   flex-direction: column;
-  height: 100%;
+  /* Take ALL height left in .sheet-page after any alerts (flex: 1 1 auto),
+     instead of `height: 100%` of a grid track whose size depended on how
+     many alert siblings happened to render. min-height: 0 lets it shrink
+     on short windows so the toolbar + grid stay inside the window and the
+     grid scrolls internally. */
+  flex: 1 1 auto;
+  height: auto;
   min-height: 0;
   padding: 8px;
   border-radius: 10px;
@@ -724,7 +761,11 @@
   position: relative;
   flex: 1 1 auto;
   height: auto;
-  min-height: 240px;
+  /* min-height: 0 (not a fixed floor): on short windows the wrap must be
+     able to shrink below 240px so the toolbar and grid stay within the
+     window; AG Grid virtualizes rows and scrolls internally at any
+     height, so no record or scrollbar becomes unreachable. */
+  min-height: 0;
 }
 
 .content--sheet .sheet-accessible-table-wrap {
@@ -733,9 +774,16 @@
   overflow: auto;
 }
 
-.content--sheet .sheet-grid {
+/* Double class again: `.sheet-grid-wrap .sheet-grid` below also sets
+   min-height: 320px for standalone (non-shell) embeddings with equal
+   specificity and later source order, so the shell rule must outrank it. */
+.content.content--sheet .sheet-grid {
   height: 100%;
-  min-height: 320px;
+  /* No 320px floor inside the app shell: the wrap already gives the grid
+     all remaining window height, and a fixed min-height would push the
+     grid's bottom (last rows, horizontal scrollbar) past the window edge
+     on short windows, where .content--sheet hides overflow. */
+  min-height: 0;
 }
 
 .sheet-grid-wrap {

@@ -29,6 +29,16 @@ export interface BuildGridRowsOptions {
 export interface GridColumnCallbacks extends RowActionsContext {
   /** FIXES_UI §5.5 (SHEET-10): opens Column Setup from the `+` header. */
   onAddColumn?: () => void;
+  /**
+   * Scroll-performance hint for the row-number gutter: true when synthetic
+   * rows (Group-by headers) are interleaved BETWEEN real records in the
+   * row model. When false, the ONLY synthetic row is the draft row, which
+   * SheetPage's postSortRows forces to the very end — so a real record's
+   * display number is exactly `rowIndex + 1` and the getter must not walk
+   * the whole model to count it. When absent/true, the getter falls back
+   * to exact counting (correct for grouped views and unit harnesses).
+   */
+  syntheticRowsInterleaved?: () => boolean;
 }
 
 export interface BuiltGridRows {
@@ -226,8 +236,28 @@ export function buildGridColumns(
       if (!params.data?.__sheetRow) {
         return '';
       }
-      const api = params.api;
       const rowIndex = params.node?.rowIndex;
+      // Scroll perf: AG Grid calls this getter for every rendered gutter
+      // cell on every scroll repaint. Counting real records by walking the
+      // model (below) is O(displayed rows) PER CELL — with a full-height
+      // viewport (~40 rows) and N records that is ~40×N callback
+      // invocations per repaint (measured: 200k at N=5000), which made
+      // scrolling visibly laggy as sheets grew. When no synthetic rows are
+      // interleaved (grouping off), the only synthetic row is the draft,
+      // forced LAST by postSortRows, so every displayed row above a real
+      // record is itself a real record and the display number is exactly
+      // rowIndex + 1 — O(1), same result incl. after AG sort/filter
+      // (rowIndex is the post-filter/sort displayed index, and the draft
+      // stays last through both).
+      if (
+        typeof rowIndex === 'number'
+        && rowIndex >= 0
+        && callbacks.syntheticRowsInterleaved
+        && !callbacks.syntheticRowsInterleaved()
+      ) {
+        return rowIndex + 1;
+      }
+      const api = params.api;
       if (api && params.node && typeof api.forEachNodeAfterFilterAndSort === 'function') {
         let displayNumber = 0;
         let found = false;
@@ -267,9 +297,21 @@ export function buildGridColumns(
     sortable: false,
     filter: false,
     editable: false,
-    width: 40,
-    minWidth: 40,
-    maxWidth: 40,
+    // The valueGetter returns the FULL number (10, 100, 1000, …) — the old
+    // locked 40px width clipped it to its first digit: AG Grid Quartz pads
+    // cells with `--ag-cell-horizontal-padding` (2 × 8px grid size = 16px
+    // per side), leaving ~8px of content box in a 40px column, so rows
+    // 10–19 showed "1", 20–29 showed "2", etc. The gutter is now wide
+    // enough for 4+ digits at its 11px font, the cell's own padding is
+    // trimmed in CSS (sheet-row-number-cell), and there is deliberately NO
+    // maxWidth so nothing re-caps the column (and the user can widen it).
+    width: 56,
+    minWidth: 48,
+    valueFormatter: (params) => (
+      params.value === null || params.value === undefined || params.value === ''
+        ? ''
+        : String(params.value)
+    ),
     cellClass: 'sheet-row-number-cell',
   };
 
