@@ -17,6 +17,7 @@ import {
   settingsRecordToPartialSettings,
   settingsToRows,
 } from '../src/features/settings/settings-service';
+import { createSqliteStore } from '../electron/main/sqlite';
 
 /**
  * Settings → Workspace, currency symbol.
@@ -191,6 +192,27 @@ describe('currency symbol — save and reload', () => {
     const saved = onSettingsChange.mock.calls.at(-1)?.[0] as DksSettings;
     expect(saved.currency.symbol).toBe(OMANI_RIAL);
     expect(saved.currency.symbol).toHaveLength(4);
+  });
+
+  it('survives a real SQLite round trip (local settings + outbox)', () => {
+    const store = createSqliteStore({ filename: ':memory:' });
+    try {
+      store.setSettings({ currency: { code: 'OMR', symbol: OMANI_RIAL, decimals: 3 } });
+
+      const stored = store.getSettings().currency as { symbol?: string } | undefined;
+      expect(currencySymbolCodePoints(String(stored?.symbol))).toEqual(OMANI_RIAL_CODE_POINTS);
+
+      // The outbox payload is what sync sends to Supabase: same characters.
+      const queued = store.listOutbox('pending') as Array<{ payload?: unknown }>;
+      const currencyItem = queued.find((item) => (
+        (item.payload as { key?: string } | undefined)?.key === 'currency'
+      ));
+      const payloadSymbol = (currencyItem?.payload as { value?: { symbol?: string } } | undefined)
+        ?.value?.symbol;
+      expect(currencySymbolCodePoints(String(payloadSymbol))).toEqual(OMANI_RIAL_CODE_POINTS);
+    } finally {
+      store.close();
+    }
   });
 
   it('does not add anything to the value while the direction is applied', () => {
